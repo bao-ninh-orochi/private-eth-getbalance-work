@@ -245,6 +245,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "risepir-feed"
+version = "0.1.0"
+dependencies = [
+ "ikpir-common",
+ "risepir-client",
+ "risepir-proto",
+ "risepir-server",
+ "segmented-cuckoo",
+]
+
+[[package]]
 name = "risepir-proto"
 version = "0.1.0"
 dependencies = [

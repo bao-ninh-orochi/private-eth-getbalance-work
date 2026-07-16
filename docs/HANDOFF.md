@@ -17,14 +17,14 @@ for exact signatures; never guess an API.**
 
 ## Where things stand
 
-Four crates, **85 tests green**, all committed & signed:
-`risepir-proto` (geometry + codecs, 54), `risepir-server` (batched per-block server, 21),
-`risepir-client` (response rewind, 10). `risepir-feed`, HTTP, JSON-RPC, conformance, and
-benches are **not built yet**.
+Five crates, **93 tests green**, all committed & signed:
+`risepir-proto` (geometry + codecs, 54), `risepir-server` (batched per-block server +
+delete-on-zero, 23), `risepir-client` (response rewind, 10), `risepir-feed` (`Feed` trait
++ seeded mock, 6). HTTP, JSON-RPC, conformance, and benches are **not built yet**.
 
-The rewind, batching, and geometry are done and correct. **Task 1 (the value-encoding
-upgrade, ADR-0009) is now done** — the built code carries the 64-bit-effective
-`key_tag ‖ balance ‖ checksum` encoding. **Next is task 2** (`risepir-feed` mock).
+The rewind, batching, geometry, the value encoding (task 1, ADR-0009), and the mock feed
+(task 2, Stage 0.2 — `key_tag ‖ balance ‖ checksum`, delete-on-zero per ADR-0015) are all
+done. **Next is task 3** (HTTP transport, Stage 0.3).
 
 ## The binding rules (do not violate)
 
@@ -54,11 +54,13 @@ seed-0 fingerprint, so the two combine to ~2⁻⁶⁰. The client scan masks eac
 silent-wrong-answer). `Geometry::for_accounts` takes the `ValueCodec` and derives
 `value_bits`. FP-rate test with a non-vacuity control included. 85 tests green.
 
-**2. `risepir-feed` with a mock (Stage 0.2).** An interface `Feed` producing
-`BlockUpdate`s, plus a `mock` impl: ~1M keys, ~300 changes every 12 s, **realistic
-wei-scale balances** (not small ints — the delta codec's win depends on it). Deterministic
-and seeded. Wire it to `RisePirServer::apply_block` + the delta ring. Handle
-insert/update/**delete-on-zero** (ADR-0015).
+**2. `risepir-feed` with a mock (Stage 0.2). ✅ DONE.** `Feed` trait + seeded `MockFeed`
+(configurable ~1M keys, ~300 changes/block, realistic wei-scale balances, exact
+`balance_of` ground truth). `apply_block` gained delete-on-zero (ADR-0015). An end-to-end
+`tests/pipeline.rs` wires mock → `apply_block` → `DeltaRing` → client and diffs private
+answers against ground truth across live / high-activity / deleted / never-existed
+accounts — deleted keys asserted to read back as exactly `NotFound` (a real removal, and
+the first coverage of the rewind handling deletes). 93 tests green.
 
 **3. HTTP transport (Stage 0.3).** `POST /answer`, `GET /delta/{block}` (immutable,
 cacheable), `GET /sync?from=&to=` (coalesced), `GET /setup`, `GET /head`. Binary codec via

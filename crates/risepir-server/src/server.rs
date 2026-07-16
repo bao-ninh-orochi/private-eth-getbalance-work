@@ -187,6 +187,11 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// # Per-change handling
     ///
     /// For each `(address_hash, balance)` in `update.changes`, in order:
+    /// 0. **`balance == 0` ⇒ delete** ([`CuckooKVStore::delete`],
+    ///    `docs/plan.md` ADR-0015). The store holds only nonzero balances,
+    ///    so zero means "gone", not "stored zero"; deleting an absent key
+    ///    is a no-op (it already answers `0x0` by absence), never an error.
+    ///    The remaining steps run only for a nonzero balance.
     /// 1. [`risepir_proto::ValueCodec::encode`] — hard-fails rather than
     ///    truncating an overflowing balance (`docs/plan.md` ADR-0009).
     /// 2. [`CuckooKVStore::update`], falling back to
@@ -256,6 +261,33 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         }
 
         for (addr, balance) in &update.changes {
+            // Delete-on-zero (ADR-0015): the database holds only *nonzero*
+            // balances — a lookup that misses returns `0x0` by absence — so
+            // a balance of `0` is a **deletion**, never a stored zero.
+            // Deleting a key that is not present is a no-op, not an error:
+            // an absent account already answers `0x0`, so setting it to
+            // zero changes nothing. (`CuckooKVStore::delete` returns
+            // `NotFound` in that case; the two other error arms cannot
+            // happen per its contract and are surfaced defensively, exactly
+            // as the `update`/`insert` arms below do.)
+            if *balance == 0 {
+                match self.store.delete(addr) {
+                    Ok(()) => {}
+                    Err(CuckooError::NotFound) => {}
+                    Err(CuckooError::InvalidParams(msg)) => {
+                        return Err(self.reject_block(ServerError::Store(msg)));
+                    }
+                    Err(CuckooError::TableFull) => {
+                        return Err(self.reject_block(ServerError::Store(
+                            "CuckooKVStore::delete returned TableFull, which its documented \
+                             contract says cannot happen"
+                                .to_string(),
+                        )));
+                    }
+                }
+                continue;
+            }
+
             let encoded = match self.value_codec.encode(addr, *balance) {
                 Ok(v) => v,
                 Err(e) => return Err(self.reject_block(ServerError::Encode(e))),
@@ -904,6 +936,72 @@ mod tests {
             changes: vec![(addr(0), overflow_balance - 1)],
         };
         assert!(s.apply_block(&ok_update).is_ok());
+    }
+
+    // ── delete-on-zero (ADR-0015) ───────────────────────────────────────
+
+    /// A `balance == 0` change for a key that was never inserted must be a
+    /// no-op: `Ok`, an empty delta, and the block still advances — never an
+    /// error. An absent account already answers `0x0` by absence, so
+    /// "setting it to zero" changes nothing.
+    #[test]
+    fn delete_absent_key_is_noop() {
+        let geom = geometry();
+        let mut s = server(&geom);
+        let delta = s
+            .apply_block(&BlockUpdate {
+                block: 1,
+                changes: vec![(addr(99_999), 0)],
+            })
+            .unwrap();
+        assert!(
+            delta.per_segment.iter().all(|seg| seg.is_empty()),
+            "a no-op delete must produce an empty delta"
+        );
+        assert_eq!(s.block(), 1, "even a no-op block advances the block counter");
+    }
+
+    /// `balance == 0` deletes a present key. Insert K, delete it, then
+    /// delete it again: the first delete changes cells; the second is a
+    /// no-op (K is already gone), proving the first actually *removed* K
+    /// rather than storing a zero value. (The full client-level proof that
+    /// a deleted key reads back as `NotFound` — which distinguishes a real
+    /// delete from an update-to-zero — lives in `risepir-feed`'s `pipeline`
+    /// integration test, which has a client; this crate cannot.)
+    #[test]
+    fn delete_on_zero_removes_key() {
+        let geom = geometry();
+        let mut s = server(&geom);
+        let k = addr(7);
+
+        s.apply_block(&BlockUpdate {
+            block: 1,
+            changes: vec![(k, 5_000_000_000_000_000_000u128)],
+        })
+        .unwrap();
+
+        let d2 = s
+            .apply_block(&BlockUpdate {
+                block: 2,
+                changes: vec![(k, 0)],
+            })
+            .unwrap();
+        assert!(
+            d2.per_segment.iter().any(|seg| !seg.is_empty()),
+            "deleting a present key must change cells"
+        );
+
+        let d3 = s
+            .apply_block(&BlockUpdate {
+                block: 3,
+                changes: vec![(k, 0)],
+            })
+            .unwrap();
+        assert!(
+            d3.per_segment.iter().all(|seg| seg.is_empty()),
+            "re-deleting an already-absent key must be a no-op (empty delta)"
+        );
+        assert_eq!(s.block(), 3);
     }
 
     // ── 4. delta_ring_window ─────────────────────────────────────────────

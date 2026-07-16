@@ -1,0 +1,21 @@
+[package]
+name        = "risepir-feed"
+version     = "0.1.0"
+edition.workspace = true
+publish     = false
+description = "Chain-follow feed for the RisePIR private eth_getBalance service: a Feed trait producing BlockUpdates plus a deterministic, seeded mock (Stage 0) with realistic wei-scale balances and exact ground truth. Real `rpc`/`exex` feeds come later (docs/sync.md)."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+risepir-proto = { path = "../risepir-proto" }
+
+# Dev-only: the integration test in `tests/pipeline.rs` drives the whole
+# mock -> apply_block -> DeltaRing -> client pipeline end-to-end. The crate
+# itself depends only on `risepir-proto`.
+[dev-dependencies]
+risepir-server   = { path = "../risepir-server" }
+risepir-client   = { path = "../risepir-client" }
+ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }

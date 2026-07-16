@@ -1,0 +1,34 @@
+[package]
+name        = "risepir-http"
+version     = "0.1.0"
+edition.workspace = true
+publish     = false
+description = "SimplePIR-concrete binary wire codec + axum HTTP server exposing the RisePIR endpoints (answer/sync/setup/head/delta) over risepir-server (docs/plan.md §3.4, ADR-0006, ADR-0010)."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# Sibling crates in this workspace.
+risepir-proto  = { path = "../risepir-proto" }
+risepir-server = { path = "../risepir-server" }
+
+# PATH dependencies for now, matching the sibling crates' own note: a local
+# checkout of the upstream research repo. A later step swaps these for a
+# pinned git dep once the fork/rev settle (docs/plan.md §4 / §9).
+ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }
+
+axum  = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+
+[dev-dependencies]
+# Dev-only: the integration test in `tests/http.rs` drives a MockFeed
+# genesis through a real client end to end. Never a runtime dependency of
+# this crate itself.
+risepir-feed   = { path = "../risepir-feed" }
+risepir-client = { path = "../risepir-client" }
+
+# `ServiceExt::oneshot` — in-process request driving with no real network.
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

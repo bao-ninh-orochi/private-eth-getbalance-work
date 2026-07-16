@@ -17,14 +17,15 @@ for exact signatures; never guess an API.**
 
 ## Where things stand
 
-Five crates, **93 tests green**, all committed & signed:
-`risepir-proto` (geometry + codecs, 54), `risepir-server` (batched per-block server +
+Six crates, **119 tests green**, all committed & signed:
+`risepir-proto` (geometry + codecs, 55), `risepir-server` (batched per-block server +
 delete-on-zero, 23), `risepir-client` (response rewind, 10), `risepir-feed` (`Feed` trait
-+ seeded mock, 6). HTTP, JSON-RPC, conformance, and benches are **not built yet**.
++ seeded mock, 6), `risepir-http` (axum transport + binary wire codec, 25). JSON-RPC,
+conformance, and benches are **not built yet**.
 
-The rewind, batching, geometry, the value encoding (task 1, ADR-0009), and the mock feed
-(task 2, Stage 0.2 — `key_tag ‖ balance ‖ checksum`, delete-on-zero per ADR-0015) are all
-done. **Next is task 3** (HTTP transport, Stage 0.3).
+The rewind, batching, geometry, the value encoding (task 1), the mock feed (task 2), and
+the HTTP transport (task 3, Stage 0.3 — answer/sync/setup/head/delta, exact-length binary
+codec, fuzzed no-panic) are all done. **Next is task 4** (JSON-RPC `:8545`, Stage 0.4).
 
 ## The binding rules (do not violate)
 
@@ -62,9 +63,13 @@ answers against ground truth across live / high-activity / deleted / never-exist
 accounts — deleted keys asserted to read back as exactly `NotFound` (a real removal, and
 the first coverage of the rewind handling deletes). 93 tests green.
 
-**3. HTTP transport (Stage 0.3).** `POST /answer`, `GET /delta/{block}` (immutable,
-cacheable), `GET /sync?from=&to=` (coalesced), `GET /setup`, `GET /head`. Binary codec via
-`risepir-proto`. `RwLock<Server>` on the hot path (ADR-0010). Length-validate all input.
+**3. HTTP transport (Stage 0.3). ✅ DONE.** New `risepir-http` crate: `POST /answer`,
+`GET /delta/{block}` (immutable/cacheable), `GET /sync?from=&to=` (coalesced), `GET /setup`,
+`GET /head`, all binary over `risepir-proto`'s codec + a SimplePIR-concrete wire codec.
+`tokio::RwLock<{server, ring, per_block}>` (ADR-0010). Every decoder pins each segment's
+`Vec<u32>` to its **exact** geometry length (a short query would otherwise panic
+`server_answer`'s release-mode indexing) and is fuzzed for no-panic/OOM; malformed bodies →
+400. End-to-end HTTP test diffs a real client's answers against mock ground truth.
 
 **4. JSON-RPC `:8545` (Stage 0.4).** `eth_getBalance` (private, via the client),
 `eth_chainId`, `eth_blockNumber` (= our head), `net_version`. **Deny everything else by

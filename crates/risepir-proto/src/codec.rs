@@ -373,11 +373,62 @@ pub fn encode_u32s(values: &[u32]) -> Vec<u8> {
     out
 }
 
+/// Streaming primitive [`decode_u32s`] is built on: reads one
+/// length-prefixed `Vec<u32>` starting at `*pos`, advancing `*pos` past it,
+/// *without* checking for trailing bytes afterward (`*pos` may still be
+/// short of `bytes.len()` on return — checking that is the caller's job,
+/// once the caller's own larger message is fully parsed).
+///
+/// Exposed directly (not just via [`decode_u32s`]) so a caller assembling a
+/// bigger multi-segment message out of several back-to-back `Vec<u32>`
+/// payloads — e.g. `risepir-http`'s wire bundles, which interleave several
+/// length-prefixed vectors with other fixed-size fields in one buffer — can
+/// decode each payload in place without first having to carve out an
+/// exact-length sub-slice for [`decode_u32s`] (which insists its *entire*
+/// input is exactly one vector).
+///
+/// `max_len` is a caller-supplied ceiling on the decoded length (e.g. the
+/// segment's expected query/response/hint length from
+/// [`crate::geometry::Sizes`]) — checked *before* the declared length is
+/// used to size an allocation, on top of the always-on remaining-bytes
+/// bound (see the module docs).
+///
+/// # Errors
+///
+/// [`CodecError::CountExceedsInput`] if the declared length exceeds
+/// `max_len` or the input cannot possibly hold that many `u32`s.
+/// [`CodecError::UnexpectedEof`] on a truncated final `u32`.
+pub fn read_u32s(bytes: &[u8], pos: &mut usize, max_len: usize) -> Result<Vec<u32>, CodecError> {
+    let len_raw = read_uvarint(bytes, pos)?;
+    if len_raw > max_len as u64 {
+        return Err(CodecError::CountExceedsInput);
+    }
+    let remaining = bytes.len() - *pos;
+    if len_raw > (remaining as u64) / 4 {
+        return Err(CodecError::CountExceedsInput);
+    }
+    let len = len_raw as usize;
+
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        let chunk: [u8; 4] = bytes
+            .get(*pos..*pos + 4)
+            .ok_or(CodecError::UnexpectedEof)?
+            .try_into()
+            .expect("slice of length 4");
+        out.push(u32::from_le_bytes(chunk));
+        *pos += 4;
+    }
+    Ok(out)
+}
+
 /// Inverse of [`encode_u32s`]. `max_len` is a caller-supplied ceiling on
 /// the decoded length (e.g. the segment's expected query/response/hint
 /// length from [`crate::geometry::Sizes`]) — checked *before* the declared
 /// length is used to size an allocation, on top of the always-on
-/// remaining-bytes bound (see the module docs).
+/// remaining-bytes bound (see the module docs). Delegates to [`read_u32s`]
+/// for the length-prefixed read itself, then additionally requires the
+/// input to contain *exactly* one such vector and nothing more.
 ///
 /// # Errors
 ///
@@ -388,26 +439,7 @@ pub fn encode_u32s(values: &[u32]) -> Vec<u8> {
 /// is fully read.
 pub fn decode_u32s(bytes: &[u8], max_len: usize) -> Result<Vec<u32>, CodecError> {
     let mut pos = 0usize;
-    let len_raw = read_uvarint(bytes, &mut pos)?;
-    if len_raw > max_len as u64 {
-        return Err(CodecError::CountExceedsInput);
-    }
-    let remaining = bytes.len() - pos;
-    if len_raw > (remaining as u64) / 4 {
-        return Err(CodecError::CountExceedsInput);
-    }
-    let len = len_raw as usize;
-
-    let mut out = Vec::with_capacity(len);
-    for _ in 0..len {
-        let chunk: [u8; 4] = bytes
-            .get(pos..pos + 4)
-            .ok_or(CodecError::UnexpectedEof)?
-            .try_into()
-            .expect("slice of length 4");
-        out.push(u32::from_le_bytes(chunk));
-        pos += 4;
-    }
+    let out = read_u32s(bytes, &mut pos, max_len)?;
     if pos != bytes.len() {
         return Err(CodecError::TrailingBytes);
     }
@@ -615,6 +647,28 @@ mod tests {
         let mut bytes = encode_u32s(&[1, 2, 3]);
         bytes.push(0);
         assert_eq!(decode_u32s(&bytes, 10), Err(CodecError::TrailingBytes));
+    }
+
+    /// [`read_u32s`]'s whole reason to exist: decode several length-prefixed
+    /// `Vec<u32>` payloads back-to-back out of one buffer, each starting
+    /// exactly where the previous one's `*pos` left off — the pattern
+    /// `risepir-http`'s multi-segment wire bundles depend on.
+    #[test]
+    fn read_u32s_streams_back_to_back() {
+        let a: Vec<u32> = vec![1, 2, 3];
+        let b: Vec<u32> = vec![];
+        let c: Vec<u32> = vec![42, 0xDEAD_BEEF];
+
+        let mut bytes = encode_u32s(&a);
+        bytes.extend_from_slice(&encode_u32s(&b));
+        bytes.extend_from_slice(&encode_u32s(&c));
+        bytes.push(0xFF); // trailing byte `read_u32s` must NOT consume or reject
+
+        let mut pos = 0usize;
+        assert_eq!(read_u32s(&bytes, &mut pos, 10).unwrap(), a);
+        assert_eq!(read_u32s(&bytes, &mut pos, 10).unwrap(), b);
+        assert_eq!(read_u32s(&bytes, &mut pos, 10).unwrap(), c);
+        assert_eq!(pos, bytes.len() - 1, "pos must stop right after the third vector, before the trailing byte");
     }
 
     #[test]

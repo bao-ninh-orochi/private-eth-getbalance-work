@@ -31,15 +31,16 @@ that turns "faster" into "otherwise impossible" (§7).
 
 ## 2. Current state
 
-Five crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
-(signed, Verified), **93 tests passing**:
+Six crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
+(signed, Verified), **119 tests passing**:
 
 | crate | what | tests |
 |---|---|---|
-| `risepir-proto` | geometry calculator, `BlockUpdate`/`BlockDelta`, value + delta codecs | 54 |
+| `risepir-proto` | geometry calculator, `BlockUpdate`/`BlockDelta`, value + delta codecs | 55 |
 | `risepir-server` | batched per-block server over the public primitives + delta ring | 23 |
 | `risepir-client` | the response-rewind client | 10 |
 | `risepir-feed` | chain-follow feed: `Feed` trait + deterministic seeded `MockFeed` | 6 |
+| `risepir-http` | axum transport (answer/sync/setup/head/delta) + SimplePIR binary wire codec | 25 |
 
 All three crates are stable and now carry the §3.5 / ADR-0009 value encoding —
 `key_tag ‖ balance ‖ checksum`, a 64-bit-effective fingerprint. The ordering trap is
@@ -48,8 +49,8 @@ SCF fingerprint + 32-bit `key_tag`, 100k negative queries, zero hits, with a
 non-vacuity control proving fp-only collisions actually occurred).
 
 `risepir-feed` ships the `mock` producer (Stage 0.2); its `rpc`/`exex` producers are
-Stage 1. Not yet built: the HTTP transport, the JSON-RPC front end, the conformance
-harness, the numbers table.
+Stage 1. Not yet built: the JSON-RPC front end, the conformance harness, the numbers
+table.
 
 ## 3. Architecture
 
@@ -155,6 +156,7 @@ crates/
   risepir-server/   batched per-block server over public primitives + delta ring       [built]
   risepir-client/   rewind client + (todo) JSON-RPC :8545                              [built]
   risepir-feed/     BlockUpdate producers: mock | rpc | (exex)                          [mock built]
+  risepir-http/     axum transport + binary wire codec (answer/sync/setup/head/delta)   [built]
 xtask/              conformance, bench, geometry CLI                                    [todo]
 .cargo/config.toml  target-cpu=native   ← git deps do NOT inherit the upstream perf config
 ```
@@ -211,7 +213,7 @@ before touching real data.
 |---|---|---|
 | 0.1 ✅ | value-encoding upgrade (§4.2) | **done** — 85 tests green; FP rate ~2⁻⁶⁰ asserted |
 | 0.2 ✅ | `risepir-feed` mock: 1M keys, ~300 changes/12 s, **realistic wei-scale balances** | **done** — deterministic/seeded; delete-on-zero + end-to-end pipeline test |
-| 0.3 | HTTP transport (answer/sync/setup/head) + delta objects | malformed bytes → clean error, no panic/OOM |
+| 0.3 ✅ | HTTP transport (answer/sync/setup/head) + delta objects | **done** — exact-length codec, fuzzed no-panic/OOM, end-to-end over HTTP |
 | 0.4 | JSON-RPC `:8545` (`eth_getBalance`, `eth_chainId`, `eth_blockNumber`, `net_version`) | `cast balance --rpc-url localhost:8545` works |
 | 0.5 | conformance vs. in-process ground truth | ≥1000 addrs × ≥100 blocks, all categories, one pass/fail command |
 | 1.x | real mainnet: snapshot + `risepir-feed` rpc + reconciliation | diff vs archive RPC per block |

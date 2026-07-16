@@ -1,0 +1,62 @@
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+//! HTTP transport for the RisePIR private `eth_getBalance` service
+//! (`docs/plan.md` §3.4, Stage 0.3): a SimplePIR-concrete binary wire codec
+//! ([`wire`]) plus an axum server exposing it ([`node`]).
+//!
+//! # Two calls; the response names the epoch (ADR-0006)
+//!
+//! ```text
+//! POST /answer            → (responses, block E')   # answered at the server's head
+//! GET  /sync?from=&to=    → coalesced delta, or 409  # client resync convenience
+//! GET  /delta/{block}     → one immutable per-block delta, cacheable forever
+//! GET  /setup             → the full SetupBundle (params + backend_params + hints)
+//! GET  /head              → the server's current block, as an 8-byte LE u64
+//! ```
+//!
+//! `docs/plan.md` ADR-0006: raw HTTP + a purpose-built binary codec (never
+//! JSON — base64 would inflate the ~400 KB query/response payloads
+//! ~1.37×), and deltas are immutable per-block objects, which is exactly
+//! what makes `/delta/{block}` cacheable forever
+//! (`Cache-Control: public, max-age=31536000, immutable`).
+//!
+//! # Concurrency (ADR-0010)
+//!
+//! [`node::NodeState`] wraps the PIR server in a `tokio::sync::RwLock`: the
+//! concrete `RisePirServer<Segmented3aryScheme, SimplePirBackend>` is
+//! auto-`Send + Sync` (verified in `risepir-server`'s own test suite), so
+//! the lock gives concurrent readers on the hot `/answer` path; the writer
+//! ([`node::NodeState::apply_block`], called by the block-following driver,
+//! not exposed over HTTP) takes it only once per block.
+//!
+//! # Security model — this is a security surface
+//!
+//! `POST /answer`'s body is attacker-controlled, multi-hundred-KB-scale
+//! input. Every length or count this crate reads off the wire is validated
+//! against the bytes actually remaining in the input *before* it is used
+//! to size an allocation or index a slice — see [`wire`]'s module docs,
+//! which mirrors the discipline `risepir_proto::codec` already
+//! established, plus (going one step further, since this crate is the one
+//! that feeds decoded values straight into `RisePirServer::answer`'s
+//! per-segment matvec) an *exact*-length check on every segment's `Vec<u32>`
+//! payload, not merely an upper bound — see [`wire`]'s per-function docs
+//! for the out-of-bounds panic this closes downstream. Malformed,
+//! truncated, or adversarial bytes always produce a clean `Err` (surfaced
+//! over HTTP as `400 Bad Request`), never a panic, an OOM, or a silently
+//! wrong response.
+//!
+//! # Scope
+//!
+//! Stage 0.3 only: the transport and its codec. No JSON-RPC front end yet
+//! (Stage 0.4) — this crate exposes the raw PIR endpoints only. Deliberately
+//! SimplePIR-concrete rather than generic over `IncrementalPirBackend`:
+//! `docs/plan.md` ADR-0002 already commits this deployment to SimplePIR
+//! (RisePIR-S), and a backend-generic wire format would have to either
+//! erase `SimpleServerParams`' reshape geometry (which has no Frodo
+//! equivalent) or grow a discriminant byte nothing here needs yet.
+
+pub mod node;
+pub mod wire;
+
+pub use node::{NodeState, MAX_ANSWER_BODY_BYTES};
+pub use wire::WireError;

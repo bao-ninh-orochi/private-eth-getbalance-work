@@ -2,12 +2,20 @@
 //!
 //! ```text
 //! xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]
+//! xtask bench [--write]
 //! ```
 //!
-//! Runs the Stage 0.5 conformance harness (`docs/plan.md` §6, §8) and
-//! exits `0` on pass, `1` on fail — the one pass/fail command Stage 0.5
-//! asks for. Omitted flags default to the real gate
+//! `conformance` runs the Stage 0.5 conformance harness (`docs/plan.md`
+//! §6, §8) and exits `0` on pass, `1` on fail — the one pass/fail command
+//! Stage 0.5 asks for. Omitted flags default to the real gate
 //! (`xtask::conformance::ConformanceConfig::default()`).
+//!
+//! `bench` runs the Stage 3 measured numbers table (`docs/plan.md` §7,
+//! `docs/verification.md` §7) — see `xtask::bench` — and prints it to
+//! stdout; pass `--write` to also overwrite `docs/numbers.md` (a curated
+//! reference measured against IKPIR perf/optimized `042d868` — only overwrite
+//! from that build). Always run with `--release` (see `xtask::bench`'s module
+//! docs for why).
 
 use xtask::conformance::{self, ConformanceConfig};
 
@@ -15,6 +23,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("conformance") => run_conformance(&args[2..]),
+        Some("bench") => run_bench(&args[2..]),
         Some("--help" | "-h") | None => {
             print_usage();
             std::process::exit(0);
@@ -97,4 +106,94 @@ fn parse_value<T: std::str::FromStr>(args: &[String], i: &mut usize, name: &str)
 
 fn print_usage() {
     eprintln!("usage: xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]");
+    eprintln!("       xtask bench [--write]");
+}
+
+/// Runs the Stage 3 measured numbers table
+/// (`xtask::bench::BenchConfig::default()`), prints it to stdout, and — only
+/// with `--write` — overwrites `docs/numbers.md` (see the "IKPIR build" note
+/// the report carries for why the write is opt-in). The harness is
+/// deterministic (fixed mock seed) by design so re-runs are comparable, per
+/// the brief.
+fn run_bench(rest: &[String]) {
+    let mut write = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--write" => write = true,
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("xtask bench: unknown argument: {other}");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let cfg = xtask::bench::BenchConfig::default();
+    println!(
+        "Running bench: scales {:?}, mid_scale {}, K values {:?} (docs/plan.md §7, docs/verification.md §7)",
+        cfg.scales, cfg.mid_scale, cfg.k_values
+    );
+
+    let report = xtask::bench::run(&cfg);
+    let markdown = report.to_markdown(&machine_note(), &bench_date());
+
+    println!();
+    println!("{markdown}");
+
+    // `docs/numbers.md` is a *curated reference* measured against IKPIR
+    // perf/optimized (042d868) — see the "IKPIR build" note the report itself
+    // carries. Overwriting it is therefore an explicit, opt-in choice
+    // (`--write`), and should only be done from a build against 042d868, so a
+    // casual run against the current `main`-based local path-dep cannot silently
+    // clobber the reference with slower single-threaded numbers.
+    if write {
+        let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/numbers.md");
+        std::fs::write(&out_path, &markdown)
+            .unwrap_or_else(|e| panic!("xtask bench: failed to write {}: {e}", out_path.display()));
+        println!("Wrote {} — ensure this build was against IKPIR perf/optimized (042d868).", out_path.display());
+    } else {
+        println!("(printed only; pass `--write` to overwrite docs/numbers.md — only from a build against IKPIR 042d868)");
+    }
+}
+
+/// Best-effort machine description via `sysctl` (macOS core count / RAM),
+/// falling back to the static label `docs/verification.md` itself uses if
+/// `sysctl` is unavailable (e.g. a non-macOS host).
+fn machine_note() -> String {
+    let cores = sysctl_u64("hw.physicalcpu");
+    let mem_bytes = sysctl_u64("hw.memsize");
+    match (cores, mem_bytes) {
+        (Some(cores), Some(mem)) => {
+            let gib = mem as f64 / (1024.0 * 1024.0 * 1024.0);
+            format!("{cores}-core Apple Silicon, {gib:.0} GB RAM, target-cpu=native (.cargo/config.toml)")
+        }
+        _ => "8-core Apple Silicon, 16 GB RAM, target-cpu=native, lwe_dim=1275, ADR-0009 144-bit value \
+              (docs/verification.md's environment line)"
+            .to_string(),
+    }
+}
+
+fn sysctl_u64(name: &str) -> Option<u64> {
+    let output = std::process::Command::new("sysctl").args(["-n", name]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+}
+
+/// Real wall-clock date the bench actually ran, via the `date` command, so
+/// `docs/numbers.md` is stamped automatically rather than hand-typed.
+fn bench_date() -> String {
+    std::process::Command::new("date")
+        .arg("+%Y-%m-%d")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown date".to_string())
 }

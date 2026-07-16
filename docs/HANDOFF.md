@@ -17,16 +17,23 @@ for exact signatures; never guess an API.**
 
 ## Where things stand
 
-Seven crates, **134 tests green**, all committed & signed:
+Seven crates, **135 tests green**, all committed & signed:
 `risepir-proto` (55), `risepir-server` (+delete-on-zero, 23), `risepir-client` (10),
 `risepir-feed` (seeded mock, 6), `risepir-http` (axum transport + binary wire codec + HTTP
-client, 30), `risepir-rpc` (JSON-RPC :8545 + demo binary, 9), `xtask` (conformance gate, 1).
+client, 30), `risepir-rpc` (JSON-RPC :8545 + demo binary, 9), `xtask` (conformance gate +
+bench, 2).
 
-**Stage 0 is complete** (tasks 1–5): the value encoding, mock feed, HTTP transport, private
-JSON-RPC `:8545` (`cast balance` verified), and the conformance gate (`cargo run -p xtask
---release -- conformance`: 1201×120, all five categories, 0 mismatches, exit 0) are all done
-and committed. **Next is task 6** (the measured numbers table, Stage 3), then real mainnet
-data (Stage 1). The numbers table is **not built yet**.
+**Stage 0 AND the Stage 3 numbers table are complete** (tasks 1–6, all committed & signed):
+the value encoding, mock feed, HTTP transport, private JSON-RPC `:8545` (`cast balance`
+verified), the conformance gate (1201×120, all categories, 0 mismatches), and the measured
+numbers table (`xtask bench` → `docs/numbers.md`, full-rebuild-vs-patch headline) are done.
+
+**What's left is real mainnet data (Stage 1)** — gated on the decision the user must run: a
+GCP-free-tier `bq` query confirming `crypto_ethereum.balances` freshness + the nonzero count
+that fixes the geometry (`docs/data-acquisition.md`), then a `risepir-feed` `rpc` producer,
+snapshot ingest, and per-block reconciliation vs archive `eth_getBalance`. Also open: switch
+the IKPIR path deps to the pinned git dep `rev = 042d868` (`docs/numbers.md`'s provenance
+note explains why this matters for reproducing the §7 headline).
 
 ## The binding rules (do not violate)
 
@@ -88,11 +95,13 @@ never-existed, created-during-run, contract), diffing at 13 checkpoints (continu
 pinned at genesis so every query exercises the full rewind). Any under-sample or empty
 category is a loud `HARNESS:` failure, so a vacuous pass is impossible.
 
-**6. Numbers table (Stage 3).** Measure (don't guess): per-block patch time as a **curve
-over mutations/block**, per-block delta bytes (naive vs compact codec, on realistic
-balances), hint size, query/response bytes, answer latency, client memory, and — the
-headline denominator — **full-rebuild time**. Use the `perf/optimized` worktree +
-`target-cpu=native`.
+**6. Numbers table (Stage 3). ✅ DONE.** `xtask bench` (`crates/xtask/src/bench.rs`) measures
+— with `std::time::Instant` against the real built server, at `lwe_dim = 1275` and realistic
+wei-scale balances — full-rebuild time (100K/1M/9.4M), the per-block-patch curve over K,
+delta compaction (3.35× on realistic balances), answer latency, and computed sizes/client
+memory, into [`docs/numbers.md`](numbers.md) (opt-in `--write`). Headline at 9.4M:
+rebuild 6.2 s vs patch ~3 ms → ~2100× (perf/optimized `042d868`). Provenance caveat recorded
+in `numbers.md` (measured against `042d868`; the local path-dep is on `main`, ~25× slower).
 
 **Then real data (Stage 1):** a `risepir-feed` `rpc` impl (dRPC, keyless: `prestateTracer`
 ⊕ `block.withdrawals[]`, per `docs/sync.md`), snapshot ingest from BigQuery

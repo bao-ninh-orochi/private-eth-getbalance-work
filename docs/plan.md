@@ -32,7 +32,7 @@ that turns "faster" into "otherwise impossible" (§7).
 ## 2. Current state
 
 Seven crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
-(signed, Verified), **134 tests passing**:
+(signed, Verified), **135 tests passing**:
 
 | crate | what | tests |
 |---|---|---|
@@ -42,10 +42,12 @@ Seven crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalanc
 | `risepir-feed` | chain-follow feed: `Feed` trait + deterministic seeded `MockFeed` | 6 |
 | `risepir-http` | axum transport (answer/sync/setup/head/delta) + binary wire codec + HTTP client | 30 |
 | `risepir-rpc` | JSON-RPC `:8545` front end (private `eth_getBalance`, deny-by-default) + demo binary | 9 |
-| `xtask` | conformance harness (the Stage 0.5 gate) + CLI | 1 |
+| `xtask` | conformance harness (Stage 0.5 gate) + `bench` numbers table (Stage 3) + CLI | 2 |
 
-Beyond unit tests: `cargo run -p xtask --release -- conformance` is the Stage 0.5 gate —
-1201 addresses × 120 blocks, all five account categories, 0 mismatches, exit 0.
+Beyond unit tests: `cargo run -p xtask --release -- conformance` is the Stage 0.5 gate
+(1201 addresses × 120 blocks, all five account categories, 0 mismatches, exit 0), and
+`xtask bench` measures the Stage 3 numbers table into [`docs/numbers.md`](numbers.md)
+(full-rebuild vs per-block-patch headline, delta compaction, sizes, answer latency).
 
 All three crates are stable and now carry the §3.5 / ADR-0009 value encoding —
 `key_tag ‖ balance ‖ checksum`, a 64-bit-effective fingerprint. The ordering trap is
@@ -222,7 +224,7 @@ before touching real data.
 | 0.4 ✅ | JSON-RPC `:8545` (`eth_getBalance`, `eth_chainId`, `eth_blockNumber`, `net_version`) | **done** — `cast balance --rpc-url localhost:8545` verified against the mock |
 | 0.5 ✅ | conformance vs. in-process ground truth | **done** — `xtask conformance`: 1201×120, all 5 categories, 0 mismatches, exit 0 |
 | 1.x | real mainnet: snapshot + `risepir-feed` rpc + reconciliation | diff vs archive RPC per block |
-| 3.x | numbers table (measured, not guessed) | incl. **full-rebuild time** — the §7 denominator |
+| 3.x ✅ | numbers table (measured, not guessed) | **done** — `xtask bench` → [`docs/numbers.md`](numbers.md); full-rebuild denominator measured |
 
 ## 7. The headline, measured
 
@@ -239,6 +241,12 @@ Rebuild is memory-bandwidth-bound, so parallelism does not rescue it. Report our
 brief's "10⁵–10⁶×" divides an out-of-cache rebuild by an in-cache patch; the honest
 measured ratio is ~10³× at 9.4M, ~10⁴–10⁵× at mainnet). Server RAM at ~100M nonzero
 with the §3.5 encoding: **~12 GB** — it runs on a normal machine.
+
+The full measured Stage-3 table — every scale, the per-block-patch curve over
+mutations/block, delta compaction on realistic balances, sizes, and answer latency — is
+in [`docs/numbers.md`](numbers.md), produced by `xtask bench`. It is measured against the
+IKPIR `perf/optimized` build (`042d868`); see that file's "IKPIR build" note (the current
+local path-dep is on `main`, which lacks the parallel kernels, so it measures slower).
 
 ## 8. Never-return-a-wrong-answer checklist
 

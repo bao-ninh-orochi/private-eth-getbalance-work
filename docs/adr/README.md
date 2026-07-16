@@ -173,20 +173,66 @@ and works with the default.
 **Deferred:** adding **nonce** to the value would make `eth_getTransactionCount`
 nearly free and double the private surface, at ~+50% `row_width` — measure first.
 
-### ADR-0013 — Staged universe: mock → bounded Sepolia → full state **[NEW, forced by hardware]**
+### ADR-0013 — Staged universe: mock → complete mainnet snapshot **[REVISED — supersedes the bounded-Sepolia plan]**
 
-**Chosen:** Stage 0 synthetic (complete universe, full machine); Stage 1 real Sepolia
-over a **bounded** universe from the Xatu dataset; Stage 2 full state, shipped as
-code + runbook.
-**Rejected:** going straight at full Sepolia state, which §0 implies.
-**Why:** a Sepolia node needs **735.7 GB** (measured) against 303 GB free, and a
-full-Sepolia server needs **~13.9 GB RAM** against a 16 GB box. Hardware, not
-scheduling.
-**The honest gap, stated plainly:** with a bounded universe, "not in filter" means
-"not in *my* universe" ⊋ "does not exist", so a real account outside it would get
-`0x0` — a wrong answer. Therefore **Stage 1 errors on not-found rather than
-returning `0x0`**, and draws its conformance sample from (universe ∪
-random-nonexistent); random 20-byte addresses are nonexistent with overwhelming
-probability, so §0's "never existed → `0x0`" category is still tested honestly.
-**Only Stage 2 closes this**, because only full state makes "not in filter ⟺ does
-not exist" true.
+**Chosen (revised):** Stage 0 synthetic (complete universe, full machine); Stage 1
+**complete mainnet** nonzero-balance set from a downloadable snapshot (ADR-0014),
+kept current from the block stream; Stage 2 (self-hosted node) demoted to optional.
+**Superseded:** the earlier "bounded Sepolia universe" plan, which existed only to
+work around not having full state.
+**Why the change:** two findings dissolved the constraint that forced bounding.
+(1) ADR-0015 — storing only *nonzero* balances plus (2) ADR-0014 — a downloadable
+mainnet balance snapshot together make a **complete** account set acquirable in
+single-digit GB, with no node. Once the set is complete, "not in filter ⟺
+zero-or-nonexistent ⟺ answer `0x0`" is **exact**, so the honesty gap that the bounded
+universe created — where not-found had to error because it might be a real account we
+lacked — simply disappears. Stage 1 returns `0x0` for not-found, matching real RPC
+semantics, and the §0 "never existed → `0x0`" category is genuinely satisfied rather
+than approximated.
+**Mainnet over Sepolia** (also the user's stated preference): Sepolia turned out to be
+~150M accounts / 735 GB / announced sunset (Corrections 7–8), so it buys none of the
+smallness it was chosen for, and its 1M–4M cross-validation rationale was already void.
+Mainnet is now the *easier* target, not the harder one.
+**Residual honesty note:** completeness is only as good as the snapshot. A snapshot
+missing accounts (stale dataset, incomplete snap walk) reintroduces the wrong-answer
+risk — so ingest validates the snapshot's account count against an independent estimate
+and the conformance run diffs against a live archive RPC across the sample. Never trust
+the snapshot blindly.
+
+### ADR-0014 — Acquire the snapshot from BigQuery balances; snap download as fallback **[NEW]**
+
+**Chosen:** obtain the initial `address → balance` snapshot from the public **BigQuery
+`crypto_ethereum.balances`** table (or the Google-managed `goog_blockchain_ethereum_mainnet_us`
+if the former is stale) — a regularly-refreshed native-ETH balance snapshot, queried
+free within BigQuery's 1 TB/month tier and exported to GCS. Fall back to an
+**account-only `snap` download** (Nethereum `SnapSyncClient`, verified to exist) if the
+dataset is unusable — trustless via Merkle range proofs, ~20–30 GB, storage skipped.
+**Rejected:** running a 1.2 TB node (the whole point is to avoid it); Xatu diff-replay
+for the snapshot (measured 204–383 GB download, may not reach head — kept only as the
+conformance oracle for bounded windows).
+**Why:** native balance is a tiny, hash-keyed slice of state; a node drags in storage
+and history we never read. BigQuery is the "download the answer" path; snap is the
+"trustless self-host" path. Full analysis and the verified probes in
+[`docs/data-acquisition.md`](../data-acquisition.md).
+**Decision gate before building ingest:** one `bq` query confirms freshness *and*
+returns `count(*) WHERE eth_balance > 0`, which fixes the geometry. Needs a GCP free-tier
+account; cannot be run from this environment.
+**Staying current:** RPC block stream (`prestateTracer ⊕ block.withdrawals[]`), or SQD
+state diffs, or BigQuery's own refresh — all trivial at ~300 rows/block.
+
+### ADR-0015 — Store only nonzero balances; `0x0` by absence **[NEW]**
+
+**Chosen:** the database holds only accounts with **nonzero** balance. A lookup that
+misses the filter returns `0x0`.
+**Rejected:** storing all ~300M ever-seen accounts (most now zero).
+**Why:** `eth_getBalance` cannot distinguish a nonexistent account from an existing
+zero-balance one — both are `0x0`. So zero-balance accounts carry no information and
+need not be stored; their absence *is* the correct answer. This is exact, and it
+(a) shrinks the set from ~300M to ~100M, halving the server to ~9 GB, and (b) removes
+the bounded-universe honesty gap (ADR-0013), because with a complete nonzero set,
+absence unambiguously means "balance is zero".
+**Interaction with the false-positive caveat:** a cuckoo false positive (~2⁻²⁷–2⁻²⁹ at
+our geometry) can still make an absent account return garbage instead of `0x0` — that
+is inherited from the ChalametPIR line, stated in §7, and the conformance run includes
+nonexistent addresses to bound it. Nonzero-only storage does not change that rate; it
+only removes the *systematic* gap, not the probabilistic one.

@@ -342,7 +342,9 @@ changes/block *understates* the mainnet operating point of ~300.
 | 0010 | Strict lockstep behind a Mutex | **Yes** — brief said per-request instances |
 | 0011 | Persist the authoritative account map; rebuild SCF+hint on restart | Brief left open |
 | 0012 | Non-`getBalance` methods: **deny by default**, opt-in proxy with a loud warning | Brief leaned pragmatic-proxy |
-| 0013 | Staged universe: mock → bounded Sepolia → full state | **New** — forced by hardware |
+| 0013 | Staged universe: mock → **complete mainnet snapshot** → optional node | **Revised** — mainnet, not bounded Sepolia |
+| 0014 | Acquire snapshot from **BigQuery balances**; snap download as fallback | **New** — see `data-acquisition.md` |
+| 0015 | Store **only nonzero** balances; `0x0` by absence | **New** — exact, halves the DB, closes the honesty gap |
 
 Two open, deferred with reasons: **nonce in the value** (`eth_getTransactionCount`
 nearly free, +50% `row_width` — measure first) and **shard parameter** (k-anonymity
@@ -376,6 +378,14 @@ dial; a good paper table, not pure PIR).
 
 ## 9. Immediate next steps
 
-1. Land Sepolia account count → run the geometry tool → freeze Stage-0 geometry.
-2. Implement Stage 0 in order 0.1 → 0.6 (Sonnet).
-3. `cast balance` against the mock is the Stage-0 gate. Only then touch the chain.
+1. **Target is mainnet, not Sepolia** (ADR-0013). Data acquisition is settled in
+   [`data-acquisition.md`](data-acquisition.md): download the nonzero-balance snapshot
+   from BigQuery `crypto_ethereum.balances` (or `goog_blockchain_ethereum_mainnet_us`),
+   keep current from the block stream. Server fits in ~9 GB — it runs here.
+2. **Decision gate (needs a GCP free-tier account; I can't run it):** one `bq` query to
+   (a) confirm the table is fresh in 2026 and (b) get `count(*) WHERE eth_balance > 0`.
+   That count fixes the geometry. Until then, Stage 0 proceeds on synthetic data.
+3. Implement Stage 0 in order 0.1 → 0.6 (Sonnet). `risepir-proto` and `risepir-server`
+   are done (72 tests); `risepir-client` (the rewind) is next — it was interrupted at
+   the usage cap and needs re-running.
+4. `cast balance` against the mock is the Stage-0 gate. Only then wire the real snapshot.

@@ -90,6 +90,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikpir-server"
+version = "0.1.0"
+dependencies = [
+ "ikpir-common",
+ "rand",
+ "rand_chacha",
+ "segmented-cuckoo",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -230,6 +240,16 @@ version = "0.1.0"
 dependencies = [
  "ikpir-common",
  "proptest",
+]
+
+[[package]]
+name = "risepir-server"
+version = "0.1.0"
+dependencies = [
+ "ikpir-common",
+ "ikpir-server",
+ "risepir-proto",
+ "segmented-cuckoo",
 ]
 
 [[package]]

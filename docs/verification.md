@@ -140,6 +140,30 @@ block — is independent of the speedup.)
 offer *this* upstream as the small PR, in place of the two the brief proposed. It
 is motivated by a measured problem rather than an anticipated one.
 
+### A third upstream gap: `server_setup` samples its seed with no injection point
+
+Surfaced while writing `batched_equals_per_mutation`. `SimplePirBackend::server_setup`
+(and Frodo's) samples a fresh random seed for `A` via `rand::rng()` on every call,
+and there is **no public way to inject a fixed seed**, nor any constructor taking a
+pre-built `(ServerParams, Hint)`. So two independently-constructed servers get
+different `A` and different hint bytes **by construction**, regardless of
+correctness — making a cross-server hint comparison untestable (it would only be
+testing whether two random draws collided).
+
+Consequences beyond testing: setup is **not reproducible**, so a server cannot be
+rebuilt bit-identically from the same database, and a client cannot verify a hint it
+was handed. `reset_for_replay` exists as a bench/test escape hatch precisely because
+of this, but it is not a general answer.
+
+Workaround used: prove (a) delta-transcript equivalence against a real `IkpirServer`
+oracle — seed-independent, since the fold is a pure function of the mutations — and
+(b) hint-patch linearity (one batched patch vs. N sequential) replayed within one
+server's *own* captured seed, via `expand_hint_material`'s documented determinism.
+That is the strongest statement the current API admits.
+
+**Upstream PR candidate #2**, alongside the batch API: accept an optional seed in
+`Config`. Small, and it buys reproducibility, not just testability.
+
 ## ❌ Correction 4 — per-block patch is **not** constant in wall-clock
 
 §1/§4 claim ~2.4 ms/block "with **no dependence on database size**". The MAC count

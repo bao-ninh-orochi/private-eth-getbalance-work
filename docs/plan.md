@@ -32,20 +32,22 @@ that turns "faster" into "otherwise impossible" (§7).
 ## 2. Current state
 
 Four crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
-(signed, Verified), **81 tests passing**:
+(signed, Verified), **85 tests passing**:
 
 | crate | what | tests |
 |---|---|---|
-| `risepir-proto` | geometry calculator, `BlockUpdate`/`BlockDelta`, value + delta codecs | 51 |
+| `risepir-proto` | geometry calculator, `BlockUpdate`/`BlockDelta`, value + delta codecs | 54 |
 | `risepir-server` | batched per-block server over the public primitives + delta ring | 21 |
-| `risepir-client` | the response-rewind client | 9 |
+| `risepir-client` | the response-rewind client | 10 |
 
-`risepir-proto` and `risepir-server` are stable. `risepir-client` implements the
-rewind correctly (the ordering trap is pinned) but against an **interim value
-encoding** that the value-encoding upgrade (§4.2, ADR-0009) will replace.
+All three crates are stable and now carry the §3.5 / ADR-0009 value encoding —
+`key_tag ‖ balance ‖ checksum`, a 64-bit-effective fingerprint. The ordering trap is
+pinned, and the ~2⁻⁶⁰ false-positive rate is asserted by a dedicated test (weak 8-bit
+SCF fingerprint + 32-bit `key_tag`, 100k negative queries, zero hits, with a
+non-vacuity control proving fp-only collisions actually occurred).
 
-Not yet built: the value-encoding upgrade, the `risepir-feed` (chain ingest), the
-HTTP transport, the JSON-RPC front end, the conformance harness, the numbers table.
+Not yet built: the `risepir-feed` (chain ingest), the HTTP transport, the JSON-RPC
+front end, the conformance harness, the numbers table.
 
 ## 3. Architecture
 
@@ -149,7 +151,7 @@ lives inside the server lock, so `answer` + head-stamping are atomic w.r.t. the 
 crates/
   risepir-proto/    geometry, BlockUpdate/BlockDelta, slot(value) codec, delta codec   [built]
   risepir-server/   batched per-block server over public primitives + delta ring       [built]
-  risepir-client/   rewind client + (todo) JSON-RPC :8545                              [built, interim encoding]
+  risepir-client/   rewind client + (todo) JSON-RPC :8545                              [built]
   risepir-feed/     BlockUpdate producers: mock | rpc | (exex)                          [todo]
 xtask/              conformance, bench, geometry CLI                                    [todo]
 .cargo/config.toml  target-cpu=native   ← git deps do NOT inherit the upstream perf config
@@ -162,17 +164,24 @@ ikpir-common = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d86
 (Currently path deps to a local checkout; switch to the git dep before hand-off is
 final.)
 
-### 4.2 The value-encoding upgrade (first task of the next session)
+### 4.2 The value-encoding upgrade **[DONE — ADR-0009]**
 
-The three built crates use an interim `fp32 + balance‖checksum` encoding. Upgrading to
-§3.5 touches exactly three places, guarded by the existing tests:
-1. `risepir-proto`: turn `ValueCodec` into a **slot codec** that takes `(address_hash,
-   balance)` → `key_tag ‖ balance ‖ checksum` cells, and decodes cells + `address_hash`
-   → `Found/NotFound/DecodeFailed`. Thread `key_tag` width + `checksum` width through
-   `Geometry`.
-2. `risepir-server::apply_block`: compute `key_tag` from the address hash when encoding
-   each slot value (the address hash is already the key).
-3. `risepir-client` scan: check SCF-fp → `key_tag` → `checksum` in that order.
+Implemented (§3.5). `ValueCodec` is now a slot codec: `encode(address_hash, balance) →
+key_tag ‖ balance ‖ checksum` bytes, and `decode(address_hash, value_bytes) → Lookup`
+(`Found/NotFound/DecodeFailed`, owned by `risepir-proto`). `key_tag = xxh3_64_with_seed(
+address_hash, SEED≠0)` — a *different* seed from the SCF's own seed-0 fingerprint, so the
+two 32-bit tags are independent and combine into a 64-bit-effective fingerprint (the SCF
+fingerprint stays 32 bits; no upstream change). `Geometry::for_accounts` threads the
+widths by taking the `ValueCodec` and deriving `value_bits` from it; `value_bits` itself
+stays the opaque sizing scalar.
+
+The one non-obvious correctness point: `risepir-client`'s scan masks each candidate slot
+on **`fp` AND `key_tag` jointly** (a single constant-time `ct_eq(fp) & ct_eq(key_tag)`
+mask) before the OR-select — *not* fp-only-then-check-tag. Selecting on fp alone would
+OR a present account's value together with a different key's fp-colliding value into
+garbage and wrongly report `NotFound` (`0x0`) for an existing account — a 2⁻²⁸
+silent-wrong-answer. Joint masking makes the colliding slot contribute nothing, so the
+combined resistance is a true ~2⁻⁶⁰.
 
 ## 5. Data: snapshot then follow (ADR-0013/0014, details in `data-acquisition.md` + `sync.md`)
 
@@ -198,7 +207,7 @@ before touching real data.
 
 | # | Deliverable | Gate |
 |---|---|---|
-| 0.1 | value-encoding upgrade (§4.2) | tests stay green; FP rate ~2⁻⁶⁰ asserted |
+| 0.1 ✅ | value-encoding upgrade (§4.2) | **done** — 85 tests green; FP rate ~2⁻⁶⁰ asserted |
 | 0.2 | `risepir-feed` mock: 1M keys, ~300 changes/12 s, **realistic wei-scale balances** | deterministic, seeded |
 | 0.3 | HTTP transport (answer/sync/setup/head) + delta objects | malformed bytes → clean error, no panic/OOM |
 | 0.4 | JSON-RPC `:8545` (`eth_getBalance`, `eth_chainId`, `eth_blockNumber`, `net_version`) | `cast balance --rpc-url localhost:8545` works |

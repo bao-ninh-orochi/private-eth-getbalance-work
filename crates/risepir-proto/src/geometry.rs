@@ -48,6 +48,8 @@ use ikpir_common::backend::frodo::FrodoParams;
 use ikpir_common::backend::simple::SimpleParams;
 use ikpir_common::pir_params::{frodo_max_plaintext_bits, simple_max_plaintext_bits};
 
+use crate::value::ValueCodec;
+
 /// Which LWE backend a [`Sizes`] computation targets.
 ///
 /// `Frodo` is RisePIR-F (tall matrix, no reshape); `Simple` is RisePIR-S
@@ -177,19 +179,20 @@ impl Geometry {
     /// [`GeomError::InvalidArity`] if `arity` is not 2, 3, or 4;
     /// [`GeomError::InvalidBucketSize`] if `bucket_size == 0`;
     /// [`GeomError::InvalidFieldWidth`] if `fingerprint_bits == 0` or
-    /// `value_bits == 0`; [`GeomError::TooManyAccounts`] if the resulting
-    /// `num_buckets` would not fit in `u32`.
+    /// `value_codec.value_bits() == 0`; [`GeomError::TooManyAccounts`] if
+    /// the resulting `num_buckets` would not fit in `u32`.
     pub fn for_accounts(
         accounts: u64,
         arity: u32,
         bucket_size: u32,
         fingerprint_bits: u32,
-        value_bits: u32,
+        value_codec: &ValueCodec,
         backend: Backend,
     ) -> Result<Self, GeomError> {
         if bucket_size == 0 {
             return Err(GeomError::InvalidBucketSize);
         }
+        let value_bits = value_codec.value_bits();
         if fingerprint_bits == 0 || value_bits == 0 {
             return Err(GeomError::InvalidFieldWidth);
         }
@@ -331,6 +334,28 @@ fn reshape_dims(n_rows: u32, row_width: u32) -> (u32, u32, u32) {
 mod tests {
     use super::*;
 
+    /// A `ValueCodec` decomposition summing to a 96-bit `value_bits` —
+    /// `for_accounts`' tests below only exercise *sizing*, so the specific
+    /// `(key_tag_bits, balance_bits, checksum_bits)` split never matters,
+    /// only the sum.
+    fn codec_96() -> ValueCodec {
+        ValueCodec {
+            key_tag_bits: 32,
+            balance_bits: 64,
+            checksum_bits: 0,
+        }
+    }
+
+    /// Same, summing to 256 bits (matches [`pinned_arity4_65536`]'s
+    /// `value_bits`).
+    fn codec_256() -> ValueCodec {
+        ValueCodec {
+            key_tag_bits: 32,
+            balance_bits: 208,
+            checksum_bits: 16,
+        }
+    }
+
     /// Pinning test (arity 4, `num_buckets` 65536, `bucket_size` 4, `fp`
     /// 32, `value_bits` 256): reproduces the upstream bench CSV exactly for
     /// both backends. This is the regression that proves the formulas.
@@ -416,7 +441,7 @@ mod tests {
     fn for_accounts_rejects_bad_arity() {
         for bad in [0u32, 1, 5, 6, 100] {
             assert_eq!(
-                Geometry::for_accounts(1_000, bad, 4, 32, 96, Backend::Simple),
+                Geometry::for_accounts(1_000, bad, 4, 32, &codec_96(), Backend::Simple),
                 Err(GeomError::InvalidArity(bad))
             );
         }
@@ -425,7 +450,7 @@ mod tests {
     #[test]
     fn for_accounts_rejects_zero_bucket_size() {
         assert_eq!(
-            Geometry::for_accounts(1_000, 4, 0, 32, 96, Backend::Simple),
+            Geometry::for_accounts(1_000, 4, 0, 32, &codec_96(), Backend::Simple),
             Err(GeomError::InvalidBucketSize)
         );
     }
@@ -433,11 +458,16 @@ mod tests {
     #[test]
     fn for_accounts_rejects_zero_field_widths() {
         assert_eq!(
-            Geometry::for_accounts(1_000, 4, 4, 0, 96, Backend::Simple),
+            Geometry::for_accounts(1_000, 4, 4, 0, &codec_96(), Backend::Simple),
             Err(GeomError::InvalidFieldWidth)
         );
+        let zero_codec = ValueCodec {
+            key_tag_bits: 0,
+            balance_bits: 0,
+            checksum_bits: 0,
+        };
         assert_eq!(
-            Geometry::for_accounts(1_000, 4, 4, 32, 0, Backend::Simple),
+            Geometry::for_accounts(1_000, 4, 4, 32, &zero_codec, Backend::Simple),
             Err(GeomError::InvalidFieldWidth)
         );
     }
@@ -445,11 +475,11 @@ mod tests {
     #[test]
     fn for_accounts_enforces_arity_shape() {
         for arity in [2u32, 4] {
-            let g = Geometry::for_accounts(1_234_567, arity, 4, 32, 96, Backend::Simple).unwrap();
+            let g = Geometry::for_accounts(1_234_567, arity, 4, 32, &codec_96(), Backend::Simple).unwrap();
             assert!(g.num_buckets.is_power_of_two());
             assert!(g.num_buckets >= arity);
         }
-        let g = Geometry::for_accounts(1_234_567, 3, 4, 32, 96, Backend::Simple).unwrap();
+        let g = Geometry::for_accounts(1_234_567, 3, 4, 32, &codec_96(), Backend::Simple).unwrap();
         assert_eq!(g.num_buckets % 3, 0);
         assert!((g.num_buckets / 3).is_power_of_two());
     }
@@ -459,7 +489,7 @@ mod tests {
         for accounts in [1u64, 100, 98_304, 98_305, 196_608, 10_000_000] {
             for arity in [2u32, 3, 4] {
                 for bucket_size in [1u32, 2, 4] {
-                    let g = Geometry::for_accounts(accounts, arity, bucket_size, 32, 96, Backend::Simple)
+                    let g = Geometry::for_accounts(accounts, arity, bucket_size, 32, &codec_96(), Backend::Simple)
                         .unwrap();
                     let sizes = g.sizes(Backend::Simple, accounts);
                     assert!(
@@ -479,14 +509,28 @@ mod tests {
     fn for_accounts_reproduces_pinned_num_buckets() {
         // num_buckets=65536 is the smallest power of two >= accounts/3 for
         // any accounts in (98304, 196608]; pick the upper boundary.
-        let g = Geometry::for_accounts(196_608, 4, 4, 32, 256, Backend::Frodo).unwrap();
+        let g = Geometry::for_accounts(196_608, 4, 4, 32, &codec_256(), Backend::Frodo).unwrap();
         assert_eq!(g.num_buckets, 65536);
         assert_eq!(g.plaintext_bits, 11);
     }
 
     proptest::proptest! {
-        /// `sizes()` never panics for any geometry `for_accounts` can
-        /// produce, across a wide sweep of inputs.
+        /// `sizes()` never panics across a wide sweep of geometries,
+        /// including wide `value_bits` (up to 512). This no longer routes
+        /// through `for_accounts` for the swept `value_bits` itself —
+        /// `for_accounts` now takes a `ValueCodec`, not a raw `value_bits`,
+        /// and the property under test is about `sizes()`'s robustness to
+        /// any `value_bits`, not about any particular `(key_tag_bits,
+        /// balance_bits, checksum_bits)` decomposition of it. `for_accounts`
+        /// still derives a realistic `(num_buckets, plaintext_bits)` pair
+        /// (num_buckets depends only on accounts/arity/bucket_size, never on
+        /// value_bits) via a fixed small codec, and the swept `value_bits`
+        /// is substituted in afterward — `Sizes` docs: "`plaintext_bits`
+        /// ... is not re-derived", so building a `Geometry` whose
+        /// `value_bits` disagrees with the `value_bits` that produced its
+        /// `plaintext_bits` is an already-supported, deliberately-tested
+        /// combination (see the pinned tests above, which do the same
+        /// swap in the other direction).
         #[test]
         fn sizes_never_panics_on_for_accounts_output(
             accounts in 1u64..50_000_000,
@@ -497,7 +541,8 @@ mod tests {
         ) {
             let arity = [2u32, 3, 4][arity_idx];
             let backend = if arity_idx % 2 == 0 { Backend::Simple } else { Backend::Frodo };
-            let g = Geometry::for_accounts(accounts, arity, bucket_size, fingerprint_bits, value_bits, backend).unwrap();
+            let seed = Geometry::for_accounts(accounts, arity, bucket_size, fingerprint_bits, &codec_96(), backend).unwrap();
+            let g = Geometry { value_bits, ..seed };
             let _ = g.sizes(backend, accounts);
         }
     }

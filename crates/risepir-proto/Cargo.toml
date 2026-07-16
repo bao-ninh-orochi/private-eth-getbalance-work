@@ -14,5 +14,13 @@ unsafe_code = "forbid"
 # (see docs/plan.md §4 and §9's "ikpir-common = { git = ..., rev = ... }").
 ikpir-common = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
 
+# `ValueCodec::key_tag`'s hash (ADR-0009): deliberately the *same* xxh3
+# crate `segmented-cuckoo` uses for the SCF's own fingerprint, but called
+# with a distinct nonzero seed (`value::KEY_TAG_SEED`) so the two hashes
+# are statistically independent even though both hash the same address
+# bytes — see `value.rs`'s module docs. `xxh3` feature only; this crate
+# never needs the 32-bit or streaming variants.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
 [dev-dependencies]
 proptest = "1"

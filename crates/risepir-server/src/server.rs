@@ -121,13 +121,14 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// at construction is preferable to a confusing store-rejected-write
     /// error deep inside the first [`Self::apply_block`] call.
     pub fn new(mut store: CuckooKVStore<S>, config: B::Config, value_codec: ValueCodec, genesis_block: u64) -> Self {
-        let expected_value_bytes = ((value_codec.balance_bits + value_codec.checksum_bits) as usize).div_ceil(8);
+        let expected_value_bytes = (value_codec.value_bits() as usize).div_ceil(8);
         let store_value_bytes = store.value_size_in_bytes();
         assert_eq!(
             expected_value_bytes, store_value_bytes,
             "RisePirServer::new: value_codec encodes to {expected_value_bytes} bytes but the \
              store is configured for {store_value_bytes}-byte values — value_codec's \
-             (balance_bits + checksum_bits) and the store/geometry's value_bits must agree"
+             value_bits() (key_tag_bits + balance_bits + checksum_bits) and the \
+             store/geometry's value_bits must agree"
         );
 
         let params = store.params();
@@ -255,7 +256,7 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         }
 
         for (addr, balance) in &update.changes {
-            let encoded = match self.value_codec.encode(*balance) {
+            let encoded = match self.value_codec.encode(addr, *balance) {
                 Ok(v) => v,
                 Err(e) => return Err(self.reject_block(ServerError::Encode(e))),
             };
@@ -515,6 +516,7 @@ mod tests {
     const NUM_BUCKETS: u32 = 3 * 1024;
     const BUCKET_SIZE: u32 = 4;
     const FINGERPRINT_BITS: u32 = 32;
+    const KEY_TAG_BITS: u32 = 32;
     const BALANCE_BITS: u32 = 96;
     const CHECKSUM_BITS: u32 = 16;
     const LWE_DIM: u32 = 512;
@@ -532,7 +534,7 @@ mod tests {
     /// valid for our `lwe_dim = 512` test config as it would be for the
     /// default 1275.
     fn geometry() -> Geometry {
-        let value_bits = BALANCE_BITS + CHECKSUM_BITS;
+        let value_bits = KEY_TAG_BITS + BALANCE_BITS + CHECKSUM_BITS;
         let segment_rows = NUM_BUCKETS / ARITY;
         let plaintext_bits = simple_max_plaintext_bits(
             segment_rows,
@@ -553,6 +555,7 @@ mod tests {
 
     fn value_codec() -> ValueCodec {
         ValueCodec {
+            key_tag_bits: KEY_TAG_BITS,
             balance_bits: BALANCE_BITS,
             checksum_bits: CHECKSUM_BITS,
         }
@@ -700,7 +703,7 @@ mod tests {
         const N: u64 = 100;
         let mut genesis_store = empty_store(&geom);
         for i in 0..N {
-            let v = codec.encode(1_000_000_000_000_000_000u128 + u128::from(i)).unwrap();
+            let v = codec.encode(&addr(i), 1_000_000_000_000_000_000u128 + u128::from(i)).unwrap();
             genesis_store.insert(addr(i), &v).unwrap();
         }
         let cells0 = genesis_store.snapshot_cells();
@@ -718,7 +721,7 @@ mod tests {
 
         let mut per_mutation_deltas = Vec::with_capacity(changes.len());
         for (a, bal) in &changes {
-            let v = codec.encode(*bal).unwrap();
+            let v = codec.encode(a, *bal).unwrap();
             let bundle = ikpir.update(a, &v).expect("every address was pre-inserted into genesis");
             per_mutation_deltas.push(BlockDelta {
                 block: bundle.epoch,
@@ -763,7 +766,7 @@ mod tests {
         let mut replay_hints = genesis_bundle.hints.clone();
 
         for (a, bal) in &changes {
-            let v = value_codec().encode(*bal).unwrap();
+            let v = value_codec().encode(a, *bal).unwrap();
             replay_store.update(a, &v).unwrap();
             let muts = replay_store.drain_mutations();
             let row_deltas = fold_mutations_into_row_deltas(&muts, &params0);
@@ -817,8 +820,8 @@ mod tests {
         let cfg = config();
 
         let mut genesis_store = empty_store(&geom);
-        genesis_store.insert(addr(0), &codec.encode(1_000u128).unwrap()).unwrap();
-        genesis_store.insert(addr(1), &codec.encode(2_000u128).unwrap()).unwrap();
+        genesis_store.insert(addr(0), &codec.encode(&addr(0), 1_000u128).unwrap()).unwrap();
+        genesis_store.insert(addr(1), &codec.encode(&addr(1), 2_000u128).unwrap()).unwrap();
         let cells0 = genesis_store.snapshot_cells();
         let params0 = genesis_store.params();
         let n0 = genesis_store.num_items();

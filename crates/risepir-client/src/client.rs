@@ -2,31 +2,13 @@
 //! ADR-0003). See the crate docs for the rewind steps in full.
 
 use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend};
-use risepir_proto::{AddressHash, Balance, BlockDelta, ValueCodec};
+use risepir_proto::{AddressHash, BlockDelta, Lookup, ValueCodec};
 use risepir_server::SetupBundle;
 use segmented_cuckoo::{unpack_slot_cells, CuckooParams};
 
 use crate::delta::PendingDelta;
 use crate::error::ClientError;
 use crate::rewind::ResponseRewind;
-
-/// Outcome of [`RisePirClient::finish`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lookup {
-    /// A slot in one of the key's candidate buckets carried a matching
-    /// fingerprint, and its value decoded (checksum included) cleanly.
-    Found(Balance),
-    /// No candidate slot carried a matching fingerprint. Per ADR-0015,
-    /// callers serving a *complete* nonzero-balance database may treat
-    /// this as balance zero — that policy decision is deliberately not
-    /// made in this crate; see the crate docs.
-    NotFound,
-    /// A candidate slot's fingerprint matched, but the decoded value's
-    /// checksum did not (ADR-0009): LWE noise corrupted a value cell.
-    /// Never a number — the caller must treat this as a failed read, not
-    /// a balance of `0` or any other value.
-    DecodeFailed,
-}
 
 /// Client-held bridge between [`RisePirClient::build_query`] and
 /// [`RisePirClient::finish`].
@@ -59,7 +41,7 @@ pub struct QueryCtx<B: IndexPirBackend> {
 /// 2. resp -= qᵀ·ΔD[block₀ → E']            // → BIT-EXACT the response a block₀ server would give
 /// 3. cells ← B::client_decode(state, resp) // → the bucket AS OF block₀   (decodes vs the STALE hint)
 /// 4. cells += ΔD[row]                      // → the bucket AS OF E'    ***BEFORE STEP 5***
-/// 5. scan cells for fp(key)
+/// 5. scan cells for fp(key) ∧ key_tag(key), jointly per slot (ADR-0009)
 /// ```
 ///
 /// **Step 4 must precede step 5.** If step 5 (the fingerprint scan) ran
@@ -279,6 +261,26 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
     /// caller that keeps [`Self::ingest_delta`] current with the same
     /// server before calling `finish` will always satisfy this.
     ///
+    /// # Why the fp / `key_tag` mask must be joint, per slot (ADR-0009)
+    ///
+    /// Step 5 selects a slot into the accumulator only when **both**
+    /// `fp == fp(key)` **and** `key_tag == value_codec.key_tag(key)` hold
+    /// for that *same* slot — never fp first, with `key_tag` checked only
+    /// afterward on whatever got selected. The store's own fingerprint is
+    /// just 32 bits, so a *different* key can collide on `fp(key)` in one
+    /// candidate slot while `key`'s real entry sits in another candidate
+    /// slot (same segment or a different one). Selecting on `fp` alone
+    /// would OR that colliding slot's unrelated value bytes into the
+    /// accumulator too — even though its `key_tag` would eventually fail
+    /// a *separate* check, by then its bytes are already mixed with the
+    /// real entry's, and the combined garbage decodes to neither: a
+    /// present account could silently come back [`Lookup::NotFound`]
+    /// (`0x0`) instead of its real balance — a ~2⁻²⁸ silent-wrong-answer,
+    /// exactly the failure mode `docs/plan.md`'s invariant forbids.
+    /// Masking jointly means a colliding slot's mask is all-zero, so it
+    /// contributes nothing to the accumulator no matter what its bytes
+    /// are.
+    ///
     /// # Errors
     ///
     /// [`ClientError::MalformedResponse`] if `resp.len()` (or `ctx`'s
@@ -327,8 +329,12 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
         let value_size = self.params.value_size_in_bytes();
         let plaintext_bound: i64 = 1i64 << self.params.plaintext_bits;
 
+        // Computed once: every candidate slot in every segment is checked
+        // against this same `key_tag` (see "Why the fp / key_tag mask must
+        // be joint" above).
+        let key_tag = self.value_codec.key_tag(key);
         let mut acc = vec![0u8; value_size];
-        let mut found_mask: u32 = 0;
+        let mut found_mask: u64 = 0;
 
         for j in 0..arity {
             // Step 2: resp -= qᵀ·ΔD[block₀ → E'], this segment's whole delta.
@@ -364,29 +370,32 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
                 cells[idx] = corrected as u32;
             }
 
-            // Step 5 (this segment's share): scan for fp(key), side-channel
-            // hardened exactly as `IkpirClient::decode` is — a branchless
-            // OR-masked select over every candidate slot, independent of
-            // where (if anywhere) the match is.
+            // Step 5 (this segment's share): scan for fp(key) AND
+            // key_tag(key), side-channel hardened exactly as
+            // `IkpirClient::decode` is — a branchless OR-masked select
+            // over every candidate slot, independent of where (if
+            // anywhere) the match is. The two checks are ANDed into one
+            // JOINT per-slot mask before selecting — see "Why the fp /
+            // key_tag mask must be joint" on this method's docs; this is
+            // NOT the same as selecting on fp alone and checking key_tag
+            // afterward on whatever got selected.
             for s in 0..bucket_size {
                 let slot = &cells[s * cps..(s + 1) * cps];
                 let (decoded_fp, value_bytes) = unpack_slot_cells(&self.params, slot);
-                let mask32 = ct_eq_u32_mask(decoded_fp, fp);
-                let mask8 = (mask32 & 0xFF) as u8;
+                let mask = ct_eq_u32_mask(decoded_fp, fp) as u64
+                    & ct_eq_u64_mask(self.value_codec.extract_key_tag(&value_bytes), key_tag);
+                let mask8 = (mask & 0xFF) as u8;
                 for (a, v) in acc.iter_mut().zip(value_bytes.iter()) {
                     *a |= mask8 & *v;
                 }
-                found_mask |= mask32;
+                found_mask |= mask;
             }
         }
 
         if found_mask == 0 {
             return Ok(Lookup::NotFound);
         }
-        match self.value_codec.decode(&acc) {
-            Ok(balance) => Ok(Lookup::Found(balance)),
-            Err(_) => Ok(Lookup::DecodeFailed),
-        }
+        Ok(self.value_codec.decode(key, &acc))
     }
 }
 
@@ -397,6 +406,18 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
 const fn ct_eq_u32_mask(a: u32, b: u32) -> u32 {
     let x = a ^ b;
     ((x | x.wrapping_neg()) >> 31).wrapping_sub(1)
+}
+
+/// Branchless `u64` equality mask: `0xFFFF_FFFF_FFFF_FFFF` if `a == b`,
+/// else `0`. Same trick as [`ct_eq_u32_mask`], widened to 64 bits — used
+/// to fold [`RisePirClient::finish`]'s per-slot `key_tag` check into the
+/// same branchless select as the fingerprint check, so the two can be
+/// ANDed into one joint mask (see that method's docs) without ever
+/// materialising an intermediate branch on either check alone.
+#[inline]
+const fn ct_eq_u64_mask(a: u64, b: u64) -> u64 {
+    let x = a ^ b;
+    ((x | x.wrapping_neg()) >> 63).wrapping_sub(1)
 }
 
 // ─── Send + Sync static assertion ───────────────────────────────────────────
@@ -412,7 +433,7 @@ mod tests {
     use ikpir_common::pir_params::{frodo_max_plaintext_bits, simple_max_plaintext_bits};
     use ikpir_common::{FrodoConfig, SimpleConfig};
     use risepir_proto::geometry::Geometry;
-    use risepir_proto::BlockUpdate;
+    use risepir_proto::{Balance, BlockUpdate};
     use risepir_server::RisePirServer;
     use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
     use std::collections::HashMap;
@@ -423,12 +444,14 @@ mod tests {
     const NUM_BUCKETS: u32 = 3 * 1024;
     const BUCKET_SIZE: u32 = 4;
     const FINGERPRINT_BITS: u32 = 32;
+    const KEY_TAG_BITS: u32 = 32;
     const BALANCE_BITS: u32 = 96;
     const CHECKSUM_BITS: u32 = 16;
     const LWE_DIM: u32 = 512;
 
     fn value_codec() -> ValueCodec {
         ValueCodec {
+            key_tag_bits: KEY_TAG_BITS,
             balance_bits: BALANCE_BITS,
             checksum_bits: CHECKSUM_BITS,
         }
@@ -467,7 +490,7 @@ mod tests {
                 segment_rows,
                 BUCKET_SIZE,
                 FINGERPRINT_BITS,
-                BALANCE_BITS + CHECKSUM_BITS,
+                KEY_TAG_BITS + BALANCE_BITS + CHECKSUM_BITS,
                 SimpleParams::DEFAULT_SIGMA,
             )
         }
@@ -493,7 +516,7 @@ mod tests {
             num_buckets: NUM_BUCKETS,
             bucket_size: BUCKET_SIZE,
             fingerprint_bits: FINGERPRINT_BITS,
-            value_bits: BALANCE_BITS + CHECKSUM_BITS,
+            value_bits: KEY_TAG_BITS + BALANCE_BITS + CHECKSUM_BITS,
             plaintext_bits,
         }
     }
@@ -515,9 +538,11 @@ mod tests {
 
     /// Test-only re-implementation of `finish`'s steps 2-5, with knobs to
     /// selectively skip step 4 (the ordering trap, test 2) or inject
-    /// corruption into a decoded value cell (test 6). Not side-channel
-    /// hardened — that property is `finish`-only and irrelevant to what
-    /// these negative controls check.
+    /// corruption into a decoded value cell (test 6). Mirrors `finish`'s
+    /// JOINT fp + `key_tag` per-slot select (ADR-0009) using an ordinary
+    /// `&&` rather than the branchless bit-mask trick — side-channel
+    /// hardening is `finish`-only and irrelevant to what these negative
+    /// controls check.
     fn finish_raw<B: BackendTestSetup>(
         client: &RisePirClient<B>,
         key: &AddressHash,
@@ -528,6 +553,7 @@ mod tests {
     ) -> Lookup {
         let arity = client.params.arity();
         let (fp, _indices) = client.params.candidate_buckets(key);
+        let key_tag = client.value_codec.key_tag(key);
         let bucket_size = client.params.bucket_size as usize;
         let cps = client.params.cells_per_slot() as usize;
         let value_size = client.params.value_size_in_bytes();
@@ -554,8 +580,8 @@ mod tests {
 
             for s in 0..bucket_size {
                 let slot = &mut cells[s * cps..(s + 1) * cps];
-                let (decoded_fp, _) = unpack_slot_cells(&client.params, slot);
-                if decoded_fp == fp {
+                let (decoded_fp, value_bytes) = unpack_slot_cells(&client.params, slot);
+                if decoded_fp == fp && client.value_codec.extract_key_tag(&value_bytes) == key_tag {
                     if let Some(f) = corrupt {
                         f(slot);
                     }
@@ -571,10 +597,7 @@ mod tests {
         if !found {
             return Lookup::NotFound;
         }
-        match client.value_codec.decode(&acc) {
-            Ok(b) => Lookup::Found(b),
-            Err(_) => Lookup::DecodeFailed,
-        }
+        client.value_codec.decode(key, &acc)
     }
 
     // ── 1. created_during_run (parameterised over both backends) ────────
@@ -919,12 +942,16 @@ mod tests {
             .unwrap();
         assert_eq!(sane, Lookup::Found(target_balance));
 
-        // Corrupt exactly one value-region cell (never the fingerprint) of
-        // the matching slot, post-decode/post-step-4, pre-scan. The slot's
-        // *last* cell is always deep in the value region for this
-        // geometry (value_bits=112 spans multiple cells at any pb <= 14,
-        // so the boundary cell shared with the fingerprint, if any, is
-        // never the last one).
+        // Corrupt exactly one value-region cell (never the fingerprint, and
+        // — now that the value layout is key_tag ‖ balance ‖ checksum,
+        // ADR-0009 — never the key_tag either, which sits at the *low* end
+        // of the value bits, closest to the fingerprint) of the matching
+        // slot, post-decode/post-step-4, pre-scan. The slot's *last* cell
+        // is always deep in the checksum region for this geometry
+        // (value_bits=144 spans multiple cells at any pb <= 14, and
+        // checksum occupies only the top 16 bits, so the boundary cell
+        // shared with the fingerprint or key_tag, if any, is never the
+        // last one).
         let corrupt_last_cell: fn(&mut [u32]) = |slot| {
             let last = slot.len() - 1;
             slot[last] ^= 1;
@@ -943,5 +970,138 @@ mod tests {
     #[test]
     fn send_sync() {
         assert_send::<Mutex<RisePirClient<SimplePirBackend>>>();
+    }
+
+    // ── 8. false_positive_rate_is_negligible ─────────────────────────────
+
+    /// ADR-0009's core empirical claim, at a deliberately adversarial
+    /// geometry: even when the store's OWN fingerprint is weakened to just
+    /// `WEAK_FP_BITS = 8` (valid for arity 3 / bucket_size 4, whose own
+    /// minimum is 4 bits, per `Segmented3aryCuckooKVStore`'s docs) — far
+    /// below the deployment default of 32, specifically so that fp-only
+    /// collisions on nonexistent keys are *common*, not a rare event this
+    /// test could vacuously fail to observe — requiring the value's
+    /// 32-bit `key_tag` to ALSO match still drives the combined
+    /// false-positive rate down to the `WEAK_FP_BITS + KEY_TAG_BITS` =
+    /// 40-bit-effective level (2⁻⁶⁰ at the deployment default of
+    /// `fp=32/key_tag=32`): zero false `Found` / `DecodeFailed` results
+    /// across 100,000 negative queries.
+    ///
+    /// # Why this operates below `RisePirClient`, directly on the store
+    ///
+    /// The false-positive-resistance claim is about the fp + `key_tag`
+    /// *scan* itself (`ValueCodec`/`CuckooParams::candidate_buckets`), not
+    /// about anything PIR/LWE-specific — so this queries
+    /// `CuckooKVStore::as_cells()` directly (unpacking each negative
+    /// query's candidate slots exactly as `RisePirClient::finish` would,
+    /// minus the PIR round trip) rather than driving 100,000 real queries
+    /// through a `RisePirServer`/`RisePirClient` pair, which would be far
+    /// too slow for a unit test. [`never_existed_is_not_found`] already
+    /// covers a small end-to-end slice for full-pipeline fidelity.
+    ///
+    /// # The non-vacuity control
+    ///
+    /// A test that always trivially passes (e.g. because collisions never
+    /// actually happen at this sample size) would prove nothing. So this
+    /// also counts how many candidate slots matched on the *weak 8-bit fp
+    /// alone* (ignoring `key_tag` entirely — i.e. what a fp-only cuckoo
+    /// filter would have accepted) and asserts that count is `> 0`:
+    /// confirmation that real fp collisions occurred among the 100,000
+    /// negative queries, and that `key_tag` is doing genuine work to
+    /// reject every one of them, not merely that none happened to arise.
+    #[test]
+    fn false_positive_rate_is_negligible() {
+        const WEAK_FP_BITS: u32 = 8;
+        const NUM_QUERIES: u64 = 100_000;
+        // Comfortably disjoint from the inserted id range (below).
+        const QUERY_ID_BASE: u64 = 50_000_000;
+
+        let codec = ValueCodec {
+            key_tag_bits: KEY_TAG_BITS,
+            balance_bits: BALANCE_BITS,
+            checksum_bits: CHECKSUM_BITS,
+        };
+        let value_bits = codec.value_bits();
+        let segment_rows = NUM_BUCKETS / ARITY;
+        let plaintext_bits = simple_max_plaintext_bits(
+            segment_rows,
+            BUCKET_SIZE,
+            WEAK_FP_BITS,
+            value_bits,
+            SimpleParams::DEFAULT_SIGMA,
+        );
+        let mut store: Segmented3aryCuckooKVStore =
+            Segmented3aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, WEAK_FP_BITS, value_bits, plaintext_bits)
+                .unwrap();
+
+        // ~60% load: a genuinely full store (so candidate buckets are
+        // densely occupied, maximising the chance of an fp collision)
+        // without courting `TableFull` flakiness from the weak 8-bit fp
+        // increasing cuckoo-kick pressure.
+        let total_slots = u64::from(NUM_BUCKETS) * u64::from(BUCKET_SIZE);
+        let num_keys = total_slots * 6 / 10;
+        for i in 0..num_keys {
+            let a = addr(i);
+            let balance: Balance = 1_000_000_000_000_000_000u128 + u128::from(i);
+            let v = codec.encode(&a, balance).unwrap();
+            store.insert(a, &v).unwrap();
+        }
+
+        let params = store.params();
+        let cells = store.as_cells();
+        let bucket_size = params.bucket_size as usize;
+
+        let mut found_count: u64 = 0;
+        let mut decode_failed_count: u64 = 0;
+        let mut fp_only_collisions: u64 = 0;
+
+        for q in 0..NUM_QUERIES {
+            let key = addr(QUERY_ID_BASE + q);
+            let (fp, indices) = params.candidate_buckets(&key);
+            let key_tag = codec.key_tag(&key);
+
+            for j in 0..params.arity() {
+                let bucket = indices[j];
+                for s in 0..bucket_size {
+                    let slot = &cells[params.slot_cell_range(bucket, s as u32)];
+                    let (decoded_fp, value_bytes) = unpack_slot_cells(&params, slot);
+                    if decoded_fp != fp {
+                        continue;
+                    }
+                    // A fp-only cuckoo filter would have accepted this
+                    // slot as a match — the non-vacuity control.
+                    fp_only_collisions += 1;
+                    if codec.extract_key_tag(&value_bytes) != key_tag {
+                        continue; // key_tag rejects it — correctly NotFound.
+                    }
+                    match codec.decode(&key, &value_bytes) {
+                        Lookup::Found(_) => found_count += 1,
+                        Lookup::DecodeFailed => decode_failed_count += 1,
+                        Lookup::NotFound => {}
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            found_count, 0,
+            "a nonexistent address must never resolve Found — the 64-bit-effective (here \
+             40-bit, WEAK_FP_BITS + KEY_TAG_BITS) fingerprint must have rejected every \
+             fp-colliding slot via key_tag"
+        );
+        assert_eq!(
+            decode_failed_count, 0,
+            "a nonexistent address must never resolve DecodeFailed either — decode is only \
+             reached once key_tag already agrees, and there is no LWE noise in this scan-level \
+             test to corrupt a checksum"
+        );
+        assert!(
+            fp_only_collisions > 0,
+            "non-vacuity control failed: with fingerprint_bits={WEAK_FP_BITS}, {NUM_QUERIES} \
+             negative queries across arity={}*bucket_size={bucket_size} candidate slots must \
+             have produced at least one raw fp-only collision, or this test isn't exercising \
+             the key_tag-vs-fp-only distinction it claims to",
+            params.arity()
+        );
     }
 }

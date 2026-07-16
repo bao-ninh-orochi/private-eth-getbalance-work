@@ -17,13 +17,14 @@ for exact signatures; never guess an API.**
 
 ## Where things stand
 
-Four crates, **81 tests green**, all committed & signed:
-`risepir-proto` (geometry + codecs, 51), `risepir-server` (batched per-block server, 21),
-`risepir-client` (response rewind, 9). `risepir-feed`, HTTP, JSON-RPC, conformance, and
+Four crates, **85 tests green**, all committed & signed:
+`risepir-proto` (geometry + codecs, 54), `risepir-server` (batched per-block server, 21),
+`risepir-client` (response rewind, 10). `risepir-feed`, HTTP, JSON-RPC, conformance, and
 benches are **not built yet**.
 
-The rewind, batching, and geometry are done and correct. The one thing the built code
-does *not* yet reflect is the **value-encoding decision** below — that is task 1.
+The rewind, batching, and geometry are done and correct. **Task 1 (the value-encoding
+upgrade, ADR-0009) is now done** — the built code carries the 64-bit-effective
+`key_tag ‖ balance ‖ checksum` encoding. **Next is task 2** (`risepir-feed` mock).
 
 ## The binding rules (do not violate)
 
@@ -44,18 +45,14 @@ does *not* yet reflect is the **value-encoding decision** below — that is task
 
 ## Tasks, in order
 
-**1. Value-encoding upgrade — 64-bit-effective fingerprint (ADR-0009).**
-The built crates use an interim `fp32 + balance‖checksum` encoding. Change the value to
-`key_tag(32b) ‖ balance(96b) ‖ checksum(16b)` (widths tunable via `Geometry`):
-- `risepir-proto`: make `ValueCodec` a **slot codec** taking `(address_hash, balance)` →
-  cells and `(address_hash, cells)` → `Found/NotFound/DecodeFailed`. `key_tag = H₂(addr)`,
-  `checksum = H(balance)`, any fast hash (xxh3, distinct seeds).
-- `risepir-server::apply_block`: compute `key_tag` from the address hash (already the key).
-- `risepir-client` scan: check SCF-fp → `key_tag` → `checksum` in that order (mismatch on
-  key_tag ⇒ keep scanning ⇒ NotFound; mismatch on checksum ⇒ DecodeFailed). The rewind
-  logic itself does not change.
-- Add a test asserting the effective false-positive rate is ~2⁻⁶⁰ (query many nonexistent
-  addresses against a full store, assert zero hits over a large sample). Keep all 81 green.
+**1. Value-encoding upgrade — 64-bit-effective fingerprint (ADR-0009). ✅ DONE.**
+Shipped: `ValueCodec` is a slot codec (`encode(addr, balance)` → `key_tag ‖ balance ‖
+checksum`; `decode(addr, bytes)` → `Lookup{Found,NotFound,DecodeFailed}`, owned by
+`risepir-proto`). `key_tag = xxh3_64_with_seed(addr, SEED≠0)` — independent of the SCF's
+seed-0 fingerprint, so the two combine to ~2⁻⁶⁰. The client scan masks each slot on `fp`
+**and** `key_tag` jointly (see plan.md §4.2 for why fp-alone would be a 2⁻²⁸
+silent-wrong-answer). `Geometry::for_accounts` takes the `ValueCodec` and derives
+`value_bits`. FP-rate test with a non-vacuity control included. 85 tests green.
 
 **2. `risepir-feed` with a mock (Stage 0.2).** An interface `Feed` producing
 `BlockUpdate`s, plus a `mock` impl: ~1M keys, ~300 changes every 12 s, **realistic

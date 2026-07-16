@@ -1,0 +1,28 @@
+[package]
+name        = "xtask"
+version     = "0.1.0"
+edition.workspace = true
+publish     = false
+description = "Repo-local developer tooling. Today: the Stage 0.5 conformance harness — one command proving the private client's answers are byte-identical to in-process ground truth across >=1000 sampled addresses x >=100 consecutive blocks, spanning every account category, diffed continuously (docs/plan.md §6, §8)."
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# Sibling crates in this workspace — the full in-process pipeline
+# (mock feed -> server -> delta ring -> client) the harness drives
+# directly, with no HTTP layer (docs/plan.md §6 Stage 0.5).
+risepir-proto  = { path = "../risepir-proto" }
+risepir-server = { path = "../risepir-server" }
+risepir-client = { path = "../risepir-client" }
+risepir-feed   = { path = "../risepir-feed" }
+
+# PATH dependencies for now, matching the sibling crates' own note: a local
+# checkout of the upstream research repo. A later step swaps these for a
+# pinned git dep once the fork/rev settle (docs/plan.md §4 / §9).
+ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }

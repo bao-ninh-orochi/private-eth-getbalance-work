@@ -17,16 +17,16 @@ for exact signatures; never guess an API.**
 
 ## Where things stand
 
-Seven crates, **133 tests green**, all committed & signed:
+Seven crates, **134 tests green**, all committed & signed:
 `risepir-proto` (55), `risepir-server` (+delete-on-zero, 23), `risepir-client` (10),
 `risepir-feed` (seeded mock, 6), `risepir-http` (axum transport + binary wire codec + HTTP
-client, 30), `risepir-rpc` (JSON-RPC :8545 + demo binary, 9). The conformance harness and
-the numbers table are **not built yet**.
+client, 30), `risepir-rpc` (JSON-RPC :8545 + demo binary, 9), `xtask` (conformance gate, 1).
 
-The rewind, batching, geometry, the value encoding (task 1), the mock feed (task 2), the
-HTTP transport (task 3), and the JSON-RPC `:8545` front end (task 4, Stage 0.4 — private
-`eth_getBalance` via keccak256 → client → HTTP → rewind; deny-by-default; `cast balance`
-verified against the mock) are all done. **Next is task 5** (conformance harness, Stage 0.5).
+**Stage 0 is complete** (tasks 1–5): the value encoding, mock feed, HTTP transport, private
+JSON-RPC `:8545` (`cast balance` verified), and the conformance gate (`cargo run -p xtask
+--release -- conformance`: 1201×120, all five categories, 0 mismatches, exit 0) are all done
+and committed. **Next is task 6** (the measured numbers table, Stage 3), then real mainnet
+data (Stage 1). The numbers table is **not built yet**.
 
 ## The binding rules (do not violate)
 
@@ -80,10 +80,13 @@ async `PirHttpClient`. Demo binary seeds known `(address → balance)` accounts 
 `keccak256`) alongside the churning mock. Gate verified: `cast balance <addr> --rpc-url
 http://localhost:8545` returns the exact wei value; unseeded → `0x0`; `"latest"` = our head.
 
-**5. Conformance harness (Stage 0.5) — the real gate.** One command, pass/fail: ≥1000
-addresses × ≥100 consecutive blocks, byte-identical to in-process ground truth. Sample
-must include high-activity, zero-balance, never-existed, **created-during-run**, and
-contract accounts. Diff continuously, not once.
+**5. Conformance harness (Stage 0.5) — the real gate. ✅ DONE.** `xtask conformance` (new
+`crates/xtask`): one command, pass/fail, exit 0/1. Default run diffs 1201 addresses × 120
+blocks (floor ≥1000×≥100 also verified) byte-identically against the mock's exact
+`balance_of`, across all five categories (high-activity, zero-balance/deleted,
+never-existed, created-during-run, contract), diffing at 13 checkpoints (continuous, client
+pinned at genesis so every query exercises the full rewind). Any under-sample or empty
+category is a loud `HARNESS:` failure, so a vacuous pass is impossible.
 
 **6. Numbers table (Stage 3).** Measure (don't guess): per-block patch time as a **curve
 over mutations/block**, per-block delta bytes (naive vs compact codec, on realistic

@@ -32,7 +32,7 @@ that turns "faster" into "otherwise impossible" (§7).
 ## 2. Current state
 
 Seven crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
-(signed, Verified), **133 tests passing**:
+(signed, Verified), **134 tests passing**:
 
 | crate | what | tests |
 |---|---|---|
@@ -42,6 +42,10 @@ Seven crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalanc
 | `risepir-feed` | chain-follow feed: `Feed` trait + deterministic seeded `MockFeed` | 6 |
 | `risepir-http` | axum transport (answer/sync/setup/head/delta) + binary wire codec + HTTP client | 30 |
 | `risepir-rpc` | JSON-RPC `:8545` front end (private `eth_getBalance`, deny-by-default) + demo binary | 9 |
+| `xtask` | conformance harness (the Stage 0.5 gate) + CLI | 1 |
+
+Beyond unit tests: `cargo run -p xtask --release -- conformance` is the Stage 0.5 gate —
+1201 addresses × 120 blocks, all five account categories, 0 mismatches, exit 0.
 
 All three crates are stable and now carry the §3.5 / ADR-0009 value encoding —
 `key_tag ‖ balance ‖ checksum`, a 64-bit-effective fingerprint. The ordering trap is
@@ -158,7 +162,7 @@ crates/
   risepir-feed/     BlockUpdate producers: mock | rpc | (exex)                          [mock built]
   risepir-http/     axum transport + binary wire codec + HTTP client                    [built]
   risepir-rpc/      JSON-RPC :8545 front end + demo binary (private eth_getBalance)      [built]
-xtask/              conformance, bench, geometry CLI                                    [todo]
+  xtask/            conformance harness + CLI (the Stage 0.5 gate)                       [conformance built]
 .cargo/config.toml  target-cpu=native   ← git deps do NOT inherit the upstream perf config
 ```
 
@@ -216,7 +220,7 @@ before touching real data.
 | 0.2 ✅ | `risepir-feed` mock: 1M keys, ~300 changes/12 s, **realistic wei-scale balances** | **done** — deterministic/seeded; delete-on-zero + end-to-end pipeline test |
 | 0.3 ✅ | HTTP transport (answer/sync/setup/head) + delta objects | **done** — exact-length codec, fuzzed no-panic/OOM, end-to-end over HTTP |
 | 0.4 ✅ | JSON-RPC `:8545` (`eth_getBalance`, `eth_chainId`, `eth_blockNumber`, `net_version`) | **done** — `cast balance --rpc-url localhost:8545` verified against the mock |
-| 0.5 | conformance vs. in-process ground truth | ≥1000 addrs × ≥100 blocks, all categories, one pass/fail command |
+| 0.5 ✅ | conformance vs. in-process ground truth | **done** — `xtask conformance`: 1201×120, all 5 categories, 0 mismatches, exit 0 |
 | 1.x | real mainnet: snapshot + `risepir-feed` rpc + reconciliation | diff vs archive RPC per block |
 | 3.x | numbers table (measured, not guessed) | incl. **full-rebuild time** — the §7 denominator |
 

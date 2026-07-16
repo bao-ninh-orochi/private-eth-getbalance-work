@@ -1,0 +1,45 @@
+[package]
+name        = "risepir-rpc"
+version     = "0.1.0"
+edition.workspace = true
+publish     = false
+description = "Stage 0.4: standard Ethereum JSON-RPC front end on :8545 (eth_getBalance et al.) over the RisePIR HTTP transport, deny-by-default for every other method (docs/plan.md §3/§6, ADR-0007, ADR-0008, ADR-0010, ADR-0012)."
+
+[[bin]]
+name = "risepir-rpc"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# Sibling crates in this workspace.
+risepir-proto  = { path = "../risepir-proto" }
+risepir-server = { path = "../risepir-server" }
+risepir-client = { path = "../risepir-client" }
+risepir-feed   = { path = "../risepir-feed" }
+risepir-http   = { path = "../risepir-http" }
+
+# PATH dependencies for now, matching the sibling crates' own note: a local
+# checkout of the upstream research repo. A later step swaps these for a
+# pinned git dep once the fork/rev settle (docs/plan.md §4 / §9).
+ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }
+
+axum       = "0.8"
+tokio      = { version = "1", features = ["full"] }
+serde_json = "1"
+serde      = { version = "1", features = ["derive"] }
+
+# keccak256 for the SCF key (docs/plan.md ADR-0008) — the `keccak` feature
+# is the classic (pre-NIST) Keccak padding Ethereum uses, not the `sha3`
+# family's 0x06 delimiter.
+tiny-keccak = { version = "1", features = ["keccak"] }
+
+# The deny-by-default proxy (ADR-0012) forwards a denied method's raw JSON
+# body verbatim to `--proxy-upstream`; reuses the same async HTTP client
+# `risepir-http::PirHttpClient` is built on rather than introducing a
+# second one. `json` just enables reqwest's own (already-present) use of
+# the `serde_json` this crate depends on directly anyway — used by
+# `tests/rpc.rs` to drive the JSON-RPC surface as a real client would.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

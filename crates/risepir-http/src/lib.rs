@@ -47,16 +47,23 @@
 //!
 //! # Scope
 //!
-//! Stage 0.3 only: the transport and its codec. No JSON-RPC front end yet
-//! (Stage 0.4) — this crate exposes the raw PIR endpoints only. Deliberately
-//! SimplePIR-concrete rather than generic over `IncrementalPirBackend`:
-//! `docs/plan.md` ADR-0002 already commits this deployment to SimplePIR
-//! (RisePIR-S), and a backend-generic wire format would have to either
-//! erase `SimpleServerParams`' reshape geometry (which has no Frodo
-//! equivalent) or grow a discriminant byte nothing here needs yet.
+//! Stage 0.3: the transport and its codec, server side ([`node`],
+//! [`wire`]). Stage 0.4 adds the client side ([`client`]): an async
+//! [`reqwest`]-based [`client::PirHttpClient`] that drives this same
+//! transport over real HTTP, for callers (the JSON-RPC front end,
+//! `risepir-rpc`) that need to reach a `NodeState` — local or remote —
+//! from outside this process rather than via `tower::oneshot`.
+//! Deliberately SimplePIR-concrete rather than generic over
+//! `IncrementalPirBackend`: `docs/plan.md` ADR-0002 already commits this
+//! deployment to SimplePIR (RisePIR-S), and a backend-generic wire format
+//! would have to either erase `SimpleServerParams`' reshape geometry
+//! (which has no Frodo equivalent) or grow a discriminant byte nothing
+//! here needs yet.
 
+pub mod client;
 pub mod node;
 pub mod wire;
 
+pub use client::{ClientError, PirHttpClient};
 pub use node::{NodeState, MAX_ANSWER_BODY_BYTES};
 pub use wire::WireError;

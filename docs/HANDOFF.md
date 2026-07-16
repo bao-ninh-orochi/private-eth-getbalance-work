@@ -17,15 +17,16 @@ for exact signatures; never guess an API.**
 
 ## Where things stand
 
-Six crates, **119 tests green**, all committed & signed:
-`risepir-proto` (geometry + codecs, 55), `risepir-server` (batched per-block server +
-delete-on-zero, 23), `risepir-client` (response rewind, 10), `risepir-feed` (`Feed` trait
-+ seeded mock, 6), `risepir-http` (axum transport + binary wire codec, 25). JSON-RPC,
-conformance, and benches are **not built yet**.
+Seven crates, **133 tests green**, all committed & signed:
+`risepir-proto` (55), `risepir-server` (+delete-on-zero, 23), `risepir-client` (10),
+`risepir-feed` (seeded mock, 6), `risepir-http` (axum transport + binary wire codec + HTTP
+client, 30), `risepir-rpc` (JSON-RPC :8545 + demo binary, 9). The conformance harness and
+the numbers table are **not built yet**.
 
-The rewind, batching, geometry, the value encoding (task 1), the mock feed (task 2), and
-the HTTP transport (task 3, Stage 0.3 — answer/sync/setup/head/delta, exact-length binary
-codec, fuzzed no-panic) are all done. **Next is task 4** (JSON-RPC `:8545`, Stage 0.4).
+The rewind, batching, geometry, the value encoding (task 1), the mock feed (task 2), the
+HTTP transport (task 3), and the JSON-RPC `:8545` front end (task 4, Stage 0.4 — private
+`eth_getBalance` via keccak256 → client → HTTP → rewind; deny-by-default; `cast balance`
+verified against the mock) are all done. **Next is task 5** (conformance harness, Stage 0.5).
 
 ## The binding rules (do not violate)
 
@@ -71,11 +72,13 @@ the first coverage of the rewind handling deletes). 93 tests green.
 `server_answer`'s release-mode indexing) and is fuzzed for no-panic/OOM; malformed bodies →
 400. End-to-end HTTP test diffs a real client's answers against mock ground truth.
 
-**4. JSON-RPC `:8545` (Stage 0.4).** `eth_getBalance` (private, via the client),
-`eth_chainId`, `eth_blockNumber` (= our head), `net_version`. **Deny everything else by
-default**; `--proxy-upstream <url>` opt-in with a loud warning (ADR-0012). Gate:
-`cast balance <addr> --rpc-url http://localhost:8545` returns the right value against the
-mock. `"latest"` = our head; document that it lags a real RPC (we follow `finalized`).
+**4. JSON-RPC `:8545` (Stage 0.4). ✅ DONE.** New `risepir-rpc` crate: `eth_getBalance`
+(private — keccak256(addr) → `RisePirClient` → HTTP `/answer` → rewind → scan),
+`eth_chainId`, `eth_blockNumber` (= our head), `net_version`; everything else denied
+(-32601) unless `--proxy-upstream <url>` (loud warning, ADR-0012). `risepir-http` gained an
+async `PirHttpClient`. Demo binary seeds known `(address → balance)` accounts (keyed by
+`keccak256`) alongside the churning mock. Gate verified: `cast balance <addr> --rpc-url
+http://localhost:8545` returns the exact wei value; unseeded → `0x0`; `"latest"` = our head.
 
 **5. Conformance harness (Stage 0.5) — the real gate.** One command, pass/fail: ≥1000
 addresses × ≥100 consecutive blocks, byte-identical to in-process ground truth. Sample

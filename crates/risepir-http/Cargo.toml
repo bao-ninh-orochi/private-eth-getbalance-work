@@ -22,6 +22,13 @@ segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/se
 axum  = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 
+# Stage 0.4: the async counterpart to this crate's own axum server —
+# `client` drives the RisePIR HTTP transport from the JSON-RPC front end
+# (`risepir-rpc`) over real HTTP. `default-features = false` +
+# `rustls-tls` avoids pulling in a native TLS toolchain for what is,
+# today, a plain-HTTP localhost deployment.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 [dev-dependencies]
 # Dev-only: the integration test in `tests/http.rs` drives a MockFeed
 # genesis through a real client end to end. Never a runtime dependency of

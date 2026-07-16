@@ -1,0 +1,11 @@
+# Load-bearing, not cosmetic: `target-cpu=native` here is NOT inherited by
+# ikpir-common/-server/-client when they're pulled in as path (or, later,
+# git) dependencies. Cargo only reads `.cargo/config.toml` starting from the
+# current build's workspace root and walking up its ancestors — it never
+# looks inside a dependency's own directory tree, so the upstream repo's own
+# `.cargo/config.toml` (on its `perf/optimized` branch) is invisible to a
+# build launched from here. Without this file, the LWE matvec code — the
+# hot path the project's headline latency numbers depend on — silently
+# builds without AVX2/NEON codegen, and nothing errors to tell you.
+[build]
+rustflags = ["-C", "target-cpu=native"]

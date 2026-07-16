@@ -1,0 +1,504 @@
+//! Geometry calculator: the single source of truth for sizing a RisePIR
+//! deployment from an account count.
+//!
+//! # Purpose
+//!
+//! Everything downstream — the SCF store, the per-segment PIR matrices, the
+//! wire bundles — is sized from a [`Geometry`]. In particular
+//! `plaintext_bits` is *always* derived here from `ikpir_common::pir_params`
+//! (the noise-bound analysis), never hardcoded or guessed at a call site.
+//!
+//! # Formulas
+//!
+//! Verified against the upstream `results/*.csv` bench output — see
+//! `docs/verification.md` ("closed forms reproduce the measured CSVs
+//! exactly") — and pinned by the tests in this module. Note the brief this
+//! project derives from had `R`/`C` swapped for SimplePIR; the formulas
+//! below are the corrected ones.
+//!
+//! ```text
+//! cells_per_slot = ceil((fingerprint_bits + value_bits) / plaintext_bits)
+//! row_width      = bucket_size * cells_per_slot
+//! segment_rows   = num_buckets / arity
+//! slots          = num_buckets * bucket_size
+//! server_db      = num_buckets * bucket_size * cells_per_slot * 4
+//!
+//! FrodoPIR (no reshape):
+//!   hint/segment     = lwe_dim * row_width * 4
+//!   query/segment    = segment_rows * 4
+//!   response/segment = row_width * 4
+//!   A/segment        = segment_rows * lwe_dim * 4
+//!
+//! SimplePIR (near-square reshape):
+//!   k = max(1, round(sqrt(segment_rows / row_width)))
+//!   R = ceil(segment_rows / k)
+//!   C = k * row_width
+//!   hint/segment     = lwe_dim * C * 4
+//!   query/segment    = R * 4
+//!   response/segment = C * 4
+//!   A/segment        = R * lwe_dim * 4
+//! ```
+//!
+//! `lwe_dim` is read from `ikpir_common`'s own defaults
+//! (`FrodoParams::DEFAULT_LWE_DIM` = 1566, `SimpleParams::DEFAULT_LWE_DIM` =
+//! 1275) rather than repeated as a literal here, so this module cannot drift
+//! from the backend it is sizing for.
+
+use ikpir_common::backend::frodo::FrodoParams;
+use ikpir_common::backend::simple::SimpleParams;
+use ikpir_common::pir_params::{frodo_max_plaintext_bits, simple_max_plaintext_bits};
+
+/// Which LWE backend a [`Sizes`] computation targets.
+///
+/// `Frodo` is RisePIR-F (tall matrix, no reshape); `Simple` is RisePIR-S
+/// (near-square reshape). `docs/verification.md` Correction 5 closes the
+/// choice for this project (`RisePIR-S`); `Frodo` is kept for the
+/// comparison row in the numbers table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// RisePIR-S: SimplePIR backend, reshaped to a near-square matrix.
+    Simple,
+    /// RisePIR-F: FrodoPIR backend, no reshape.
+    Frodo,
+}
+
+/// Fully-derived SCF geometry for one deployment.
+///
+/// # Constraints
+///
+/// `arity` is always 2, 3, or 4. `num_buckets` is a power of two for
+/// `arity` 2/4, or `3 * 2^t` for `arity` 3 (mirrors
+/// `segmented_cuckoo::CuckooKVStore`'s own constructors, which reject
+/// anything else). `plaintext_bits` is derived, never hand-set — construct
+/// via [`Geometry::for_accounts`], or, for pinning a specific known-good
+/// configuration (as the tests below do), build the struct literal
+/// directly with a `plaintext_bits` obtained from
+/// `ikpir_common::pir_params`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    /// Candidate buckets per key: 2, 3, or 4.
+    pub arity: u32,
+    /// Total buckets across all segments.
+    pub num_buckets: u32,
+    /// Slots per bucket.
+    pub bucket_size: u32,
+    /// Fingerprint width in bits.
+    pub fingerprint_bits: u32,
+    /// Value width in bits (the `risepir-proto` value codec's `value_bits`).
+    pub value_bits: u32,
+    /// PIR plaintext cell width in bits. Derived — see the struct-level
+    /// constraints note.
+    pub plaintext_bits: u32,
+}
+
+/// Derived byte/count sizes for one [`Geometry`] under one [`Backend`].
+///
+/// All `u64` fields are byte counts; the `u32` fields are counts of cells
+/// or rows (never bytes) as named. `k`, `reshape_rows`, and
+/// `reshape_row_width` apply only to [`Backend::Simple`] (SimplePIR's
+/// reshape); they are `0` for [`Backend::Frodo`], which does not reshape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sizes {
+    /// Plaintext cells per slot: `ceil((fingerprint_bits + value_bits) / plaintext_bits)`.
+    pub cells_per_slot: u32,
+    /// Cells per row: `bucket_size * cells_per_slot`. Not bytes.
+    pub row_width: u32,
+    /// Buckets (rows of the per-segment matrix) per segment: `num_buckets / arity`.
+    pub segment_rows: u32,
+    /// SimplePIR reshape factor. `0` for [`Backend::Frodo`].
+    pub k: u32,
+    /// SimplePIR reshape row count `R`. `0` for [`Backend::Frodo`].
+    pub reshape_rows: u32,
+    /// SimplePIR reshape row width `C`, in cells. `0` for [`Backend::Frodo`].
+    pub reshape_row_width: u32,
+    /// Server hint size per segment, in bytes.
+    pub hint_per_segment: u64,
+    /// Client query size per segment, in bytes.
+    pub query_per_segment: u64,
+    /// Server response size per segment, in bytes.
+    pub response_per_segment: u64,
+    /// Public matrix `A` size per segment, in bytes.
+    pub a_per_segment: u64,
+    /// Whole-store flat cell array size, in bytes: `num_buckets * bucket_size * cells_per_slot * 4`.
+    pub server_db: u64,
+    /// Whole-store slot count: `num_buckets * bucket_size`. Not bytes.
+    pub slots: u64,
+    /// `accounts / slots`. Not meaningful (and not bounded to `[0, 1]`) if
+    /// `accounts` was not the count `slots` was sized for.
+    pub load_factor: f64,
+}
+
+/// Errors constructing a [`Geometry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeomError {
+    /// `arity` was not 2, 3, or 4.
+    InvalidArity(u32),
+    /// `bucket_size` was 0.
+    InvalidBucketSize,
+    /// `fingerprint_bits` or `value_bits` was 0.
+    InvalidFieldWidth,
+    /// The account count needs a `num_buckets` that does not fit in `u32`.
+    TooManyAccounts,
+}
+
+impl std::fmt::Display for GeomError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidArity(a) => write!(f, "arity must be 2, 3, or 4, got {a}"),
+            Self::InvalidBucketSize => write!(f, "bucket_size must be >= 1"),
+            Self::InvalidFieldWidth => write!(f, "fingerprint_bits and value_bits must both be >= 1"),
+            Self::TooManyAccounts => {
+                write!(f, "account count requires a num_buckets that does not fit in u32")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GeomError {}
+
+/// Target load factor `for_accounts` sizes towards: `accounts / slots <= 0.75`.
+///
+/// `docs/plan.md` §9: "run at ~75% load for headroom."
+const TARGET_LOAD_NUM: u128 = 3;
+const TARGET_LOAD_DEN: u128 = 4;
+
+impl Geometry {
+    /// Picks the smallest `num_buckets` (respecting the arity shape
+    /// constraint) with `accounts / (num_buckets * bucket_size) <=` the
+    /// fixed target load of `0.75`, then derives `plaintext_bits` from
+    /// `ikpir_common::pir_params` for `backend` at that geometry.
+    ///
+    /// The target-load search is done in exact `u128` integer arithmetic
+    /// (not `f64`), so it cannot drift from `0.75` by floating-point
+    /// rounding at large account counts.
+    ///
+    /// # Errors
+    ///
+    /// [`GeomError::InvalidArity`] if `arity` is not 2, 3, or 4;
+    /// [`GeomError::InvalidBucketSize`] if `bucket_size == 0`;
+    /// [`GeomError::InvalidFieldWidth`] if `fingerprint_bits == 0` or
+    /// `value_bits == 0`; [`GeomError::TooManyAccounts`] if the resulting
+    /// `num_buckets` would not fit in `u32`.
+    pub fn for_accounts(
+        accounts: u64,
+        arity: u32,
+        bucket_size: u32,
+        fingerprint_bits: u32,
+        value_bits: u32,
+        backend: Backend,
+    ) -> Result<Self, GeomError> {
+        if bucket_size == 0 {
+            return Err(GeomError::InvalidBucketSize);
+        }
+        if fingerprint_bits == 0 || value_bits == 0 {
+            return Err(GeomError::InvalidFieldWidth);
+        }
+
+        // buckets_needed = ceil(accounts / (bucket_size * TARGET_LOAD))
+        //                = ceil(accounts * TARGET_LOAD_DEN / (bucket_size * TARGET_LOAD_NUM))
+        let numerator = u128::from(accounts) * TARGET_LOAD_DEN;
+        let denominator = u128::from(bucket_size) * TARGET_LOAD_NUM;
+        let buckets_needed = numerator.div_ceil(denominator);
+
+        let num_buckets_u128 = match arity {
+            2 | 4 => buckets_needed.max(u128::from(arity)).next_power_of_two(),
+            3 => {
+                let segment = buckets_needed.div_ceil(3).max(1).next_power_of_two();
+                segment * 3
+            }
+            other => return Err(GeomError::InvalidArity(other)),
+        };
+        let num_buckets = u32::try_from(num_buckets_u128).map_err(|_| GeomError::TooManyAccounts)?;
+        let segment_rows = num_buckets / arity;
+
+        let plaintext_bits = match backend {
+            Backend::Frodo => frodo_max_plaintext_bits(segment_rows),
+            Backend::Simple => simple_max_plaintext_bits(
+                segment_rows,
+                bucket_size,
+                fingerprint_bits,
+                value_bits,
+                SimpleParams::DEFAULT_SIGMA,
+            ),
+        };
+
+        Ok(Self {
+            arity,
+            num_buckets,
+            bucket_size,
+            fingerprint_bits,
+            value_bits,
+            plaintext_bits,
+        })
+    }
+
+    /// Derives per-segment and whole-store sizes for `backend` at this
+    /// geometry. Uses `self.plaintext_bits` as given — it is not
+    /// re-derived, so a `Geometry` built for one backend can (deliberately)
+    /// be sized under the other for side-by-side comparison; see
+    /// [`Backend`].
+    ///
+    /// `accounts` feeds only `Sizes::load_factor`; pass the same count used
+    /// to build `self` via [`Geometry::for_accounts`] to get a meaningful
+    /// ratio.
+    ///
+    /// # Panics
+    ///
+    /// If any intermediate size overflows its integer type. This is a
+    /// deployer-configuration bug (e.g. an absurd `value_bits`), not
+    /// attacker input — `Geometry` is never built from untrusted bytes —
+    /// so a loud panic is preferable to silent wraparound.
+    pub fn sizes(&self, backend: Backend, accounts: u64) -> Sizes {
+        let cells_per_slot = self
+            .fingerprint_bits
+            .checked_add(self.value_bits)
+            .expect("fingerprint_bits + value_bits overflowed u32")
+            .div_ceil(self.plaintext_bits);
+        let row_width = self
+            .bucket_size
+            .checked_mul(cells_per_slot)
+            .expect("row_width = bucket_size * cells_per_slot overflowed u32");
+        let segment_rows = self.num_buckets / self.arity;
+
+        let slots = u64::from(self.num_buckets) * u64::from(self.bucket_size);
+        let server_db = u64::from(self.num_buckets)
+            .checked_mul(u64::from(self.bucket_size))
+            .and_then(|v| v.checked_mul(u64::from(cells_per_slot)))
+            .and_then(|v| v.checked_mul(4))
+            .expect("server_db overflowed u64");
+
+        let (k, reshape_rows, reshape_row_width, hint_per_segment, query_per_segment, response_per_segment, a_per_segment) =
+            match backend {
+                Backend::Frodo => {
+                    let lwe_dim = u64::from(FrodoParams::DEFAULT_LWE_DIM);
+                    let hint = lwe_dim * u64::from(row_width) * 4;
+                    let query = u64::from(segment_rows) * 4;
+                    let response = u64::from(row_width) * 4;
+                    let a = u64::from(segment_rows) * lwe_dim * 4;
+                    (0, 0, 0, hint, query, response, a)
+                }
+                Backend::Simple => {
+                    let (k, r, c) = reshape_dims(segment_rows, row_width);
+                    let lwe_dim = u64::from(SimpleParams::DEFAULT_LWE_DIM);
+                    let hint = lwe_dim * u64::from(c) * 4;
+                    let query = u64::from(r) * 4;
+                    let response = u64::from(c) * 4;
+                    let a = u64::from(r) * lwe_dim * 4;
+                    (k, r, c, hint, query, response, a)
+                }
+            };
+
+        Sizes {
+            cells_per_slot,
+            row_width,
+            segment_rows,
+            k,
+            reshape_rows,
+            reshape_row_width,
+            hint_per_segment,
+            query_per_segment,
+            response_per_segment,
+            a_per_segment,
+            server_db,
+            slots,
+            load_factor: accounts as f64 / slots as f64,
+        }
+    }
+}
+
+/// `(k, R, C)` for SimplePIR's near-square reshape of an `n_rows x
+/// row_width` segment: `k = max(1, round(sqrt(n_rows / row_width)))`, `R =
+/// ceil(n_rows / k)`, `C = k * row_width`.
+///
+/// Mirrors `ikpir_common::backend::simple`'s private `reshape_dims`
+/// bit-for-bit (same `f64` sqrt-then-round, same argument order) — that
+/// function is `pub(crate)` in the upstream crate and not reachable from
+/// here, so this is a from-scratch re-implementation, not a wrapper.
+/// Verified identical by the pinning tests below, which reproduce
+/// `ikpir_common`'s own bench CSVs (`docs/verification.md`).
+fn reshape_dims(n_rows: u32, row_width: u32) -> (u32, u32, u32) {
+    debug_assert!(n_rows > 0 && row_width > 0);
+    let ratio = f64::from(n_rows) / f64::from(row_width);
+    let k = ratio.sqrt().round().max(1.0) as u32;
+    let reshape_rows = n_rows.div_ceil(k);
+    let reshape_row_width = k
+        .checked_mul(row_width)
+        .expect("reshape_row_width = k * row_width overflowed u32");
+    (k, reshape_rows, reshape_row_width)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pinning test (arity 4, `num_buckets` 65536, `bucket_size` 4, `fp`
+    /// 32, `value_bits` 256): reproduces the upstream bench CSV exactly for
+    /// both backends. This is the regression that proves the formulas.
+    #[test]
+    fn pinned_arity4_65536() {
+        let segment_rows = 65536 / 4;
+        assert_eq!(segment_rows, 16384);
+
+        let frodo_pb = frodo_max_plaintext_bits(segment_rows);
+        assert_eq!(frodo_pb, 11);
+        let frodo_geom = Geometry {
+            arity: 4,
+            num_buckets: 65536,
+            bucket_size: 4,
+            fingerprint_bits: 32,
+            value_bits: 256,
+            plaintext_bits: frodo_pb,
+        };
+        let frodo_sizes = frodo_geom.sizes(Backend::Frodo, 0);
+        assert_eq!(frodo_sizes.cells_per_slot, 27);
+        assert_eq!(frodo_sizes.row_width, 108);
+        assert_eq!(frodo_sizes.segment_rows, 16384);
+        assert_eq!(frodo_sizes.hint_per_segment, 676_512);
+
+        let simple_pb =
+            simple_max_plaintext_bits(segment_rows, 4, 32, 256, SimpleParams::DEFAULT_SIGMA);
+        assert_eq!(simple_pb, 10);
+        let simple_geom = Geometry {
+            plaintext_bits: simple_pb,
+            ..frodo_geom
+        };
+        let simple_sizes = simple_geom.sizes(Backend::Simple, 0);
+        assert_eq!(simple_sizes.cells_per_slot, 29);
+        assert_eq!(simple_sizes.row_width, 116);
+        assert_eq!(simple_sizes.k, 12);
+        assert_eq!(simple_sizes.reshape_rows, 1366);
+        assert_eq!(simple_sizes.reshape_row_width, 1392);
+        assert_eq!(simple_sizes.hint_per_segment, 7_099_200);
+    }
+
+    /// Pinning test at the mainnet extrapolation point: `arity=3,
+    /// num_buckets=3*2^25, bucket_size=4, fp=32, value_bits=96`. Both
+    /// backends land on `plaintext_bits==8` here (unlike the arity-4 point
+    /// above, where they differ) — a useful second data point precisely
+    /// because it does *not* exercise the same coincidence.
+    #[test]
+    fn pinned_mainnet_point() {
+        let num_buckets = 3 * (1u32 << 25);
+        let segment_rows = num_buckets / 3;
+        assert_eq!(segment_rows, 1 << 25);
+
+        let frodo_pb = frodo_max_plaintext_bits(segment_rows);
+        let simple_pb =
+            simple_max_plaintext_bits(segment_rows, 4, 32, 96, SimpleParams::DEFAULT_SIGMA);
+        assert_eq!(frodo_pb, 8);
+        assert_eq!(simple_pb, 8);
+
+        let geom = Geometry {
+            arity: 3,
+            num_buckets,
+            bucket_size: 4,
+            fingerprint_bits: 32,
+            value_bits: 96,
+            plaintext_bits: simple_pb,
+        };
+        let simple_sizes = geom.sizes(Backend::Simple, 0);
+        assert_eq!(simple_sizes.row_width, 64);
+        assert_eq!(simple_sizes.k, 724);
+        assert_eq!(simple_sizes.reshape_rows, 46346);
+        assert_eq!(simple_sizes.reshape_row_width, 46336);
+        assert_eq!(simple_sizes.server_db, 25_769_803_776);
+
+        let frodo_geom = Geometry {
+            plaintext_bits: frodo_pb,
+            ..geom
+        };
+        let frodo_sizes = frodo_geom.sizes(Backend::Frodo, 0);
+        assert_eq!(frodo_sizes.row_width, 64);
+        assert_eq!(frodo_sizes.server_db, 25_769_803_776);
+    }
+
+    #[test]
+    fn for_accounts_rejects_bad_arity() {
+        for bad in [0u32, 1, 5, 6, 100] {
+            assert_eq!(
+                Geometry::for_accounts(1_000, bad, 4, 32, 96, Backend::Simple),
+                Err(GeomError::InvalidArity(bad))
+            );
+        }
+    }
+
+    #[test]
+    fn for_accounts_rejects_zero_bucket_size() {
+        assert_eq!(
+            Geometry::for_accounts(1_000, 4, 0, 32, 96, Backend::Simple),
+            Err(GeomError::InvalidBucketSize)
+        );
+    }
+
+    #[test]
+    fn for_accounts_rejects_zero_field_widths() {
+        assert_eq!(
+            Geometry::for_accounts(1_000, 4, 4, 0, 96, Backend::Simple),
+            Err(GeomError::InvalidFieldWidth)
+        );
+        assert_eq!(
+            Geometry::for_accounts(1_000, 4, 4, 32, 0, Backend::Simple),
+            Err(GeomError::InvalidFieldWidth)
+        );
+    }
+
+    #[test]
+    fn for_accounts_enforces_arity_shape() {
+        for arity in [2u32, 4] {
+            let g = Geometry::for_accounts(1_234_567, arity, 4, 32, 96, Backend::Simple).unwrap();
+            assert!(g.num_buckets.is_power_of_two());
+            assert!(g.num_buckets >= arity);
+        }
+        let g = Geometry::for_accounts(1_234_567, 3, 4, 32, 96, Backend::Simple).unwrap();
+        assert_eq!(g.num_buckets % 3, 0);
+        assert!((g.num_buckets / 3).is_power_of_two());
+    }
+
+    #[test]
+    fn for_accounts_never_exceeds_target_load() {
+        for accounts in [1u64, 100, 98_304, 98_305, 196_608, 10_000_000] {
+            for arity in [2u32, 3, 4] {
+                for bucket_size in [1u32, 2, 4] {
+                    let g = Geometry::for_accounts(accounts, arity, bucket_size, 32, 96, Backend::Simple)
+                        .unwrap();
+                    let sizes = g.sizes(Backend::Simple, accounts);
+                    assert!(
+                        sizes.load_factor <= 0.75 + 1e-9,
+                        "accounts={accounts} arity={arity} bucket_size={bucket_size}: load_factor={} > 0.75",
+                        sizes.load_factor
+                    );
+                }
+            }
+        }
+    }
+
+    /// The regression this whole module exists to prevent: picking
+    /// `num_buckets = 65536` via `accounts` lands exactly on the pinned
+    /// arity-4 configuration above.
+    #[test]
+    fn for_accounts_reproduces_pinned_num_buckets() {
+        // num_buckets=65536 is the smallest power of two >= accounts/3 for
+        // any accounts in (98304, 196608]; pick the upper boundary.
+        let g = Geometry::for_accounts(196_608, 4, 4, 32, 256, Backend::Frodo).unwrap();
+        assert_eq!(g.num_buckets, 65536);
+        assert_eq!(g.plaintext_bits, 11);
+    }
+
+    proptest::proptest! {
+        /// `sizes()` never panics for any geometry `for_accounts` can
+        /// produce, across a wide sweep of inputs.
+        #[test]
+        fn sizes_never_panics_on_for_accounts_output(
+            accounts in 1u64..50_000_000,
+            arity_idx in 0usize..3,
+            bucket_size in 1u32..=4,
+            fingerprint_bits in 8u32..=32,
+            value_bits in 8u32..=512,
+        ) {
+            let arity = [2u32, 3, 4][arity_idx];
+            let backend = if arity_idx % 2 == 0 { Backend::Simple } else { Backend::Frodo };
+            let g = Geometry::for_accounts(accounts, arity, bucket_size, fingerprint_bits, value_bits, backend).unwrap();
+            let _ = g.sizes(backend, accounts);
+        }
+    }
+}

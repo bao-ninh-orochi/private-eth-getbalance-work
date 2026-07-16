@@ -1,0 +1,18 @@
+[package]
+name        = "risepir-proto"
+version     = "0.1.0"
+edition.workspace = true
+publish     = false
+description = "Pure types, geometry math, and wire codec for the RisePIR-backed private eth_getBalance service. No I/O, no async."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# PATH dependency for now (local checkout of the upstream research repo).
+# A later step swaps this for a pinned git dep once the fork/rev settle
+# (see docs/plan.md §4 and §9's "ikpir-common = { git = ..., rev = ... }").
+ikpir-common = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+
+[dev-dependencies]
+proptest = "1"

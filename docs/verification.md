@@ -1,5 +1,14 @@
 # Verification log — the brief's claims vs. the code
 
+> **Status: this is the evidence log, not the current spec.** It records what was
+> measured and checked against the IKPIR source. The measured numbers, the closed-form
+> reproductions, the rewind/batching/Frodo/withdrawal findings, and the Sepolia-scale
+> facts all remain valid. Where it discusses *Sepolia-first* or a *bounded universe*,
+> those framings are **superseded** — the project now targets **mainnet** with a
+> **complete nonzero-balance set** (see [`plan.md`](plan.md), ADR-0013/0015/0016).
+> [`plan.md`](plan.md) is the authoritative current spec.
+
+
 The brief says: *"Treat everything in this section as a prior to check, not fact.
 Re-derive before you rely on it."* This is that re-derivation.
 

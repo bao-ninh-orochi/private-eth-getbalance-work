@@ -1,0 +1,104 @@
+# Handoff prompt — continue building private-ETH-getBalance
+
+*Paste this into a fresh session to continue. It is self-contained; the linked docs are
+the detail.*
+
+---
+
+You are continuing a proof-of-concept **private `eth_getBalance` over RisePIR** (LWE
+keyword-PIR). Work in `/Users/admin/Documents/private-ETH-getBalance` (git repo, remote
+`bao-ninh-orochi/private-ETH-getBalance`, branch `main`).
+
+**Before writing code, read, in order:** `docs/plan.md` (authoritative spec),
+`docs/adr/README.md` (decisions + rationale), `docs/sync.md`, `docs/data-acquisition.md`.
+Skim `docs/verification.md` for the measured evidence. The PIR primitive you build on is
+at `/Users/admin/Documents/CANS2026/Incremental-Keyword-PIR/crates/` — **read its source
+for exact signatures; never guess an API.**
+
+## Where things stand
+
+Four crates, **81 tests green**, all committed & signed:
+`risepir-proto` (geometry + codecs, 51), `risepir-server` (batched per-block server, 21),
+`risepir-client` (response rewind, 9). `risepir-feed`, HTTP, JSON-RPC, conformance, and
+benches are **not built yet**.
+
+The rewind, batching, and geometry are done and correct. The one thing the built code
+does *not* yet reflect is the **value-encoding decision** below — that is task 1.
+
+## The binding rules (do not violate)
+
+- **Never return a wrong answer.** Erroring is fine; labelled-stale is fine; a silently
+  wrong balance is total failure. Every `NotFound`/`DecodeFailed`/checksum path exists
+  for this. When in doubt, fail loudly.
+- **Never hardcode `plaintext_bits` or geometry** — derive via `risepir_proto::Geometry`
+  (which calls `ikpir_common::pir_params`).
+- **Validate every length before allocating** — the server ingests attacker-controlled
+  blobs; malformed input must give a clean error, never a panic or OOM.
+- **Plan before implementing; use Sonnet subagents to implement** (this driving session
+  plans and reviews). Keep the "avoid upstream changes to the IKPIR crates" posture —
+  everything so far needs none.
+- **Run the tests you write and report real output.** Don't claim green without running.
+- Commits: the signing key is in the macOS keychain (`ssh-add --apple-use-keychain` was
+  run), so signing works; `commit.gpgsign=true` is global. Push directly to `main` (this
+  is the user's private repo — no fork, no PR). Sign every commit.
+
+## Tasks, in order
+
+**1. Value-encoding upgrade — 64-bit-effective fingerprint (ADR-0009).**
+The built crates use an interim `fp32 + balance‖checksum` encoding. Change the value to
+`key_tag(32b) ‖ balance(96b) ‖ checksum(16b)` (widths tunable via `Geometry`):
+- `risepir-proto`: make `ValueCodec` a **slot codec** taking `(address_hash, balance)` →
+  cells and `(address_hash, cells)` → `Found/NotFound/DecodeFailed`. `key_tag = H₂(addr)`,
+  `checksum = H(balance)`, any fast hash (xxh3, distinct seeds).
+- `risepir-server::apply_block`: compute `key_tag` from the address hash (already the key).
+- `risepir-client` scan: check SCF-fp → `key_tag` → `checksum` in that order (mismatch on
+  key_tag ⇒ keep scanning ⇒ NotFound; mismatch on checksum ⇒ DecodeFailed). The rewind
+  logic itself does not change.
+- Add a test asserting the effective false-positive rate is ~2⁻⁶⁰ (query many nonexistent
+  addresses against a full store, assert zero hits over a large sample). Keep all 81 green.
+
+**2. `risepir-feed` with a mock (Stage 0.2).** An interface `Feed` producing
+`BlockUpdate`s, plus a `mock` impl: ~1M keys, ~300 changes every 12 s, **realistic
+wei-scale balances** (not small ints — the delta codec's win depends on it). Deterministic
+and seeded. Wire it to `RisePirServer::apply_block` + the delta ring. Handle
+insert/update/**delete-on-zero** (ADR-0015).
+
+**3. HTTP transport (Stage 0.3).** `POST /answer`, `GET /delta/{block}` (immutable,
+cacheable), `GET /sync?from=&to=` (coalesced), `GET /setup`, `GET /head`. Binary codec via
+`risepir-proto`. `RwLock<Server>` on the hot path (ADR-0010). Length-validate all input.
+
+**4. JSON-RPC `:8545` (Stage 0.4).** `eth_getBalance` (private, via the client),
+`eth_chainId`, `eth_blockNumber` (= our head), `net_version`. **Deny everything else by
+default**; `--proxy-upstream <url>` opt-in with a loud warning (ADR-0012). Gate:
+`cast balance <addr> --rpc-url http://localhost:8545` returns the right value against the
+mock. `"latest"` = our head; document that it lags a real RPC (we follow `finalized`).
+
+**5. Conformance harness (Stage 0.5) — the real gate.** One command, pass/fail: ≥1000
+addresses × ≥100 consecutive blocks, byte-identical to in-process ground truth. Sample
+must include high-activity, zero-balance, never-existed, **created-during-run**, and
+contract accounts. Diff continuously, not once.
+
+**6. Numbers table (Stage 3).** Measure (don't guess): per-block patch time as a **curve
+over mutations/block**, per-block delta bytes (naive vs compact codec, on realistic
+balances), hint size, query/response bytes, answer latency, client memory, and — the
+headline denominator — **full-rebuild time**. Use the `perf/optimized` worktree +
+`target-cpu=native`.
+
+**Then real data (Stage 1):** a `risepir-feed` `rpc` impl (dRPC, keyless: `prestateTracer`
+⊕ `block.withdrawals[]`, per `docs/sync.md`), snapshot ingest from BigQuery
+`crypto_ethereum.balances` (or `goog_blockchain_ethereum_mainnet_us`), and per-block
+reconciliation against archive `eth_getBalance`.
+
+**Decision gate before real data** (needs a GCP free-tier account — ask the user to run
+it): `bq query 'SELECT count(*) FROM \`bigquery-public-data.crypto_ethereum.balances\`
+WHERE eth_balance > 0'` — confirms the table is fresh in 2026 *and* returns the nonzero
+count that fixes the geometry. Until then, Stages 0.x proceed on the mock.
+
+## Known open items to keep in view
+
+- Switch the path deps to the pinned git dep (`rev = 042d868`) before hand-off is final.
+- Upstream PR candidates (offer, don't block on): a **batch-mutation API** and **seed
+  injection in `server_setup`** (setup is currently non-reproducible). Details in
+  `docs/verification.md`.
+- Confirm the mainnet nonzero-balance count (sets geometry) — ~100M assumed → ~12 GB
+  server RAM.

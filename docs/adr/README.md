@@ -119,22 +119,40 @@ which kills the classic "walk plain state" enumeration recipe — *except for us
 because `HashedAccountState` is already in our key space. A decision the brief made
 for other reasons turns out to solve a problem it didn't know existed.
 
-### ADR-0009 — `value = balance ‖ checksum`; hard-fail on overflow **[NEW]**
+### ADR-0009 — Value = `key_tag ‖ balance ‖ checksum`; 64-bit-effective fingerprint; hard-fail on overflow **[REVISED — folds in the 64-bit-fingerprint decision]**
 
-**Chosen:** carry a checksum inside the value; **error** on mismatch; **hard-fail**
-at ingest if `balance ≥ 2^balance_bits`. Checksum width is configurable (0 = off) so
-its cost is measurable.
-**Rejected:** bare 12-byte balances, which the brief's §3 proposes.
-**Why:** two silent-wrong-answer paths the brief does not close. (1) §3's "12 bytes
-holds any balance" rests on mainnet's ~1.2e26 wei supply; **Sepolia is a testnet with
-faucet-minted ETH and no supply discipline**, so the premise may not hold — silent
-truncation is exactly what the invariant forbids. (2) The fingerprint authenticates
-the *key*; **nothing authenticates the value**. If LWE noise corrupts a value cell
-while the fingerprint still matches, the RPC returns a **corrupted balance**. A
-checksum converts that into a loud error. `value_bits` is ours to choose, so this
-costs ~+12% `row_width` at 16 bits/`pb=8` and needs no upstream change.
-**Note:** if noise corrupts a *fingerprint* cell the scan misses and we answer
-`0x0` — inherent, documented, not fixable in our layer.
+**Chosen:** the SCF keeps its 32-bit positioning fingerprint; the **value** carries
+`key_tag(32b) ‖ balance(96b) ‖ checksum(16b)` (widths tunable). `key_tag = H₂(address)`
+extends the effective key fingerprint to **64 bits**; `checksum = H(balance)` guards
+the balance. Ingest **hard-fails** if `balance ≥ 2^balance_bits` (never truncates).
+**Rejected:**
+- bare 12-byte balances (silent-corruption and 2⁻²⁸ false-positive risk);
+- changing `segmented-cuckoo`'s fingerprint type from `u32` to `u64` to get a literal
+  64-bit fingerprint — an upstream change to the primitive, and **unnecessary**: the
+  fingerprint's only job is disambiguation, and a 32-bit SCF fingerprint plus a 32-bit
+  `key_tag` in the value requires 64-bit agreement to accept a slot, giving **identical
+  ~2⁻⁶⁰ false-positive resistance at identical size** (total slot bits, hence
+  `cells_per_slot`, are the same either way). Positioning with 32 bits is ample.
+**Why:** three silent-wrong-answer paths, all closed in our own layer (`value_bits` is
+ours to choose, zero upstream change):
+1. **False positives.** A query for a nonexistent/zero account can hit a slot whose
+   fingerprint collides. At 32-bit that is ~2⁻²⁸ — a wrong answer (garbage instead of
+   `0x0`). The 64-bit-effective tag drops it to ~2⁻⁶⁰. *(This is the user's decision:
+   "use a 64-bit fingerprint to mitigate the false-positive rate.")*
+2. **Balance corruption.** If LWE noise corrupts a value cell while the key still
+   matches, the RPC would return a corrupted balance. The checksum turns that into
+   `DecodeFailed` (error), never a number.
+3. **Overflow.** Silent truncation of a balance ≥ `2^balance_bits` is exactly what the
+   invariant forbids; hard-fail instead.
+**Scan order (client):** SCF-fp → `key_tag` (mismatch ⇒ not our key ⇒ keep scanning ⇒
+`NotFound` ⇒ `0x0`) → `checksum` (mismatch ⇒ `DecodeFailed`). Keeping `key_tag` and
+`checksum` separate is what preserves the `NotFound`-vs-`DecodeFailed` distinction — a
+single combined tag `H(address‖balance)` would make a corrupted real account look like
+"not found" and answer `0x0` (a wrong answer).
+**Cost:** value grows to 144 bits ⇒ `row_width` ~88 at `bucket_size 4`/`pb 8` (~1.4×
+the untagged DB). Tunable: narrower tags trade FP/corruption resistance for size.
+**Residual:** if noise corrupts an SCF-*fingerprint* cell the scan misses and we answer
+`0x0` — inherent to the filter layer, documented, not fixable here.
 
 ### ADR-0010 — Strict lockstep behind a `Mutex` **[DEVIATES from §8]**
 
@@ -149,15 +167,26 @@ carry ~500 MB of `A`+hint at Sepolia scale — untenable. Justified by §6's
 consequence (a): the steady-state query rate is ≈0, because a client queries an
 account **once** and then tracks it from the public delta stream forever.
 
-### ADR-0011 — Persist the account map; rebuild SCF + hint on restart
+### ADR-0011 — Persist the KV-SCF (matrix D) + hints; snapshot source is the recovery authority **[REVISED — no separate account map]**
 
-**Chosen:** persist our authoritative `address_hash → balance` map + the block
-number; rebuild SCF and hints on start. **Rejected:** persisting SCF cells/hints.
-**Why:** §9 requires deciding this. `CuckooKVStore` **discards keys** after hashing,
-so IKPIR cannot rebuild itself from internal state — the app layer must hold the
-authoritative map anyway for `TableFull` recovery (`server.rs` documents exactly
-this). Given that, persisting the map is strictly simpler, and restart cost = the
-full-rebuild time we already measure as the §1 denominator. Honest and self-consistent.
+**Chosen:** the KV-SCF cell array (matrix `D`) and the per-segment hints **are** the
+persisted database; serialize and reload them on restart. Do **not** keep a separate
+authoritative `address → balance` map. On `TableFull` or detected corruption,
+re-bootstrap from the external snapshot source (BigQuery / snap, ADR-0014), which is
+re-fetchable.
+**Rejected:** holding a local `HashMap<address_hash, balance>` alongside the store
+(the earlier plan). Superseded by ADR-0016 — the user's decision to work directly in
+`D`.
+**Why:** the store *is* the database (ADR-0016); persisting it is the natural, minimal
+choice and avoids a second copy that could drift from `D`. `CuckooKVStore` discards
+addresses after hashing, so it cannot rebuild itself at a *larger* `num_buckets` — but
+that is only needed on `TableFull`, and the snapshot source already gives an
+authoritative, re-fetchable rebuild input, so no local map is required. At ~75% load
+`TableFull` is years away regardless.
+**Reading a current balance by address** (e.g. to apply a withdrawal to its prior
+value, `sync.md`) goes through the store's key lookup — reliable at the 64-bit-effective
+fingerprint of ADR-0009 — or falls back to `eth_getBalance` for the ~32k withdrawal
+addresses. Restart cost when reloading persisted `D`+hints is I/O, not a full setup.
 
 ### ADR-0012 — Non-`eth_getBalance` methods: deny by default, opt-in proxy **[DEVIATES from §10]**
 
@@ -231,8 +260,27 @@ need not be stored; their absence *is* the correct answer. This is exact, and it
 (a) shrinks the set from ~300M to ~100M, halving the server to ~9 GB, and (b) removes
 the bounded-universe honesty gap (ADR-0013), because with a complete nonzero set,
 absence unambiguously means "balance is zero".
-**Interaction with the false-positive caveat:** a cuckoo false positive (~2⁻²⁷–2⁻²⁹ at
-our geometry) can still make an absent account return garbage instead of `0x0` — that
-is inherited from the ChalametPIR line, stated in §7, and the conformance run includes
-nonexistent addresses to bound it. Nonzero-only storage does not change that rate; it
-only removes the *systematic* gap, not the probabilistic one.
+**Interaction with the false-positive caveat:** a cuckoo false positive can still make
+an absent account return garbage instead of `0x0`. ADR-0009's 64-bit-effective
+fingerprint drops that to ~2⁻⁶⁰; the conformance run includes nonexistent addresses to
+bound it. Nonzero-only storage removes the *systematic* gap; ADR-0009 handles the
+*probabilistic* one.
+
+### ADR-0016 — Build the KV-SCF / matrix D directly; no intermediate KV map **[NEW — user decision]**
+
+**Chosen:** stream each snapshot pair `(address, balance)` straight into the Segmented
+Cuckoo KV store as `fp(address) ‖ value`. That store's flat cell array **is** the
+RisePIR database matrix `D`. There is no separate `keccak256(address) → balance` map
+and no "build a KV, then convert to `D`" step.
+**Rejected:** materialising an intermediate `HashMap` (or on-disk KV) and converting it
+to `D`.
+**Why:** the two are the same object — `CuckooKVStore` already *is* a keyed store whose
+`as_cells()` is `D`, and `RisePirServer` already reads `D` straight from it. An
+intermediate map would be a redundant second copy that can drift, and it is exactly the
+thing ADR-0011 now drops. Snapshot ingest becomes `for (addr, bal) in snapshot:
+store.insert(keccak(addr), encode(addr, bal))`, and a balance change is one
+`store.update` / `insert` / `delete` (ADR-0015). The store's key lookup also serves the
+feed's own reads (withdrawal prior-value), reliable at the 64-bit-effective fingerprint.
+**Consequence:** the store discards addresses after hashing, so recovery at a larger
+size comes from the external snapshot (ADR-0011/0014), not from local state. Accepted —
+the snapshot is authoritative and re-fetchable, and `TableFull` is years away at ~75%.

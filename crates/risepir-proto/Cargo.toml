@@ -9,10 +9,7 @@ description = "Pure types, geometry math, and wire codec for the RisePIR-backed 
 unsafe_code = "forbid"
 
 [dependencies]
-# PATH dependency for now (local checkout of the upstream research repo).
-# A later step swaps this for a pinned git dep once the fork/rev settle
-# (see docs/plan.md §4 and §9's "ikpir-common = { git = ..., rev = ... }").
-ikpir-common = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+ikpir-common = { workspace = true }
 
 # `ValueCodec::key_tag`'s hash (ADR-0009): deliberately the *same* xxh3
 # crate `segmented-cuckoo` uses for the SCF's own fingerprint, but called

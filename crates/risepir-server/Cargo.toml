@@ -13,11 +13,8 @@ unsafe_code = "forbid"
 # ValueCodec, and the wire codec. Pure types, no I/O (see its own docs).
 risepir-proto = { path = "../risepir-proto" }
 
-# PATH dependencies for now, matching risepir-proto's own note: a local
-# checkout of the upstream research repo. A later step swaps these for a
-# pinned git dep once the fork/rev settle (docs/plan.md §4 / §9).
-segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }
-ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
+segmented-cuckoo = { workspace = true }
+ikpir-common = { workspace = true }
 
 [dev-dependencies]
 # Dev-only: the one thing ikpir-server *is* used for here is as an
@@ -26,4 +23,4 @@ ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ik
 # ikpir-server's own crate-private `hint_patch::fold_mutations_into_row_deltas`)
 # produces the identical sparse delta transcript upstream's own private
 # implementation would. Never a runtime dependency of this crate.
-ikpir-server = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-server" }
+ikpir-server = { workspace = true }

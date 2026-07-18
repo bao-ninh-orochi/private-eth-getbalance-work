@@ -17,5 +17,5 @@ risepir-proto = { path = "../risepir-proto" }
 [dev-dependencies]
 risepir-server   = { path = "../risepir-server" }
 risepir-client   = { path = "../risepir-client" }
-ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
-segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }
+ikpir-common = { workspace = true }
+segmented-cuckoo = { workspace = true }

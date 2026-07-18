@@ -9,3 +9,9 @@
 # builds without AVX2/NEON codegen, and nothing errors to tell you.
 [build]
 rustflags = ["-C", "target-cpu=native"]
+
+# The pinned IKPIR git dep lives in a private repo; cargo's built-in libgit2
+# fetch cannot use the system credential helper, so fetch via the git CLI
+# (which can — the same credentials `git push` on this repo already uses).
+[net]
+git-fetch-with-cli = true

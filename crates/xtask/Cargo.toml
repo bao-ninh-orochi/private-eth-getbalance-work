@@ -21,8 +21,5 @@ risepir-server = { path = "../risepir-server" }
 risepir-client = { path = "../risepir-client" }
 risepir-feed   = { path = "../risepir-feed" }
 
-# PATH dependencies for now, matching the sibling crates' own note: a local
-# checkout of the upstream research repo. A later step swaps these for a
-# pinned git dep once the fork/rev settle (docs/plan.md §4 / §9).
-ikpir-common     = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/ikpir-common" }
-segmented-cuckoo = { path = "../../../CANS2026/Incremental-Keyword-PIR/crates/segmented-cuckoo" }
+ikpir-common = { workspace = true }
+segmented-cuckoo = { workspace = true }

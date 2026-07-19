@@ -1,5 +1,8 @@
 # Getting the account-balance data — cheaply, for mainnet
 
+*(Analysis document. The executable steps — gate query, export commands, run —
+now live in [`deploy.md`](deploy.md) §2.)*
+
 Answers the question: *can we get a `(address, balance)` key-value database for the
 PoC, cheaply/free, near-real-time, without terabytes of storage — and for mainnet?*
 

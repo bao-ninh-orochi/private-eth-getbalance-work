@@ -32,31 +32,26 @@ that turns "faster" into "otherwise impossible" (§7).
 ## 2. Current state
 
 Seven crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
-(signed, Verified), **135 tests passing**:
+(signed, Verified), **164 tests passing**, and the binary **runs against real
+mainnet** (recorded live evidence in [`deploy.md`](deploy.md) §5):
 
-| crate | what | tests |
-|---|---|---|
-| `risepir-proto` | geometry calculator, `BlockUpdate`/`BlockDelta`, value + delta codecs | 55 |
-| `risepir-server` | batched per-block server over the public primitives + delta ring | 23 |
-| `risepir-client` | the response-rewind client | 10 |
-| `risepir-feed` | chain-follow feed: `Feed` trait + deterministic seeded `MockFeed` | 6 |
-| `risepir-http` | axum transport (answer/sync/setup/head/delta) + binary wire codec + HTTP client | 30 |
-| `risepir-rpc` | JSON-RPC `:8545` front end (private `eth_getBalance`, deny-by-default) + demo binary | 9 |
-| `xtask` | conformance harness (Stage 0.5 gate) + `bench` numbers table (Stage 3) + CLI | 2 |
+| crate | what |
+|---|---|
+| `risepir-proto` | geometry calculator, `BlockUpdate`/`BlockDelta` (+withdrawal credits), value + delta codecs, keccak |
+| `risepir-server` | batched per-block server; **verified fp ∧ `key_tag` store ops** (ADR-0017); credits (ADR-0018); delta ring; `from_parts` restart path |
+| `risepir-client` | the response-rewind client |
+| `risepir-feed` | `MockFeed` (seeded) + `snapshot` (BigQuery balances loader) + `rpc` (mainnet finalized follow) |
+| `risepir-http` | axum transport (answer/sync/setup/head/delta) + binary wire codec + HTTP client |
+| `risepir-rpc` | JSON-RPC `:8545` front end; `mock`/`mainnet` subcommands; state persistence; partial mode |
+| `xtask` | conformance harness (Stage 0.5 gate) + `bench` numbers table (Stage 3) + CLI |
 
-Beyond unit tests: `cargo run -p xtask --release -- conformance` is the Stage 0.5 gate
-(1201 addresses × 120 blocks, all five account categories, 0 mismatches, exit 0), and
-`xtask bench` measures the Stage 3 numbers table into [`docs/numbers.md`](numbers.md)
-(full-rebuild vs per-block-patch headline, delta compaction, sizes, answer latency).
-
-All three crates are stable and now carry the §3.5 / ADR-0009 value encoding —
-`key_tag ‖ balance ‖ checksum`, a 64-bit-effective fingerprint. The ordering trap is
-pinned, and the ~2⁻⁶⁰ false-positive rate is asserted by a dedicated test (weak 8-bit
-SCF fingerprint + 32-bit `key_tag`, 100k negative queries, zero hits, with a
-non-vacuity control proving fp-only collisions actually occurred).
-
-`risepir-feed` ships the `mock` producer (Stage 0.2); its `rpc`/`exex` producers are
-Stage 1. Not yet built: the conformance harness and the numbers table.
+Beyond unit tests, three heavier gates: `cargo run -p xtask --release -- conformance`
+(1201 addresses × 120 blocks, all five account categories, 0 mismatches);
+`cargo test -p risepir-feed --release -- --ignored` (live: trace-derived balances
+byte-exact vs an independent provider on a real finalized block); and the recorded
+live deployment ([`deploy.md`](deploy.md) §5 — 8/8 private queries exact on real
+mainnet blocks). `xtask bench` measures the Stage 3 numbers table into
+[`docs/numbers.md`](numbers.md).
 
 ## 3. Architecture
 
@@ -216,9 +211,12 @@ combined resistance is a true ~2⁻⁶⁰.
 - **Follow**: one `BlockUpdate` per block from the feed → `apply_block` → push the
   delta to the ring. Full loop, cadence, withdrawal handling, and reconciliation in
   [`sync.md`](sync.md).
-- **Decision gate before wiring real data** (needs a GCP free-tier account; cannot run
-  from the dev box): one `bq` query confirms freshness *and* returns
-  `count(*) WHERE eth_balance > 0`, which fixes the geometry.
+- **Decision gate before the complete-set run** (needs a GCP account; cannot run from
+  the dev box): one `bq` query confirms freshness *and* returns
+  `count(*) WHERE eth_balance > 0` (fixes the geometry) *and* the snapshot block —
+  scripted verbatim in [`deploy.md`](deploy.md) §2.1, alongside the export commands
+  and the run itself. Everything up to that gate is built and live-verified
+  ([`deploy.md`](deploy.md) §5).
 
 ## 6. Stages
 
@@ -232,7 +230,10 @@ before touching real data.
 | 0.3 ✅ | HTTP transport (answer/sync/setup/head) + delta objects | **done** — exact-length codec, fuzzed no-panic/OOM, end-to-end over HTTP |
 | 0.4 ✅ | JSON-RPC `:8545` (`eth_getBalance`, `eth_chainId`, `eth_blockNumber`, `net_version`) | **done** — `cast balance --rpc-url localhost:8545` verified against the mock |
 | 0.5 ✅ | conformance vs. in-process ground truth | **done** — `xtask conformance`: 1201×120, all 5 categories, 0 mismatches, exit 0 |
-| 1.x | real mainnet: snapshot + `risepir-feed` rpc + reconciliation | diff vs archive RPC per block |
+| 1.a ✅ | snapshot ingest (BigQuery balances CSV/CSV.gz → KV-SCF) | **done** — strict parser, geometry from real count ([`deploy.md`](deploy.md) §2) |
+| 1.b ✅ | `risepir-feed` rpc: finalized follow, prestateTracer ⊕ withdrawals | **done** — live gate: trace-derived balances byte-exact vs an independent provider |
+| 1.c ✅ | mainnet binary: bootstrap/follow/reconcile/persist + partial mode | **done** — live: 8/8 private queries exact on real blocks ([`deploy.md`](deploy.md) §5) |
+| 1.d | complete-set run: user-run `bq` gate + snapshot export + 16–24 GB box | the one remaining step — runbook [`deploy.md`](deploy.md) §2, gate query included |
 | 3.x ✅ | numbers table (measured, not guessed) | **done** — `xtask bench` → [`docs/numbers.md`](numbers.md); full-rebuild denominator measured |
 
 ## 7. The headline, measured

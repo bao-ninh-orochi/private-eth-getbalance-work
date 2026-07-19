@@ -10,42 +10,59 @@ change, which at Ethereum scale is impossible every 12 s; RisePIR folds a block'
 balance changes into a **~5 ms** incremental hint patch with no dependence on database
 size. See [`docs/plan.md`](docs/plan.md) §7.
 
-## Status
+## Status: runs against real mainnet
 
-Four crates, **81 tests passing**, all commits signed:
+```bash
+cargo build --release -p risepir-rpc
+./target/release/risepir-rpc mainnet --partial     # zero-prerequisite live demo
+./target/release/risepir-rpc mock                  # synthetic demo, no network
+```
 
-| crate | role | state |
-|---|---|---|
-| `risepir-proto` | geometry, `BlockUpdate`/`BlockDelta`, value + delta codecs | built (51 tests) |
-| `risepir-server` | batched per-block server over the PIR primitives + delta ring | built (21 tests) |
-| `risepir-client` | the response-rewind client | built (9 tests), interim value encoding |
-| `risepir-feed` | chain ingest (mock / rpc / exex) | **todo** |
+`mainnet` follows finalized blocks over keyless public RPC (dRPC traces ⊕
+block withdrawals), answers `eth_getBalance` privately on `:8545`
+(`cast balance <addr> --rpc-url http://127.0.0.1:8545`), reconciles sampled
+accounts against an independent provider every few blocks, and persists/reloads
+its full PIR state. Recorded live evidence — 8/8 private queries byte-exact
+against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
+which is also the complete runbook (including the BigQuery snapshot export that
+upgrades `--partial` to the complete ~100 M-account set).
 
-Next: the value-encoding upgrade (64-bit-effective fingerprint), the mock feed, HTTP
-transport, JSON-RPC `:8545`, and the conformance harness. See
-[`docs/HANDOFF.md`](docs/HANDOFF.md).
+Seven crates, **164 tests**, plus two heavier gates: `cargo run -p xtask
+--release -- conformance` (≥1200 addrs × 120 blocks, byte-identical, all account
+categories) and the live test `cargo test -p risepir-feed --release --
+--ignored` (trace-derived balances vs an independent provider on a real
+finalized block).
+
+| crate | role |
+|---|---|
+| `risepir-proto` | geometry, `BlockUpdate`/`BlockDelta`, value + delta codecs, keccak |
+| `risepir-server` | batched per-block server; verified (fp ∧ key_tag) store ops; delta ring |
+| `risepir-client` | the response-rewind client |
+| `risepir-feed` | chain ingest: seeded mock, BigQuery snapshot loader, mainnet rpc feed |
+| `risepir-http` | axum PIR transport + binary wire codec + HTTP client |
+| `risepir-rpc` | JSON-RPC `:8545` front end + `mock`/`mainnet` binary + state files |
+| `xtask` | conformance harness + measured numbers table |
 
 ## Docs
 
 | doc | what |
 |---|---|
 | [`docs/plan.md`](docs/plan.md) | **authoritative current spec** — read first |
+| [`docs/deploy.md`](docs/deploy.md) | **the runbook**: demo in 5 min, complete mainnet, costs, live evidence |
 | [`docs/adr/README.md`](docs/adr/README.md) | every decision, with rationale + rejected alternatives |
 | [`docs/sync.md`](docs/sync.md) | keeping the DB current from the chain |
-| [`docs/data-acquisition.md`](docs/data-acquisition.md) | getting the initial balance snapshot cheaply |
+| [`docs/data-acquisition.md`](docs/data-acquisition.md) | snapshot source analysis (BigQuery / snap / Xatu) |
+| [`docs/numbers.md`](docs/numbers.md) | the measured Stage-3 numbers table (`xtask bench`) |
 | [`docs/verification.md`](docs/verification.md) | evidence log — what was measured/checked (historical) |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | the next session's task list |
 
 ## Build
 
-```bash
-cargo test --workspace          # 81 tests
-```
-
-Depends on the IKPIR primitive (`segmented-cuckoo`, `ikpir-common`, …). Currently via
-path deps to a local checkout of the `perf/optimized` branch; the pinned git dep is
-`{ git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }`. `.cargo/config.toml`
-sets `target-cpu=native` (git deps do **not** inherit the upstream perf config).
+Depends on the IKPIR primitive, pinned as a git dependency
+(`bao-ninh-orochi/IKPIR` @ `042d868`, the `perf/optimized` tip) — building needs
+read access to that repo; `.cargo/config.toml` sets `git-fetch-with-cli` (system
+git credentials) and `target-cpu=native` (git deps do **not** inherit the
+upstream perf config).
 
 ## The core idea in one paragraph
 

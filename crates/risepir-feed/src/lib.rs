@@ -31,6 +31,7 @@
 //! mock emitted, in order, so that "the client's answer differs from
 //! `balance_of`" is always a real bug, never an artefact of the oracle.
 
+pub mod rpc;
 pub mod snapshot;
 
 use std::collections::HashMap;
@@ -58,19 +59,52 @@ pub trait Feed {
 
 /// Errors a [`Feed`] can report.
 ///
-/// [`MockFeed`] never errors — it is a pure in-memory generator — but the
-/// type exists so the future `rpc`/`exex` feeds (network failures, trace
-/// gaps, reorg detection) share one error surface.
+/// [`MockFeed`] never errors — it is a pure in-memory generator — but
+/// [`rpc::RpcFeed`] uses every variant here. None of them is ever
+/// downgraded to a guessed value: a block whose change set cannot be
+/// fully and exactly determined is a block that does not get applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedError {
-    /// A feed-internal failure (network, trace, or decode) with a message.
+    /// A feed-internal failure with a message.
     Internal(String),
+    /// A JSON-RPC call failed: transport error, non-2xx status, a
+    /// JSON-RPC `error` member, or a missing `result`.
+    Rpc {
+        /// The JSON-RPC method that failed.
+        method: String,
+        /// What went wrong.
+        detail: String,
+    },
+    /// A JSON-RPC result arrived but did not have the required shape —
+    /// distinct from [`Self::Rpc`] because it usually means a provider
+    /// behaved unexpectedly rather than a network blip, and retrying the
+    /// same call will keep failing.
+    Parse {
+        /// The JSON-RPC method whose result was malformed.
+        context: String,
+        /// What was malformed about it.
+        detail: String,
+    },
+    /// The endpoint's `eth_chainId` did not match the deployment's
+    /// expected chain — refusing at startup beats corrupting a database
+    /// with another chain's balances.
+    ChainIdMismatch {
+        /// The chain id this deployment was configured for.
+        expected: u64,
+        /// The chain id the endpoint actually reported.
+        got: u64,
+    },
 }
 
 impl std::fmt::Display for FeedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Internal(msg) => write!(f, "feed error: {msg}"),
+            Self::Rpc { method, detail } => write!(f, "rpc {method} failed: {detail}"),
+            Self::Parse { context, detail } => write!(f, "rpc {context}: malformed result: {detail}"),
+            Self::ChainIdMismatch { expected, got } => {
+                write!(f, "endpoint serves chain id {got}, expected {expected}")
+            }
         }
     }
 }

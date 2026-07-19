@@ -261,7 +261,25 @@ gcloud init                    # browser login; create project e.g. "risepir-poc
 
 Activate the **$300/90-day free trial** in the console (console.cloud.google.com —
 it asks for a card for identity; when the trial ends resources are *stopped*, not
-silently billed, unless you explicitly upgrade). Then:
+silently billed, unless you explicitly upgrade).
+
+**Then link billing to the project — the step everyone trips on.** A billing
+account is its own object in GCP: *every* project (in an organization or under
+"No organization" — either is fine) must be explicitly linked to one, or
+`services enable compute` fails with
+`FAILED_PRECONDITION: Billing account … not found` (verified: exactly this
+happened on first setup, 2026-07-19):
+
+```bash
+gcloud billing accounts list          # note the ACCOUNT_ID with OPEN: True
+gcloud billing projects link risepir-poc --billing-account=<ACCOUNT_ID>
+```
+
+(Older SDKs spell it `gcloud beta billing …`. Empty list ⇒ the trial was never
+activated — do that first. A permission error on linking ⇒ the billing account
+belongs to your organization and restricts outside projects — either link via
+the console as the org admin, or Manage Resources → select the project →
+Migrate it into the organization, then link.) Now:
 
 ```bash
 gcloud config set project risepir-poc

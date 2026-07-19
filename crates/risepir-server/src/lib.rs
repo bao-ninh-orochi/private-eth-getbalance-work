@@ -56,6 +56,7 @@ mod delta_ring;
 mod error;
 mod fold;
 mod server;
+mod verified;
 
 pub use delta_ring::{DeltaRing, DEFAULT_CAPACITY};
 pub use error::ServerError;

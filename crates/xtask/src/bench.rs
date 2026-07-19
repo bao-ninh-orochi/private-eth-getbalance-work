@@ -492,7 +492,7 @@ fn sliced_block(feed: &mut MockFeed, k: usize) -> BlockUpdate {
         .expect("MockFeed always has a next block");
     let block = upd.block;
     let changes = upd.changes.into_iter().take(k).collect();
-    BlockUpdate { block, changes }
+    BlockUpdate { block, changes, credits: vec![] }
 }
 
 /// Applies `warmup_blocks` (discarded) then `measured_blocks` (timed)

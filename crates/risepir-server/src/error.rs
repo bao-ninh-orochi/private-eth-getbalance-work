@@ -58,6 +58,28 @@ pub enum ServerError {
         /// Actual query count supplied.
         got: usize,
     },
+    /// The verified candidate-bucket scan (ADR-0017,
+    /// `crate::verified`) found this key's entry sitting *behind* a
+    /// foreign fingerprint-colliding slot in probe order
+    /// (`shadowed: true`), or found more than one slot matching both the
+    /// fingerprint and the `key_tag` (`shadowed: false`). Either way the
+    /// store's key-addressed first-match ops would act on the wrong slot,
+    /// so the block is rejected loudly instead — never a silent
+    /// corruption of a colliding account's entry. Recovery: re-bootstrap
+    /// from the authoritative snapshot source (ADR-0011); at 32-bit
+    /// fingerprints this is a ~2⁻³²-per-colliding-pair event, expected
+    /// years apart even at mainnet change rates.
+    FingerprintAmbiguity {
+        /// `true`: the key's own entry exists but is preceded by a
+        /// foreign fp-match. `false`: two slots matched fp + `key_tag`.
+        shadowed: bool,
+    },
+    /// A verified read (`crate::verified`) found this key's entry (fp and
+    /// `key_tag` both match) but its balance failed the value checksum —
+    /// the store's own cells are corrupt. Serving must stop and the
+    /// operator re-bootstrap; continuing would risk the exact
+    /// silently-wrong-balance the checksum exists to catch.
+    CorruptStoredValue,
     /// The store rejected a write for a reason other than `TableFull` /
     /// `NotFound`. In practice this means
     /// [`segmented_cuckoo::CuckooError::InvalidParams`] — a value-length
@@ -83,6 +105,24 @@ impl fmt::Display for ServerError {
             Self::MalformedQuery { expected, got } => {
                 write!(f, "malformed query: expected {expected} segments, got {got}")
             }
+            Self::FingerprintAmbiguity { shadowed: true } => write!(
+                f,
+                "fingerprint ambiguity: the key's entry is shadowed by a foreign \
+                 fingerprint-colliding slot earlier in probe order; refusing a write that \
+                 would corrupt the colliding account (re-bootstrap from the snapshot source)"
+            ),
+            Self::FingerprintAmbiguity { shadowed: false } => write!(
+                f,
+                "fingerprint ambiguity: more than one slot matches this key's fingerprint \
+                 AND key_tag; refusing to guess which is authoritative (re-bootstrap from \
+                 the snapshot source)"
+            ),
+            Self::CorruptStoredValue => write!(
+                f,
+                "stored value corrupt: a slot matching this key's fingerprint and key_tag \
+                 failed its balance checksum; refusing to serve from a corrupt store \
+                 (re-bootstrap from the snapshot source)"
+            ),
             Self::Store(msg) => write!(f, "store rejected write: {msg}"),
         }
     }

@@ -85,6 +85,15 @@ set from ~300M ever-seen to ~100M nonzero, and (b) makes "absent ⟺ zero" an *e
 equivalence, so there is no bounded-universe honesty gap. A balance going to zero is a
 **delete**; zero→nonzero is an **insert**; nonzero→nonzero is an **update**.
 
+Revisited at the user's request and **kept** (ADR-0017): the unease about deletes was
+real but belonged to the store's fp-only first-match ops, not to nonzero-only storage
+— every key-addressed op now goes through a verified fp ∧ `key_tag` candidate scan
+(`risepir-server::verified`), absent-key deletes are provable no-ops, and ambiguous
+probe states fail loudly instead of corrupting a colliding account. Store-all would
+have tripled RAM without removing that hazard class. EIP-4895 withdrawal credits ride
+`BlockUpdate::credits` and resolve against the verified stored prior inside
+`apply_block` (ADR-0018).
+
 ### 3.3 The rewind is the mechanism; hint patching is garbage collection (ADR-0003)
 
 The client pins `(A, H₀, block₀)` plus a rolling public `ΔD` and **never has to be at
@@ -253,6 +262,7 @@ local path-dep is on `main`, which lacks the parallel kernels, so it measures sl
 | hazard | enforcement |
 |---|---|
 | balance ≥ 2^balance_bits | hard-fail at ingest, never truncate (ADR-0009) |
+| fp-only store op hits a colliding foreign entry | verified fp ∧ `key_tag` scan before every update/delete; absent-delete = no-op; shadowed/duplicate → loud `FingerprintAmbiguity` (ADR-0017) |
 | cuckoo false positive | 64-bit effective fingerprint → ~2⁻⁶⁰ (§3.5); conformance includes nonexistent addrs |
 | decode corrupts a balance cell | value checksum → `DecodeFailed` (error), never a number |
 | step-4/5 ordering | `ordering_trap_is_real`; conformance includes created-during-run accounts |

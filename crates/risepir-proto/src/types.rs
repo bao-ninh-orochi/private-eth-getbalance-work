@@ -24,6 +24,17 @@ pub struct BlockUpdate {
     /// once within the block (e.g. sender then later recipient); the last
     /// entry for a given key wins when folded into store mutations.
     pub changes: Vec<(AddressHash, Balance)>,
+    /// `(address_hash, amount_wei)` beacon-chain withdrawal credits
+    /// (EIP-4895). Unlike [`Self::changes`], these are **relative**: the
+    /// amount is *added* to whatever the store holds for the address at
+    /// apply time (after every entry of `changes` has been applied), because
+    /// withdrawals appear in the block body as amounts, not post-balances,
+    /// and the store is the authoritative prior value (ADR-0016 /
+    /// `docs/sync.md`). Empty for feeds with no withdrawal concept (mock)
+    /// and for pre-Shanghai blocks. May contain duplicates for one address
+    /// (several validators withdrawing to one recipient in one block); they
+    /// accumulate.
+    pub credits: Vec<(AddressHash, Balance)>,
 }
 
 /// Sparse per-segment row deltas: `(row_index_within_segment, edits)` pairs,

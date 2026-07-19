@@ -48,14 +48,20 @@ archive `eth_getBalance`):
 2. **New values**, computed without a per-account RPC on the hot path:
    - tx-touched account → the `post.balance` of the **last** transaction that changed
      it. `post` is **sparse**: an absent field means *unchanged, not zero*
-     (`new = post[a].balance ?? pre[a].balance`).
-   - withdrawal recipient → `store[addr] + Σ amount` (gwei ×10⁹). Our store *is* the
-     authoritative prior value (ADR-0016), read by key at the 64-bit-effective
-     fingerprint. No RPC needed.
-3. `apply_block(N, changes)`.
+     (`new = post[a].balance ?? pre[a].balance`); an account present in `pre` but
+     absent from `post` entirely was destroyed → balance `0`.
+   - withdrawal recipient → emit `(addr, Σ amount_gwei × 10⁹)` into
+     **`BlockUpdate::credits`** — a *relative* amount. `apply_block` itself resolves
+     `verified-stored-prior + amount` after the block's absolute changes (ADR-0018):
+     the store *is* the authoritative prior (ADR-0016), read through the verified
+     fp ∧ `key_tag` scan (ADR-0017). No RPC needed, atomic with the block's epoch.
+3. `apply_block({block: N, changes, credits})`.
 
 Map each change to a store op (ADR-0015): `0→nonzero` = **insert**, `nonzero→nonzero`
-= **update**, `nonzero→0` = **delete**.
+= **update**, `nonzero→0` = **delete** — each dispatched through the verified scan
+(ADR-0017), so a `(addr, 0)` for an account that was never stored (touched while
+staying at zero — routine in real blocks) is a provable no-op, never a chance to
+delete a fingerprint-colliding foreign entry.
 
 **If a node is ever self-hosted**, Reth **ExEx** replaces all of the above:
 `ChainCommitted` hands you `BundleState` with `original_info.balance → info.balance`

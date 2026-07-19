@@ -616,6 +616,7 @@ mod tests {
         srv.apply_block(&BlockUpdate {
             block: 1,
             changes: genesis,
+            credits: vec![],
         })
         .unwrap();
 
@@ -637,7 +638,7 @@ mod tests {
             if block == TARGET_BLOCK {
                 changes.push((target, target_balance));
             }
-            let delta = srv.apply_block(&BlockUpdate { block, changes }).unwrap();
+            let delta = srv.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
             client.ingest_delta(&delta).unwrap();
         }
         assert!(
@@ -680,6 +681,7 @@ mod tests {
         srv.apply_block(&BlockUpdate {
             block: 1,
             changes: vec![(addr(0), 10_000u128)],
+            credits: vec![],
         })
         .unwrap();
 
@@ -692,6 +694,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 2,
                 changes: vec![(target, target_balance)],
+                credits: vec![],
             })
             .unwrap();
         client.ingest_delta(&delta).unwrap();
@@ -737,6 +740,7 @@ mod tests {
         srv.apply_block(&BlockUpdate {
             block: 1,
             changes: genesis.clone(),
+            credits: vec![],
         })
         .unwrap();
 
@@ -777,7 +781,7 @@ mod tests {
                 }
             }
 
-            let delta = srv.apply_block(&BlockUpdate { block, changes }).unwrap();
+            let delta = srv.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
             client.ingest_delta(&delta).unwrap();
         }
         assert_eq!(client.pinned_block(), 1, "never GC'd");
@@ -822,6 +826,7 @@ mod tests {
         srv.apply_block(&BlockUpdate {
             block: 1,
             changes: genesis,
+            credits: vec![],
         })
         .unwrap();
         let mut client: RisePirClient<SimplePirBackend> =
@@ -835,7 +840,7 @@ mod tests {
                     (addr(i), u128::from(rng.next() % (1u64 << 40)))
                 })
                 .collect();
-            let delta = srv.apply_block(&BlockUpdate { block, changes }).unwrap();
+            let delta = srv.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
             client.ingest_delta(&delta).unwrap();
         }
 
@@ -892,6 +897,7 @@ mod tests {
         srv.apply_block(&BlockUpdate {
             block: 1,
             changes: genesis,
+            credits: vec![],
         })
         .unwrap();
 
@@ -927,6 +933,7 @@ mod tests {
         srv.apply_block(&BlockUpdate {
             block: 1,
             changes: vec![(target, target_balance)],
+            credits: vec![],
         })
         .unwrap();
 

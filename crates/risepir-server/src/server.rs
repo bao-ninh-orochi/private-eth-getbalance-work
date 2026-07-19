@@ -23,10 +23,11 @@
 use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend};
 use segmented_cuckoo::{CuckooError, CuckooKVStore, CuckooParams, IndexScheme, SchemeMeta};
 
-use risepir_proto::{BlockDelta, BlockUpdate, SegmentRowDeltas, ValueCodec};
+use risepir_proto::{AddressHash, Balance, BlockDelta, BlockUpdate, SegmentRowDeltas, ValueCodec};
 
 use crate::error::ServerError;
 use crate::fold::fold_mutations_into_row_deltas;
+use crate::verified::{self, Located};
 
 /// Snapshot of a [`RisePirServer`]'s full preprocessing state, e.g. for
 /// bootstrapping a fresh client or for tests that need to inspect hints
@@ -177,6 +178,78 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         err
     }
 
+    /// Apply one `(address, absolute balance)` mutation through the
+    /// verified-scan dispatch (ADR-0017; see [`Self::apply_block`]'s
+    /// "per-change handling"). Does **not** drain the mutation log on
+    /// failure — the caller funnels every error through
+    /// [`Self::reject_block`].
+    fn apply_change(&mut self, addr: &AddressHash, balance: Balance) -> Result<(), ServerError> {
+        let located = verified::locate(&self.store, &self.value_codec, addr);
+
+        if balance == 0 {
+            // Delete-on-zero (ADR-0015): the database holds only *nonzero*
+            // balances — a lookup that misses answers `0x0` by absence —
+            // so zero is a **deletion**, never a stored zero.
+            return match located {
+                Located::Own(_) => match self.store.delete(addr) {
+                    Ok(()) => Ok(()),
+                    // `locate` just proved the first fp-match is ours, so
+                    // `delete` cannot miss; surfaced defensively.
+                    Err(e) => Err(ServerError::Store(format!(
+                        "delete failed after verified locate said Own: {e:?}"
+                    ))),
+                },
+                // The load-bearing arm: absent means NO-OP even when
+                // foreign fp-matches exist — upstream's fp-only delete
+                // would have destroyed one of them.
+                Located::Absent { .. } => Ok(()),
+                Located::Shadowed => Err(ServerError::FingerprintAmbiguity { shadowed: true }),
+                Located::DuplicateTag => Err(ServerError::FingerprintAmbiguity { shadowed: false }),
+                Located::Corrupt => Err(ServerError::CorruptStoredValue),
+            };
+        }
+
+        let encoded = self.value_codec.encode(addr, balance).map_err(ServerError::Encode)?;
+
+        match located {
+            Located::Own(_) => match self.store.update(addr, &encoded) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(ServerError::Store(format!(
+                    "update failed after verified locate said Own: {e:?}"
+                ))),
+            },
+            Located::Absent { .. } => match self.store.insert(addr, &encoded) {
+                Ok(()) => Ok(()),
+                Err(CuckooError::TableFull) => Err(ServerError::TableFull),
+                Err(CuckooError::InvalidParams(msg)) => Err(ServerError::Store(msg)),
+                Err(CuckooError::NotFound) => Err(ServerError::Store(
+                    "CuckooKVStore::insert returned NotFound, which its documented \
+                     contract says cannot happen"
+                        .to_string(),
+                )),
+            },
+            Located::Shadowed => Err(ServerError::FingerprintAmbiguity { shadowed: true }),
+            Located::DuplicateTag => Err(ServerError::FingerprintAmbiguity { shadowed: false }),
+            Located::Corrupt => Err(ServerError::CorruptStoredValue),
+        }
+    }
+
+    /// Verified read of the balance currently stored for `addr` —
+    /// `Ok(None)` if absent, and an error (never a guess) on fingerprint
+    /// ambiguity or a checksum-corrupt slot. This is the read the
+    /// reconciliation loop compares against a reference RPC
+    /// (`docs/sync.md`), and the one place the feed's withdrawal handling
+    /// resolves prior values through (ADR-0016: the store is the
+    /// authority; `CuckooKVStore::get`'s fp-only first-match is exactly
+    /// what this method exists to avoid).
+    pub fn balance_of(&self, addr: &AddressHash) -> Result<Option<Balance>, ServerError> {
+        match verified::get(&self.store, &self.value_codec, addr) {
+            Ok(v) => Ok(v),
+            Err(Located::Corrupt) => Err(ServerError::CorruptStoredValue),
+            Err(_) => Err(ServerError::FingerprintAmbiguity { shadowed: false }),
+        }
+    }
+
     /// Applies one block's worth of balance changes as **one** epoch: one
     /// drain of the store's mutation log, one fold into sparse
     /// per-segment row deltas, and one
@@ -184,21 +257,33 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// segment — regardless of how many changes the block carries. This
     /// is the batching `IkpirServer` cannot do; see the module docs.
     ///
-    /// # Per-change handling
+    /// # Per-change handling — every write is *verified* first (ADR-0017)
+    ///
+    /// The store's own key-addressed ops match on the 32-bit fingerprint
+    /// alone, first match in probe order — which is how a `(addr, 0)` for
+    /// an *absent* account (routinely emitted by a live feed for accounts
+    /// a block touches without their balance leaving zero) could destroy
+    /// a fingerprint-colliding *foreign* account's entry. So each change
+    /// first runs [`crate::verified::locate`] — the server-side twin of
+    /// the client's joint fp + `key_tag` mask — and only then acts:
     ///
     /// For each `(address_hash, balance)` in `update.changes`, in order:
-    /// 0. **`balance == 0` ⇒ delete** ([`CuckooKVStore::delete`],
-    ///    `docs/plan.md` ADR-0015). The store holds only nonzero balances,
-    ///    so zero means "gone", not "stored zero"; deleting an absent key
-    ///    is a no-op (it already answers `0x0` by absence), never an error.
-    ///    The remaining steps run only for a nonzero balance.
-    /// 1. [`risepir_proto::ValueCodec::encode`] — hard-fails rather than
-    ///    truncating an overflowing balance (`docs/plan.md` ADR-0009).
-    /// 2. [`CuckooKVStore::update`], falling back to
-    ///    [`CuckooKVStore::insert`] on
-    ///    [`segmented_cuckoo::CuckooError::NotFound`] (the address's
-    ///    first appearance). An `insert` that exhausts the cuckoo kick
-    ///    budget maps to [`ServerError::TableFull`].
+    /// 0. **`balance == 0` ⇒ delete** (`docs/plan.md` ADR-0015): only if
+    ///    `locate` proves the key's own entry is the first fp-match
+    ///    (`Own`) is [`CuckooKVStore::delete`] called; `Absent` — even
+    ///    with foreign fp-matches present, exactly the case upstream
+    ///    would have mis-deleted — is a **no-op** (an absent account
+    ///    already answers `0x0`).
+    /// 1. Otherwise [`risepir_proto::ValueCodec::encode`] — hard-fails
+    ///    rather than truncating an overflowing balance (ADR-0009).
+    /// 2. `Own` ⇒ [`CuckooKVStore::update`] (provably hits our slot);
+    ///    `Absent` ⇒ [`CuckooKVStore::insert`] (writes only empty slots,
+    ///    cannot corrupt anyone; kick-budget exhaustion maps to
+    ///    [`ServerError::TableFull`]).
+    /// 3. `Shadowed` / `DuplicateTag` ⇒
+    ///    [`ServerError::FingerprintAmbiguity`] and `Corrupt` ⇒
+    ///    [`ServerError::CorruptStoredValue`] — the block is rejected
+    ///    loudly; there is no safe key-addressed write in those states.
     ///
     /// Duplicate addresses within one block are allowed, matching
     /// [`BlockUpdate`]'s own documented contract: each occurrence is
@@ -206,6 +291,16 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// left in the store (an `insert` followed by one or more `update`s
     /// to the same brand-new address ends up with exactly one occupied
     /// slot, not one per occurrence).
+    ///
+    /// # Withdrawal credits
+    ///
+    /// After every entry of `update.changes`, each `(address_hash,
+    /// amount)` in `update.credits` is applied as `stored (or 0 if
+    /// absent) + amount` via the same verified read/write path
+    /// ([`BlockUpdate::credits`]'s docs explain why credits are relative
+    /// while changes are absolute). Credits to the same address
+    /// accumulate in order; `checked_add` overflow rejects the block
+    /// (never wraps).
     ///
     /// # What "one epoch per block" does *not* mean: the atomicity caveat
     ///
@@ -261,76 +356,31 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         }
 
         for (addr, balance) in &update.changes {
-            // Delete-on-zero (ADR-0015): the database holds only *nonzero*
-            // balances — a lookup that misses returns `0x0` by absence — so
-            // a balance of `0` is a **deletion**, never a stored zero.
-            // Deleting a key that is not present is a no-op, not an error:
-            // an absent account already answers `0x0`, so setting it to
-            // zero changes nothing. (`CuckooKVStore::delete` returns
-            // `NotFound` in that case; the two other error arms cannot
-            // happen per its contract and are surfaced defensively, exactly
-            // as the `update`/`insert` arms below do.)
-            if *balance == 0 {
-                match self.store.delete(addr) {
-                    Ok(()) => {}
-                    Err(CuckooError::NotFound) => {}
-                    Err(CuckooError::InvalidParams(msg)) => {
-                        return Err(self.reject_block(ServerError::Store(msg)));
-                    }
-                    Err(CuckooError::TableFull) => {
-                        return Err(self.reject_block(ServerError::Store(
-                            "CuckooKVStore::delete returned TableFull, which its documented \
-                             contract says cannot happen"
-                                .to_string(),
-                        )));
-                    }
-                }
-                continue;
+            if let Err(e) = self.apply_change(addr, *balance) {
+                return Err(self.reject_block(e));
             }
+        }
 
-            let encoded = match self.value_codec.encode(addr, *balance) {
-                Ok(v) => v,
-                Err(e) => return Err(self.reject_block(ServerError::Encode(e))),
+        // Withdrawal credits (EIP-4895): relative amounts, applied after
+        // every absolute change — see the method docs and
+        // `BlockUpdate::credits`. Each resolves against the store's own
+        // verified read (the authoritative prior value, ADR-0016), so a
+        // fingerprint-colliding foreign entry can neither be misread as
+        // the prior nor be overwritten by the credited write.
+        for (addr, amount) in &update.credits {
+            let prior = match verified::get(&self.store, &self.value_codec, addr) {
+                Ok(Some(b)) => b,
+                Ok(None) => 0,
+                Err(Located::Corrupt) => return Err(self.reject_block(ServerError::CorruptStoredValue)),
+                Err(_) => {
+                    return Err(self.reject_block(ServerError::FingerprintAmbiguity { shadowed: false }));
+                }
             };
-
-            match self.store.update(addr, &encoded) {
-                Ok(()) => continue,
-                Err(CuckooError::NotFound) => {} // fall through to insert below
-                Err(CuckooError::TableFull) => {
-                    // `CuckooKVStore::update` never kicks and therefore
-                    // never returns `TableFull` per its documented
-                    // contract; surfaced defensively rather than
-                    // panicking, so a future upstream contract change
-                    // fails loudly as an `Err`, never a panic.
-                    return Err(self.reject_block(ServerError::Store(
-                        "CuckooKVStore::update returned TableFull, which its documented \
-                         contract says cannot happen"
-                            .to_string(),
-                    )));
-                }
-                Err(CuckooError::InvalidParams(msg)) => {
-                    return Err(self.reject_block(ServerError::Store(msg)));
-                }
-            }
-
-            match self.store.insert(addr, &encoded) {
-                Ok(()) => {}
-                Err(CuckooError::TableFull) => {
-                    return Err(self.reject_block(ServerError::TableFull));
-                }
-                Err(CuckooError::InvalidParams(msg)) => {
-                    return Err(self.reject_block(ServerError::Store(msg)));
-                }
-                Err(CuckooError::NotFound) => {
-                    // `CuckooKVStore::insert` never returns `NotFound`;
-                    // see the `update` arm above for the same defensive
-                    // rationale.
-                    return Err(self.reject_block(ServerError::Store(
-                        "CuckooKVStore::insert returned NotFound, which its documented \
-                         contract says cannot happen"
-                            .to_string(),
-                    )));
-                }
+            let Some(credited) = prior.checked_add(*amount) else {
+                return Err(self.reject_block(ServerError::Encode(risepir_proto::ValueError::BalanceOverflow)));
+            };
+            if let Err(e) = self.apply_change(addr, credited) {
+                return Err(self.reject_block(e));
             }
         }
 
@@ -653,7 +703,7 @@ mod tests {
             let changes: Vec<(AddressHash, Balance)> = (0..100u64)
                 .map(|i| (addr(block * 1_000 + i), 1_000_000_000_000_000_000u128 + u128::from(block * 1_000 + i)))
                 .collect();
-            let delta = s.apply_block(&BlockUpdate { block, changes }).unwrap();
+            let delta = s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
             assert_eq!(delta.block, block);
             assert!(
                 delta.per_segment.iter().any(|seg| !seg.is_empty()),
@@ -768,7 +818,7 @@ mod tests {
         let genesis_bundle = risepir.setup();
 
         let n = changes.len() as u64;
-        let risepir_delta = risepir.apply_block(&BlockUpdate { block: n, changes: changes.clone() }).unwrap();
+        let risepir_delta = risepir.apply_block(&BlockUpdate { block: n, changes: changes.clone(), credits: vec![] }).unwrap();
 
         assert!(
             risepir_delta.per_segment.iter().any(|seg| !seg.is_empty()),
@@ -873,6 +923,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 1,
                 changes: vec![(addr(0), 5_000u128), (addr(999), overflow)],
+                credits: vec![],
             })
             .unwrap_err();
         assert_eq!(err, ServerError::Encode(ValueError::BalanceOverflow));
@@ -883,6 +934,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 2,
                 changes: vec![(addr(1), 6_000u128)],
+                credits: vec![],
             })
             .unwrap();
 
@@ -901,6 +953,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 1,
                 changes: vec![(addr(1), 6_000u128)],
+                credits: vec![],
             })
             .unwrap();
 
@@ -923,6 +976,7 @@ mod tests {
         let update = BlockUpdate {
             block: 1,
             changes: vec![(addr(0), overflow_balance)],
+            credits: vec![],
         };
 
         let err = s.apply_block(&update).unwrap_err();
@@ -934,6 +988,7 @@ mod tests {
         let ok_update = BlockUpdate {
             block: 1,
             changes: vec![(addr(0), overflow_balance - 1)],
+            credits: vec![],
         };
         assert!(s.apply_block(&ok_update).is_ok());
     }
@@ -952,6 +1007,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 1,
                 changes: vec![(addr(99_999), 0)],
+                credits: vec![],
             })
             .unwrap();
         assert!(
@@ -977,6 +1033,7 @@ mod tests {
         s.apply_block(&BlockUpdate {
             block: 1,
             changes: vec![(k, 5_000_000_000_000_000_000u128)],
+            credits: vec![],
         })
         .unwrap();
 
@@ -984,6 +1041,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 2,
                 changes: vec![(k, 0)],
+                credits: vec![],
             })
             .unwrap();
         assert!(
@@ -995,6 +1053,7 @@ mod tests {
             .apply_block(&BlockUpdate {
                 block: 3,
                 changes: vec![(k, 0)],
+                credits: vec![],
             })
             .unwrap();
         assert!(
@@ -1019,7 +1078,7 @@ mod tests {
 
         for block in 1u64..=8 {
             let changes = vec![(addr(block), 42_000_000_000_000_000_000u128 + u128::from(block))];
-            let d = s.apply_block(&BlockUpdate { block, changes }).unwrap();
+            let d = s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
             ring.push(d.clone());
             deltas.push(d);
         }
@@ -1059,7 +1118,7 @@ mod tests {
                     (pool[idx], balance)
                 })
                 .collect();
-            let d = s.apply_block(&BlockUpdate { block, changes }).unwrap();
+            let d = s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
             deltas.push(d);
         }
 
@@ -1109,7 +1168,7 @@ mod tests {
 
         for block in 1u64..=50 {
             let changes = vec![(addr(block), 7_000_000_000_000_000_000u128 + u128::from(block))];
-            s.apply_block(&BlockUpdate { block, changes }).unwrap();
+            s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
         }
 
         let (responses, answered_at) = s
@@ -1170,5 +1229,187 @@ mod tests {
     fn risepir_server_is_send_and_sync() {
         assert_send::<RisePirServer<Segmented3aryScheme, SimplePirBackend>>();
         assert_sync::<RisePirServer<Segmented3aryScheme, SimplePirBackend>>();
+    }
+}
+
+#[cfg(test)]
+mod verified_apply_tests {
+    //! End-to-end `apply_block` behavior under engineered fingerprint
+    //! collisions (ADR-0017) and withdrawal credits — the server-level
+    //! counterpart of `crate::verified`'s store-level tests.
+
+    use super::*;
+    use ikpir_common::backend::simple::SimpleParams;
+    use ikpir_common::pir_params::simple_max_plaintext_bits;
+    use ikpir_common::{SimpleConfig, SimplePirBackend};
+    use risepir_proto::{AddressHash, Balance, ValueError};
+    use segmented_cuckoo::{CuckooParams, Segmented3aryCuckooKVStore, Segmented3aryScheme};
+    use std::collections::HashMap;
+
+    const NUM_BUCKETS: u32 = 3 * 8; // tiny: keeps the birthday search ~2^18
+    const BUCKET_SIZE: u32 = 4;
+    const FP_BITS: u32 = 32;
+    const BALANCE_BITS: u32 = 96;
+
+    fn codec() -> ValueCodec {
+        ValueCodec {
+            key_tag_bits: 32,
+            balance_bits: BALANCE_BITS,
+            checksum_bits: 16,
+        }
+    }
+
+    fn tiny_server() -> RisePirServer<Segmented3aryScheme, SimplePirBackend> {
+        let codec = codec();
+        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 3, BUCKET_SIZE, FP_BITS, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let store = Segmented3aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, codec.value_bits(), pb).unwrap();
+        RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
+    }
+
+    fn addr(i: u64) -> AddressHash {
+        let mut a = [0u8; 32];
+        a[..8].copy_from_slice(&i.to_le_bytes());
+        a
+    }
+
+    /// Same deterministic search as `verified::tests::colliding_pair`.
+    fn colliding_pair(params: &CuckooParams) -> (AddressHash, AddressHash) {
+        let mut seen: HashMap<(u32, u32), u64> = HashMap::new();
+        for i in 0u64..30_000_000 {
+            let a = addr(i);
+            let (fp, idx) = params.candidate_buckets(&a);
+            if let Some(&j) = seen.get(&(fp, idx[0])) {
+                return (addr(j), a);
+            }
+            seen.insert((fp, idx[0]), i);
+        }
+        panic!("no (fingerprint, first-bucket) collision found in 30M keys");
+    }
+
+    fn block(n: u64, changes: Vec<(AddressHash, Balance)>) -> BlockUpdate {
+        BlockUpdate { block: n, changes, credits: vec![] }
+    }
+
+    /// The regression ADR-0017 exists for: a `(A, 0)` change for an
+    /// *absent* A whose fingerprint collides with a present foreign B must
+    /// be a no-op — never a delete of B's entry (which is what the store's
+    /// own fp-only `delete` does; pinned in `verified`'s tests).
+    #[test]
+    fn zero_change_for_absent_colliding_key_is_noop() {
+        let mut s = tiny_server();
+        let (a, b) = colliding_pair(&s.params());
+        let b_balance: Balance = 42_000_000_000_000_000_000u128;
+
+        s.apply_block(&block(1, vec![(b, b_balance)])).unwrap();
+        let delta = s.apply_block(&block(2, vec![(a, 0)])).unwrap();
+
+        assert!(
+            delta.per_segment.iter().all(|seg| seg.is_empty()),
+            "the (A, 0) no-op must produce an empty delta"
+        );
+        assert_eq!(s.block(), 2, "the no-op block still advances the head");
+        assert_eq!(
+            s.balance_of(&b).unwrap(),
+            Some(b_balance),
+            "B's entry must survive a zero-change for its fp-colliding absent neighbour"
+        );
+        assert_eq!(s.balance_of(&a).unwrap(), None);
+    }
+
+    /// Both colliding keys can coexist (insert only writes empty slots),
+    /// verified reads disambiguate them, and a write to the *shadowed* one
+    /// fails loudly with `FingerprintAmbiguity` instead of corrupting the
+    /// foreign entry — then succeeds once the shadow is gone.
+    #[test]
+    fn shadowed_write_fails_loudly_then_recovers() {
+        let mut s = tiny_server();
+        let (a, b) = colliding_pair(&s.params());
+        let b_balance: Balance = 7_000_000_000u128;
+        let a_balance: Balance = 9_999_999_999u128;
+
+        s.apply_block(&block(1, vec![(b, b_balance)])).unwrap();
+        // A is Absent (foreign fp-match present) → verified dispatch takes
+        // the insert path; both now coexist in the shared bucket.
+        s.apply_block(&block(2, vec![(a, a_balance)])).unwrap();
+        assert_eq!(s.balance_of(&a).unwrap(), Some(a_balance));
+        assert_eq!(s.balance_of(&b).unwrap(), Some(b_balance));
+
+        // A is Shadowed (B sits earlier in probe order): update and delete
+        // must both reject the block loudly, changing nothing.
+        let err = s.apply_block(&block(3, vec![(a, 1u128)])).unwrap_err();
+        assert_eq!(err, ServerError::FingerprintAmbiguity { shadowed: true });
+        let err = s.apply_block(&block(3, vec![(a, 0)])).unwrap_err();
+        assert_eq!(err, ServerError::FingerprintAmbiguity { shadowed: true });
+        assert_eq!(s.block(), 2, "rejected blocks must not advance the head");
+        assert_eq!(s.balance_of(&a).unwrap(), Some(a_balance), "A untouched after rejects");
+        assert_eq!(s.balance_of(&b).unwrap(), Some(b_balance), "B untouched after rejects");
+
+        // B is Own (first match) — deleting it is safe, and un-shadows A.
+        s.apply_block(&block(3, vec![(b, 0)])).unwrap();
+        assert_eq!(s.balance_of(&b).unwrap(), None);
+        assert_eq!(s.balance_of(&a).unwrap(), Some(a_balance));
+        s.apply_block(&block(4, vec![(a, 0)])).unwrap();
+        assert_eq!(s.balance_of(&a).unwrap(), None);
+    }
+
+    /// Withdrawal credits: relative amounts, resolved against the store's
+    /// verified prior *after* the block's absolute changes; duplicates
+    /// accumulate; a fresh recipient starts from zero.
+    #[test]
+    fn credits_apply_after_changes_and_accumulate() {
+        let mut s = tiny_server();
+        let (k1, k2) = (addr(1), addr(2));
+
+        // Fresh recipient: two credits in one block accumulate from 0.
+        s.apply_block(&BlockUpdate {
+            block: 1,
+            changes: vec![(k1, 100u128)],
+            credits: vec![(k2, 50u128), (k2, 25u128)],
+        })
+        .unwrap();
+        assert_eq!(s.balance_of(&k1).unwrap(), Some(100));
+        assert_eq!(s.balance_of(&k2).unwrap(), Some(75));
+
+        // Credit stacks on top of the same block's absolute change.
+        s.apply_block(&BlockUpdate {
+            block: 2,
+            changes: vec![(k1, 200u128)],
+            credits: vec![(k1, 5u128)],
+        })
+        .unwrap();
+        assert_eq!(s.balance_of(&k1).unwrap(), Some(205));
+    }
+
+    /// A credit that would overflow `balance_bits` (or `u128` itself)
+    /// rejects the whole block — never wraps, never truncates — and the
+    /// prior state survives.
+    #[test]
+    fn credit_overflow_rejects_block() {
+        let mut s = tiny_server();
+        let k = addr(1);
+        s.apply_block(&block(1, vec![(k, 205u128)])).unwrap();
+
+        // 205 + (2^96 - 1) >= 2^96: encode-level BalanceOverflow.
+        let err = s
+            .apply_block(&BlockUpdate {
+                block: 2,
+                changes: vec![],
+                credits: vec![(k, (1u128 << BALANCE_BITS) - 1)],
+            })
+            .unwrap_err();
+        assert_eq!(err, ServerError::Encode(ValueError::BalanceOverflow));
+
+        // 205 + u128::MAX overflows u128 itself: checked_add-level.
+        let err = s
+            .apply_block(&BlockUpdate {
+                block: 2,
+                changes: vec![],
+                credits: vec![(k, u128::MAX)],
+            })
+            .unwrap_err();
+        assert_eq!(err, ServerError::Encode(ValueError::BalanceOverflow));
+
+        assert_eq!(s.block(), 1);
+        assert_eq!(s.balance_of(&k).unwrap(), Some(205), "prior state survives the rejects");
     }
 }

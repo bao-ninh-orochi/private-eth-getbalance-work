@@ -266,6 +266,64 @@ fingerprint drops that to ~2⁻⁶⁰; the conformance run includes nonexistent 
 bound it. Nonzero-only storage removes the *systematic* gap; ADR-0009 handles the
 *probabilistic* one.
 
+### ADR-0017 — Revisit of ADR-0015 (user request): keep nonzero-only; close the delete hazard with *verified* store ops **[NEW]**
+
+**Context:** the user flagged ADR-0015 ("store only nonzero balances") as possibly
+wrong, proposing to store **all** account-balance pairs instead. The unease is
+justified — but the diagnosis points elsewhere.
+**The real hazard:** `CuckooKVStore::{get, update, delete}` match a slot on the
+**32-bit fingerprint alone, first match in probe order wins**. The live feed
+routinely emits `(addr, 0)` for accounts *not* in the store (touched by a block
+while staying at zero), and delete-on-zero would hand exactly those to `delete` —
+which, at ~`arity · bucket_size · 2⁻³²` per absent-key delete, eventually destroys
+a fingerprint-colliding **foreign** account's entry (~once a year at mainnet change
+rates). That account then silently reads `0x0`: the precise failure the invariant
+forbids. Crucially, **store-all does not fix this class** — `update` carries the
+identical fp-only first-match hazard, and a zero-balance universe still needs
+inserts for never-seen accounts — it only removes deletes while tripling the set
+(~300M ever-seen vs ~100M nonzero ⇒ ~36 GB vs ~12 GB server RAM) and buying nothing
+semantically (`eth_getBalance` answers `0x0` for absent and zero alike; ADR-0015's
+exactness argument is untouched).
+**Chosen:** keep nonzero-only, and route **every** key-addressed store op through a
+verified candidate-bucket scan (`risepir-server`'s `verified` module) — the
+server-side twin of the client's joint fp ∧ `key_tag` mask (ADR-0009):
+- key's own entry is the first fp-match (`Own`) → `update`/`delete` provably act on it;
+- `Absent` → delete is a **no-op** (even with foreign fp-matches present — the case
+  upstream would mis-delete), update falls through to `insert` (writes only empty
+  slots; cannot corrupt anyone);
+- `Shadowed` (foreign fp-match earlier in probe order) / `DuplicateTag` → loud
+  `FingerprintAmbiguity`, block rejected; checksum-corrupt slot → loud
+  `CorruptStoredValue`. Erroring is fine; silence is not.
+**Rejected:** storing all pairs (above); changing upstream (`delete`/`update` by
+fp+tag) — closable in our own layer with public API only, per the ADR-0001 posture.
+**Evidence:** deterministic birthday-search tests engineer a real
+`(fp, first-bucket)` collision and pin both directions: upstream `get(A)` returns
+B's bytes and upstream `delete(A)` destroys B's entry (the hazard is real), while
+the verified path leaves B intact, disambiguates both reads, rejects the shadowed
+write loudly, and recovers once the shadow clears.
+**Cost:** one extra `O(arity · bucket_size)` scan per mutation — noise next to the
+per-block hint patch. **Residual:** a `Shadowed`/`DuplicateTag` event rejects its
+block and needs a re-bootstrap to clear — years apart in expectation, and loud.
+
+### ADR-0018 — Withdrawal credits are relative amounts, resolved inside `apply_block` **[NEW]**
+
+**Chosen:** `BlockUpdate` gains `credits: Vec<(address_hash, amount_wei)>`
+(EIP-4895 beacon withdrawals). `apply_block` applies them **after** all of the
+block's absolute `changes`, each as `verified-stored-prior (or 0 if absent) +
+amount` through the same verified write path; duplicates accumulate;
+`checked_add`/encode overflow rejects the block, never wraps.
+**Rejected:** (a) feed-side resolution via archive `eth_getBalance` per recipient —
+~16 RPC calls/block on the correctness path for a value the store already holds
+authoritatively (ADR-0016); (b) feed-side reads of the server's store — would give
+the feed mutable-state access across the one seam (`BlockUpdate`) and race the
+applier.
+**Why:** withdrawals appear in the block body as *amounts*, not post-balances, so
+someone must resolve prior+amount; the server is the only place that is atomic
+with the block's own changes (a recipient that is also tx-touched in the same
+block must credit on top of the *post-change* value), costs zero RPC, and reads
+through the verified scan (ADR-0017), so a colliding foreign entry can neither be
+misread as the prior nor overwritten.
+
 ### ADR-0016 — Build the KV-SCF / matrix D directly; no intermediate KV map **[NEW — user decision]**
 
 **Chosen:** stream each snapshot pair `(address, balance)` straight into the Segmented

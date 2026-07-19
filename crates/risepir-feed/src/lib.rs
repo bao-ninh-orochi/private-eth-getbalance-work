@@ -327,6 +327,7 @@ impl Feed for MockFeed {
         Ok(Some(BlockUpdate {
             block: self.block,
             changes,
+            credits: vec![],
         }))
     }
 

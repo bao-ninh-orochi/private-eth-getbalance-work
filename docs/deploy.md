@@ -233,6 +233,83 @@ setup bundle + `/mode` fetched over HTTP, then **5/5 private queries through the
 split client byte-exact** vs publicnode, and strict not-found propagated through
 it verbatim.
 
+### 3.6 GCP walkthrough (written for someone who knows EC2, not GCP)
+
+*(Unlike §1/§3.5's recorded runs, these commands could not be executed from the dev
+environment — no GCP credentials exist there. They follow GCP's documented CLI
+surface; expect to adjust names, nothing structural.)*
+
+Concept map first — GCP is EC2 with different nouns:
+
+| you know (AWS) | GCP equivalent | note |
+|---|---|---|
+| account | **project** | everything (VMs, buckets, BigQuery jobs) lives in a project; billing attaches to it |
+| EC2 / instance | **Compute Engine** / VM instance | |
+| instance type | **machine type** (`e2-standard-4` = 4 vCPU/16 GB) | |
+| AMI | **image family** (`debian-12`) | |
+| security group | **VPC firewall rule**, applied via instance **tags** | project-wide rules matched by tag |
+| .pem key pairs | none — `gcloud compute ssh` generates/pushes keys itself | genuinely nicer |
+| aws-cli | `gcloud` (+ `bq`, `gcloud storage` in the same SDK) | one install covers VM + BigQuery + GCS |
+| spot | Spot VMs (`--provisioning-model=SPOT`) | same idea; our state file makes preemption cheap |
+
+**One-time setup (on the MacBook):**
+
+```bash
+brew install --cask google-cloud-sdk
+gcloud init                    # browser login; create project e.g. "risepir-poc"; pick us-central1-a
+```
+
+Activate the **$300/90-day free trial** in the console (console.cloud.google.com —
+it asks for a card for identity; when the trial ends resources are *stopped*, not
+silently billed, unless you explicitly upgrade). Then:
+
+```bash
+gcloud config set project risepir-poc
+gcloud config set compute/zone us-central1-a     # us-central1: same multi-region as the BigQuery public data
+gcloud services enable compute.googleapis.com
+```
+
+`us-central1` is deliberate: `bigquery-public-data` lives in the US multi-region,
+so the GCS export bucket and the VM sit next to the data and the shard download to
+the VM is free-to-pennies instead of internet egress.
+
+**The VM** (partial demo: `e2-medium`, 4 GB, ~$24/mo-rate; complete set:
+`e2-standard-4`, 16 GB, ~$98/mo-rate — both burn credit, not cash, for ~3 months):
+
+```bash
+gcloud compute instances create risepir \
+  --machine-type=e2-standard-4 \
+  --image-family=debian-12 --image-project=debian-cloud \
+  --boot-disk-size=50GB --boot-disk-type=pd-balanced \
+  --tags=risepir
+gcloud compute ssh risepir            # that's it — no key file to manage
+```
+
+**Firewall** — nothing needed for the SSH-tunnel shape (`gcloud compute ssh
+risepir -- -L 8545:localhost:8545`, then cast against localhost). Only for the
+split-client shape open the PIR port, restricted to your IP:
+
+```bash
+gcloud compute firewall-rules create risepir-pir \
+  --allow=tcp:8645 --target-tags=risepir --source-ranges="$(curl -s ifconfig.me)/32"
+```
+
+(As on AWS: never open 8545 to the world.)
+
+**On the VM** — identical to §3.5's build-on-box recipe: `sudo apt-get update &&
+sudo apt-get install -y build-essential git curl pkg-config`, install rustup, add
+a read-only deploy key for the private IKPIR repo, clone, `cargo build --release
+-p risepir-rpc`, run in `tmux` with `--state`. Pull the snapshot shards straight
+from the export bucket: `gcloud storage cp 'gs://<your-bucket>/balances-*.csv.gz' .`
+(if the VM's default service account lacks bucket read, the two-minute fix is
+`gcloud auth login` on the VM and retry).
+
+**Cost hygiene:** `gcloud compute instances stop risepir` when idle (only the
+disk's ~$4/mo keeps billing against credit); `…delete` to zero it;
+`gcloud billing projects describe risepir-poc` / the console's Billing page shows
+credit burn-down. After the credit: switch the same VM to Spot
+(~$18–30/mo for 16 GB) or move to Oracle's free tier.
+
 ### Which cloud, if the goal is spending nothing
 
 | option | complete-set (16–24 GB) cost | notes |

@@ -11,6 +11,10 @@ unsafe_code = "forbid"
 [dependencies]
 risepir-proto = { path = "../risepir-proto" }
 
+# Snapshot ingest (`snapshot` module): BigQuery exports arrive as
+# `.csv.gz` shards; gzip is the only compression this loader speaks.
+flate2 = "1"
+
 # Dev-only: the integration test in `tests/pipeline.rs` drives the whole
 # mock -> apply_block -> DeltaRing -> client pipeline end-to-end. The crate
 # itself depends only on `risepir-proto`.

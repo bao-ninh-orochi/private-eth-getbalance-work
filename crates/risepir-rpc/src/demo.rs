@@ -35,7 +35,7 @@ use risepir_proto::{Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
 
-use crate::keccak::keccak256;
+use risepir_proto::keccak256;
 use crate::private_eth::PrivateEth;
 
 /// SCF geometry constants for the demo deployment. `LWE_DIM` is well

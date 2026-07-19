@@ -19,5 +19,11 @@ ikpir-common = { workspace = true }
 # never needs the 32-bit or streaming variants.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+# keccak256 for the SCF key (ADR-0008) — lives here (rather than in the
+# JSON-RPC crate that first needed it) because every ingest path hashes
+# addresses: the RPC front end, the snapshot ingester, and the rpc feed.
+# The `keccak` feature is the classic (pre-NIST) padding Ethereum uses.
+tiny-keccak = { version = "1", features = ["keccak"] }
+
 [dev-dependencies]
 proptest = "1"

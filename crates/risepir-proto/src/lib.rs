@@ -30,10 +30,12 @@
 
 pub mod codec;
 pub mod geometry;
+pub mod keccak;
 pub mod types;
 pub mod value;
 
 pub use codec::CodecError;
+pub use keccak::keccak256;
 pub use geometry::{Backend, GeomError, Geometry, Sizes};
 pub use types::{AddressHash, Balance, BlockDelta, BlockUpdate, CoalesceError, SegmentRowDeltas};
 pub use value::{Lookup, ValueCodec, ValueError};

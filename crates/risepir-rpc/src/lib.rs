@@ -43,12 +43,11 @@
 //! mainnet data is Stage 1 (`docs/plan.md` §6).
 
 mod error;
-mod keccak;
 mod private_eth;
 pub mod rpc;
 
 pub mod demo;
 
 pub use error::RpcError;
-pub use keccak::keccak256;
+pub use risepir_proto::keccak256;
 pub use private_eth::PrivateEth;

@@ -2,7 +2,7 @@
 //! hashes the key anyway), the client computes it itself, and it matches
 //! reth's hashed state").
 
-use risepir_proto::AddressHash;
+use crate::types::AddressHash;
 
 /// `keccak256(address)`, Ethereum's actual Keccak (the pre-NIST padding —
 /// delimiter `0x01`, *not* SHA3's `0x06`). `tiny_keccak`'s `keccak256`

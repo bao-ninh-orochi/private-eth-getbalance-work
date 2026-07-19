@@ -31,6 +31,8 @@
 //! mock emitted, in order, so that "the client's answer differs from
 //! `balance_of`" is always a real bug, never an artefact of the oracle.
 
+pub mod snapshot;
+
 use std::collections::HashMap;
 
 use risepir_proto::{AddressHash, Balance, BlockUpdate};

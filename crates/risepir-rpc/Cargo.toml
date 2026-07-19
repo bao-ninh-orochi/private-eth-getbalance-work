@@ -28,10 +28,6 @@ tokio      = { version = "1", features = ["full"] }
 serde_json = "1"
 serde      = { version = "1", features = ["derive"] }
 
-# keccak256 for the SCF key (docs/plan.md ADR-0008) — the `keccak` feature
-# is the classic (pre-NIST) Keccak padding Ethereum uses, not the `sha3`
-# family's 0x06 delimiter.
-tiny-keccak = { version = "1", features = ["keccak"] }
 
 # The deny-by-default proxy (ADR-0012) forwards a denied method's raw JSON
 # body verbatim to `--proxy-upstream`; reuses the same async HTTP client

@@ -9,7 +9,7 @@ use risepir_client::{Lookup, RisePirClient};
 use risepir_http::PirHttpClient;
 
 use crate::error::RpcError;
-use crate::keccak::keccak256;
+use risepir_proto::keccak256;
 
 /// The private `eth_getBalance` core for one RisePIR deployment.
 ///

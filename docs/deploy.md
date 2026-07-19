@@ -339,6 +339,17 @@ from the export bucket: `gcloud storage cp 'gs://<your-bucket>/balances-*.csv.gz
 (if the VM's default service account lacks bucket read, the two-minute fix is
 `gcloud auth login` on the VM and retry).
 
+**Verified on GCP, 2026-07-19** (project `risepir-poc`, `e2-medium`/Debian 12 in
+`us-central1-a`, repo at 58cf7a5): clean-VM build in 4m09s; `mainnet --partial
+--state` bootstrapped at finalized block 25,565,340 and followed live bursts;
+**6/6 private queries byte-exact** vs publicnode *while the head advanced under
+the check* (references at four successive heads, all exact); strict not-found
+errored as designed; in-loop reconcile 8/8 exact. Setup quirks hit and folded
+into this doc: the billing-link precondition, the interactive zone menu, the
+one-repo deploy-key limit, and a passphrase-protected
+`~/.ssh/google_compute_engine` blocking non-interactive `gcloud compute ssh`
+(fix: regenerate the key passphrase-less, or `ssh-add` it).
+
 **Cost hygiene:** `gcloud compute instances stop risepir` when idle (only the
 disk's ~$4/mo keeps billing against credit); `…delete` to zero it;
 `gcloud billing projects describe risepir-poc` / the console's Billing page shows

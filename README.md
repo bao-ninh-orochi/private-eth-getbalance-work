@@ -22,7 +22,9 @@ cargo build --release -p risepir-rpc
 block withdrawals), answers `eth_getBalance` privately on `:8545`
 (`cast balance <addr> --rpc-url http://127.0.0.1:8545`), reconciles sampled
 accounts against an independent provider every few blocks, and persists/reloads
-its full PIR state. Recorded live evidence — 8/8 private queries byte-exact
+its full PIR state. A third subcommand, `client --pir-url http://<server>:8645`,
+runs the JSON-RPC front end + rewind client on *your* machine against a remote
+PIR server (`--bind 0.0.0.0`) — the queried address never leaves your machine. Recorded live evidence — 8/8 private queries byte-exact
 against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
 which is also the complete runbook (including the BigQuery snapshot export that
 upgrades `--partial` to the complete ~100 M-account set).

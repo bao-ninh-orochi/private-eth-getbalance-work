@@ -160,6 +160,30 @@ impl PirHttpClient {
         Ok(u64::from_le_bytes(arr))
     }
 
+    /// `GET /mode`: whether the deployment serves the *complete*
+    /// nonzero-balance set (`true`) or a partial one (`false`). A remote
+    /// front end keys its `NotFound` policy on this — complete ⇒ absence
+    /// is exactly `0x0` (ADR-0015), partial ⇒ absence must error — and
+    /// must never guess it (`docs/plan.md`'s invariant).
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Network`] / [`ClientError::Status`] / a
+    /// [`ClientError::Wire`] if the body is not exactly one byte of
+    /// value `0` or `1`.
+    pub async fn mode(&self) -> Result<bool, ClientError> {
+        let resp = self.http.get(format!("{}/mode", self.base)).send().await?;
+        let bytes = ok_body(resp).await?;
+        match bytes.as_slice() {
+            [0] => Ok(false),
+            [1] => Ok(true),
+            other => Err(ClientError::Wire(format!(
+                "/mode returned {} bytes (expected exactly one byte of 0 or 1)",
+                other.len()
+            ))),
+        }
+    }
+
     /// `GET /sync?from=<from>&to=<to>`: the coalesced delta for
     /// `(from, to]`, decoded via [`codec::decode_block_delta`].
     ///

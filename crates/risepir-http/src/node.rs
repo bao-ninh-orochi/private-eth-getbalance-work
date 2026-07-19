@@ -47,6 +47,12 @@ struct Inner {
 /// Shared server state behind `Arc` (ADR-0010).
 pub struct NodeState {
     inner: RwLock<Inner>,
+    /// Whether the served set is the *complete* nonzero-balance universe.
+    /// Served to clients via `GET /mode` because the `NotFound` policy
+    /// hangs on it (complete ⇒ absence is exactly `0x0`, ADR-0015;
+    /// partial ⇒ absence is *unknown* and must error) — a remote front
+    /// end guessing this flag would be a silent-wrong-answer bug.
+    complete: bool,
     /// Per-segment SimplePIR reshape geometry (`reshape_rows` /
     /// `reshape_row_width`), cached once at construction.
     ///
@@ -71,8 +77,15 @@ pub struct NodeState {
 impl NodeState {
     /// Wrap a freshly-built [`RisePirServer`] plus an (initially empty)
     /// [`DeltaRing`] for HTTP serving. The per-block delta index starts
-    /// empty and grows as [`Self::apply_block`] is called.
-    pub fn new(server: RisePirServer<Segmented3aryScheme, SimplePirBackend>, ring: DeltaRing) -> Self {
+    /// empty and grows as [`Self::apply_block`] is called. `complete`
+    /// declares whether the served set is the complete nonzero-balance
+    /// universe — see the field's docs; a mock deployment's synthetic
+    /// universe is complete by construction.
+    pub fn new(
+        server: RisePirServer<Segmented3aryScheme, SimplePirBackend>,
+        ring: DeltaRing,
+        complete: bool,
+    ) -> Self {
         // One-time cost, paid once at startup — see the field's docs.
         let backend_params = server.setup().backend_params;
         Self {
@@ -82,6 +95,7 @@ impl NodeState {
                 per_block: BTreeMap::new(),
             }),
             backend_params,
+            complete,
         }
     }
 
@@ -151,6 +165,7 @@ impl NodeState {
             .route("/sync", get(sync))
             .route("/setup", get(setup))
             .route("/head", get(head))
+            .route("/mode", get(mode))
             .layer(DefaultBodyLimit::max(MAX_ANSWER_BODY_BYTES))
             .with_state(state)
     }
@@ -243,6 +258,14 @@ async fn head(State(state): State<Arc<NodeState>>) -> Response {
     let h = inner.server.block();
     drop(inner);
     octet_response(StatusCode::OK, h.to_le_bytes().to_vec())
+}
+
+/// `GET /mode`: one byte — `1` if this deployment serves the *complete*
+/// nonzero-balance set, `0` if partial. A remote front end keys its
+/// `NotFound` policy on this (never guessed; see [`NodeState::new`]).
+/// No lock needed: the flag is fixed at construction.
+async fn mode(State(state): State<Arc<NodeState>>) -> Response {
+    octet_response(StatusCode::OK, vec![u8::from(state.complete)])
 }
 
 // ─── small helpers ────────────────────────────────────────────────────

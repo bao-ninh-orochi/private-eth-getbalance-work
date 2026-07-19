@@ -81,6 +81,10 @@ pub(crate) fn value_codec() -> ValueCodec {
 /// `docs/deploy.md` describes.
 #[derive(Clone, Debug)]
 pub struct MainnetConfig {
+    /// Address both listeners bind. Default loopback; `0.0.0.0` exposes
+    /// them on all interfaces (remote deployment — see `docs/deploy.md`'s
+    /// exposure guidance before doing this).
+    pub bind: Ipv4Addr,
     /// JSON-RPC listen port (`0` = ephemeral).
     pub rpc_port: u16,
     /// PIR HTTP listen port (`0` = ephemeral).
@@ -124,6 +128,7 @@ pub struct MainnetConfig {
 impl Default for MainnetConfig {
     fn default() -> Self {
         Self {
+            bind: Ipv4Addr::LOCALHOST,
             rpc_port: 8545,
             pir_port: 8645,
             feed_url: "https://eth.drpc.org".to_string(),
@@ -309,10 +314,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     };
 
     let head_at_start = server.block();
-    let node = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity)));
+    let node = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), complete));
 
     // ── PIR HTTP transport ─────────────────────────────────────────────
-    let pir_listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.pir_port))
+    let pir_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.pir_port))
         .await
         .unwrap_or_else(|e| die(format!("bind PIR port {}: {e}", cfg.pir_port)));
     let pir_addr = pir_listener.local_addr().expect("PIR local_addr");
@@ -337,7 +342,8 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     ));
 
     // ── JSON-RPC front end (one in-process rewind client, ADR-0010) ───
-    let pir_client = PirHttpClient::new(format!("http://{pir_addr}"));
+    // Loopback even when bound to 0.0.0.0 — see demo.rs's identical note.
+    let pir_client = PirHttpClient::new(crate::front::local_url(cfg.bind, pir_addr.port()));
     let setup_bundle = pir_client
         .setup()
         .await
@@ -362,7 +368,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         proxy_http: reqwest::Client::new(),
     });
 
-    let rpc_listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.rpc_port))
+    let rpc_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.rpc_port))
         .await
         .unwrap_or_else(|e| die(format!("bind JSON-RPC port {}: {e}", cfg.rpc_port)));
     let rpc_addr = rpc_listener.local_addr().expect("RPC local_addr");

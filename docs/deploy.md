@@ -173,6 +173,78 @@ line the server prints before allocating is the commitment.
   endpoints you hit — never the address, and (by LWE hardness) nothing statistical
   about it either. The delta stream is identical bytes for every client.
 
+## 3.5 Remote deployment (AWS EC2 or any VPS)
+
+The shape that makes the privacy story *architecturally* true — server and client on
+different machines, different owners possible:
+
+```
+┌── EC2 / VPS ────────────────────────────┐        ┌── your laptop ──────────────────┐
+│ risepir-rpc mainnet --partial|--snapshot│  LWE   │ risepir-rpc client              │
+│   --bind 0.0.0.0                        │◄──────►│   --pir-url http://<server>:8645│
+│   (PIR transport :8645 exposed;         │ vectors│   (hint + rewind + JSON-RPC     │
+│    :8545 stays for local debugging)     │ deltas │    :8545 → cast / MetaMask)     │
+└─────────────────────────────────────────┘        └─────────────────────────────────┘
+```
+
+The queried address **never leaves the laptop in any form** — the wire carries LWE
+query vectors, responses, and the (public, identical-for-everyone) delta stream.
+The client learns whether the server is complete or partial from `GET /mode` (its
+`NotFound` policy is fetched, never guessed) and downloads the setup bundle once
+(~100 MB per 1 M accounts; a few GB at the complete set — the inherent
+SimplePIR-class client footprint; server restarts keep it valid via the state
+file's bit-identical `A`/hints).
+
+**EC2 steps** (assumes `aws-cli` configured; same recipe works on any VPS):
+
+1. **Instance.** Partial demo: any 2 GB box (`t4g.small`). Complete set: 16 GB
+   floor — `r7g.large` (2 vCPU/16 GB Graviton, ~$0.11/h on-demand, ~⅓ that on
+   spot) or `r8g.xlarge` (32 GB) for comfort. Graviton/arm64 is fine — this
+   project develops on Apple ARM; build with `target-cpu=native` on the box.
+   30 GB gp3 EBS (snapshot shards + state file) ≈ $2.4/mo. **Spot is a
+   reasonable fit**: the state file + catch-up replay make an interruption cost
+   minutes, not a re-bootstrap.
+2. **Security group.** Inbound: SSH (22) from your IP; **8645 only if** running
+   the split client, ideally restricted to your IP. Do **not** expose 8545
+   publicly — it is plain HTTP with no auth or rate limiting; for remote use of
+   the co-located front end, tunnel instead: `ssh -L 8545:localhost:8545 <box>`
+   (zero flags needed — the default loopback bind then just works).
+3. **Build on the box** (cross-compiling from macOS to Linux is avoidable
+   friction): install rustup + git, give the box read access to the private
+   IKPIR repo — a deploy key (`ssh-keygen` on the box, add the public key as a
+   read-only deploy key on `bao-ninh-orochi/IKPIR` *and* clone this repo via
+   SSH), then `cargo build --release -p risepir-rpc`. On a 2 GB instance add
+   swap first (`fallocate -l 4G /swapfile …`) or build once on a larger spot
+   box and copy the binary (same arch).
+4. **Run** under `nohup`/`tmux`/systemd:
+   `./risepir-rpc mainnet --partial --bind 0.0.0.0` (demo) or the full
+   `--snapshot … --state …` form (§2.2). Then on the laptop:
+   `./risepir-rpc client --pir-url http://<server-ip>:8645` and point
+   `cast`/MetaMask at `http://127.0.0.1:8545`.
+5. **Caveats to accept knowingly** (PoC): the PIR transport is plain HTTP —
+   contents are protected by the crypto, but transport metadata (your IP, query
+   *timing*) is visible on the wire; front it with a TLS proxy (caddy) if that
+   matters. One `answer` round trip costs ~queries+responses of a few hundred
+   KB at large scale (`docs/numbers.md` §4), so latency is network-dominated.
+
+**Verified 2026-07-19** (two processes on this machine, same topology as above):
+server `mainnet --partial --bind 0.0.0.0`, separate `client --pir-url` process —
+setup bundle + `/mode` fetched over HTTP, then **5/5 private queries through the
+split client byte-exact** vs publicnode, and strict not-found propagated through
+it verbatim.
+
+### Which cloud, if the goal is spending nothing
+
+| option | complete-set (16–24 GB) cost | notes |
+|---|---|---|
+| AWS on-demand (`r7g.large`) | ≈ $77/mo + $2.4 EBS | most convenient for you (aws-cli ready); no free tier at this RAM |
+| AWS spot (`r7g.large`) | ≈ $23–35/mo | interruptions are cheap here (state file + catch-up) |
+| GCP (`e2-highmem-2`) + new-account $300 credit | ≈ $0 for ~3–4 months | you need a GCP account for the BigQuery export anyway; same-region GCS→VM snapshot copy is free |
+| Oracle Cloud Always Free (4 OCPU/24 GB Ampere) | $0 indefinitely | genuinely free; signup/capacity availability is famously flaky |
+| this MacBook (16 GB) | $0 | complete set fits only marginally (~13–16 GB working set) — fine for partial, risky for complete |
+
+The partial demo runs on anything ≥2 GB, including AWS free-tier-class instances.
+
 ## 4. Operational notes (the never-wrong-answer contract, operationally)
 
 - **`CRITICAL` in the log** (apply failure, reconcile mismatch, corrupt store):

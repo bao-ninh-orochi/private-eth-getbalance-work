@@ -72,7 +72,7 @@ fn build_node() -> (Arc<NodeState>, MockFeed) {
 
     let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
-    let state = Arc::new(NodeState::new(server, DeltaRing::new(300)));
+    let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     (state, feed)
 }
 

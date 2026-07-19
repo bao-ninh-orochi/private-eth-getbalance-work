@@ -66,6 +66,10 @@ fn value_codec() -> ValueCodec {
 /// duplicating the rest of the deployment logic.
 #[derive(Clone, Debug)]
 pub struct DemoConfig {
+    /// Address both listeners bind. Default loopback; `0.0.0.0` exposes
+    /// them on all interfaces (remote deployment — see `docs/deploy.md`'s
+    /// exposure guidance before doing this).
+    pub bind: Ipv4Addr,
     /// JSON-RPC listen port. `0` binds an OS-assigned ephemeral port.
     pub rpc_port: u16,
     /// PIR HTTP listen port. `0` binds an OS-assigned ephemeral port.
@@ -96,6 +100,7 @@ pub struct DemoConfig {
 impl Default for DemoConfig {
     fn default() -> Self {
         Self {
+            bind: Ipv4Addr::LOCALHOST,
             rpc_port: 8545,
             pir_port: 8645,
             chain_id: 1,
@@ -188,9 +193,9 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
 
     let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
-    let node_state = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity)));
+    let node_state = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), true));
 
-    let pir_listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.pir_port))
+    let pir_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.pir_port))
         .await
         .expect("bind PIR HTTP port");
     let pir_addr = pir_listener.local_addr().expect("PIR local_addr");
@@ -222,7 +227,10 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         });
     }
 
-    let pir_client = PirHttpClient::new(format!("http://{pir_addr}"));
+    // The in-process front end always reaches the PIR transport over
+    // loopback, even when the listener is bound to 0.0.0.0 for remote
+    // clients — connecting to the unspecified address is unreliable.
+    let pir_client = PirHttpClient::new(crate::front::local_url(cfg.bind, pir_addr.port()));
     let setup_bundle = pir_client.setup().await.expect("GET /setup against the freshly-started PIR server");
     let arity = setup_bundle.params.arity();
     let plaintext_bits = setup_bundle.params.plaintext_bits;
@@ -244,7 +252,7 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         proxy_http: reqwest::Client::new(),
     });
 
-    let rpc_listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.rpc_port))
+    let rpc_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.rpc_port))
         .await
         .expect("bind JSON-RPC port");
     let rpc_addr = rpc_listener.local_addr().expect("RPC local_addr");

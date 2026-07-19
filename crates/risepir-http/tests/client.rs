@@ -59,7 +59,7 @@ async fn spawn_node() -> (String, MockFeed) {
 
     let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
-    let state = Arc::new(NodeState::new(server, DeltaRing::new(300)));
+    let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     let router = NodeState::router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
@@ -139,7 +139,7 @@ async fn sync_pulls_a_real_delta_over_http() {
     }
     let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
-    let state = Arc::new(NodeState::new(server, DeltaRing::new(300)));
+    let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     let router = NodeState::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");

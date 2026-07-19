@@ -15,6 +15,7 @@
 //! RPC, cross-provider reconciliation, default LWE parameters.
 
 use risepir_rpc::demo::{self, DemoConfig};
+use risepir_rpc::front::{self, FrontConfig};
 use risepir_rpc::mainnet::{self, MainnetConfig};
 
 #[tokio::main]
@@ -23,6 +24,7 @@ async fn main() {
     match args.get(1).map(String::as_str) {
         Some("mock") => run_mock(parse_mock(&args[2..])).await,
         Some("mainnet") => run_mainnet(parse_mainnet(&args[2..])).await,
+        Some("client") => run_client(parse_client(&args[2..])).await,
         Some("--help" | "-h") => {
             print_usage();
         }
@@ -116,6 +118,33 @@ async fn run_mainnet(cfg: MainnetConfig) {
     std::process::exit(0);
 }
 
+async fn run_client(cfg: FrontConfig) {
+    if let Some(url) = &cfg.proxy_upstream {
+        print_proxy_warning(url);
+    }
+    let pir_url = cfg.pir_url.clone();
+    let handle = front::spawn(cfg).await;
+
+    println!("RisePIR private eth_getBalance — remote front end");
+    println!("  PIR server:  {pir_url}");
+    println!("  JSON-RPC:    http://{}   (local — point your wallet here)", handle.rpc_addr);
+    println!(
+        "  data set:    {}",
+        if handle.complete {
+            "COMPLETE nonzero-balance set (not-found answers 0x0)"
+        } else {
+            "PARTIAL (only accounts touched since the server's bootstrap; not-found ERRORS)"
+        }
+    );
+    println!("  hint pinned: block {} (the rewind serves the server's head regardless)", handle.pinned_block);
+    println!();
+    println!("The queried address NEVER leaves this machine — the server sees only LWE query vectors.");
+    println!();
+    println!("Try:  cast balance <address> --rpc-url http://{}", handle.rpc_addr);
+
+    std::future::pending::<()>().await;
+}
+
 /// The mainnet deployment's fixed value codec — mirrors
 /// `mainnet::value_codec` (crate-private there; the widths are part of
 /// the deployment's identity, not a CLI knob).
@@ -137,6 +166,27 @@ fn parse_mock(args: &[String]) -> DemoConfig {
             "--chain-id" => cfg.chain_id = parse_next(args, &mut i, "--chain-id"),
             "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
             "--pir-port" => cfg.pir_port = parse_next(args, &mut i, "--pir-port"),
+            "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
+            "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => unknown(other),
+        }
+    }
+    cfg
+}
+
+fn parse_client(args: &[String]) -> FrontConfig {
+    let mut cfg = FrontConfig::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pir-url" => cfg.pir_url = next_value(args, &mut i, "--pir-url"),
+            "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
+            "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
+            "--chain-id" => cfg.chain_id = parse_next(args, &mut i, "--chain-id"),
             "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
             "--help" | "-h" => {
                 print_usage();
@@ -166,6 +216,7 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--confirm-url" => cfg.confirm_url = next_value(args, &mut i, "--confirm-url"),
             "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
             "--pir-port" => cfg.pir_port = parse_next(args, &mut i, "--pir-port"),
+            "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
             "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
             "--reconcile-every" => cfg.reconcile_every = parse_next(args, &mut i, "--reconcile-every"),
             "--reconcile-samples" => cfg.reconcile_samples = parse_next(args, &mut i, "--reconcile-samples"),
@@ -209,14 +260,18 @@ fn unknown(flag: &str) -> ! {
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]");
+    eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
     eprintln!("                      [--state <file>] [--partial] [--partial-capacity <N>]");
     eprintln!("                      [--feed-url <url>] [--confirm-url <url>]");
-    eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]");
+    eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]");
+    eprintln!("  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]");
+    eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
     eprintln!();
     eprintln!("mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial.");
+    eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
+    eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
     eprintln!("See docs/deploy.md for the full runbook.");
 }
 

@@ -47,6 +47,7 @@ mod private_eth;
 pub mod rpc;
 
 pub mod demo;
+pub mod front;
 pub mod mainnet;
 pub mod state;
 

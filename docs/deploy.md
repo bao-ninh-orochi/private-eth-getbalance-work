@@ -296,12 +296,20 @@ the VM is free-to-pennies instead of internet egress.
 
 ```bash
 gcloud compute instances create risepir \
+  --zone=us-central1-a \
   --machine-type=e2-standard-4 \
   --image-family=debian-12 --image-project=debian-cloud \
   --boot-disk-size=50GB --boot-disk-type=pd-balanced \
   --tags=risepir
-gcloud compute ssh risepir            # that's it — no key file to manage
+gcloud compute ssh risepir --zone=us-central1-a   # no key file to manage
 ```
+
+(The explicit `--zone` makes these commands work even if the `config set
+compute/zone` default above was skipped — without either, gcloud stops at an
+interactive 130-zone menu, as first setup discovered. With the default set, the
+flag is redundant but harmless. Operator note: from Southeast Asia,
+`asia-southeast1-a` cuts interactive query latency ~5× at the cost of ~\$0.50 of
+credit on the one-time cross-continent snapshot copy — either region works.)
 
 **Firewall** — nothing needed for the SSH-tunnel shape (`gcloud compute ssh
 risepir -- -L 8545:localhost:8545`, then cast against localhost). Only for the

@@ -239,6 +239,7 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         arity,
         plaintext_bits,
         chain_id: cfg.chain_id,
+        strict_not_found: false, // the mock's account universe is complete by construction
         proxy_upstream: cfg.proxy_upstream,
         proxy_http: reqwest::Client::new(),
     });

@@ -25,6 +25,12 @@ pub enum RpcError {
     /// reported as `0x0` or any other number; ADR-0009's whole point is
     /// that this must be a loud error, not a silently wrong balance.
     DecodeFailed,
+    /// The queried account is not in this deployment's *partial* tracked
+    /// set (a `--partial` bootstrap with no complete snapshot). Absence
+    /// only means "zero" for a complete nonzero set (ADR-0015); in a
+    /// partial deployment it means "unknown", and `0x0` would be a wrong
+    /// answer — so this errors instead, naming the reason.
+    NotInTrackedSet,
     /// The client could not catch up to a block it needed (its own last
     /// known head, or the exact block a response claimed to be answered
     /// at) because that range had already aged out of the server's delta
@@ -42,6 +48,9 @@ impl fmt::Display for RpcError {
             Self::Pir(e) => write!(f, "PIR transport error: {e}"),
             Self::Client(e) => write!(f, "PIR client error: {e}"),
             Self::DecodeFailed => write!(f, "value decode failed (checksum mismatch)"),
+            Self::NotInTrackedSet => {
+                write!(f, "account is not in this partial deployment's tracked set")
+            }
             Self::Stalled => write!(f, "client fell behind the server's delta retention window"),
         }
     }
@@ -52,7 +61,7 @@ impl std::error::Error for RpcError {
         match self {
             Self::Pir(e) => Some(e),
             Self::Client(e) => Some(e),
-            Self::DecodeFailed | Self::Stalled => None,
+            Self::DecodeFailed | Self::NotInTrackedSet | Self::Stalled => None,
         }
     }
 }

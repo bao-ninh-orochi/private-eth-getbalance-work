@@ -169,6 +169,84 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         }
     }
 
+    /// Reassemble a server from persisted parts — the restart path
+    /// (`docs/deploy.md`): a store rebuilt via `from_cells`, plus the
+    /// exact `backend_params` and `hints` a previous run's
+    /// [`Self::setup`] snapshot carried. **No `server_setup` runs**: `A`
+    /// stays bit-identical to the persisted deployment, so clients
+    /// bootstrapped before the restart keep decoding correctly, and
+    /// startup cost is I/O, not a full preprocessing pass.
+    ///
+    /// `material` is re-expanded deterministically from each segment's
+    /// params ([`IndexPirBackend::expand_hint_material`] — determinism is
+    /// part of that trait's documented contract).
+    ///
+    /// # Panics
+    ///
+    /// Same value-width consistency panic as [`Self::new`], plus a panic
+    /// if `backend_params` / `hints` lengths do not equal the store's
+    /// arity — both are corrupt-state-file / configuration failures at
+    /// construction time, not live-input conditions.
+    pub fn from_parts(
+        mut store: CuckooKVStore<S>,
+        config: B::Config,
+        value_codec: ValueCodec,
+        backend_params: Vec<B::ServerParams>,
+        hints: Vec<B::Hint>,
+        block: u64,
+    ) -> Self {
+        let expected_value_bytes = (value_codec.value_bits() as usize).div_ceil(8);
+        let store_value_bytes = store.value_size_in_bytes();
+        assert_eq!(
+            expected_value_bytes, store_value_bytes,
+            "RisePirServer::from_parts: value_codec encodes to {expected_value_bytes} bytes but \
+             the store is configured for {store_value_bytes}-byte values"
+        );
+        let params = store.params();
+        let arity = params.arity();
+        assert_eq!(
+            backend_params.len(),
+            arity,
+            "RisePirServer::from_parts: {} backend_params for arity {arity}",
+            backend_params.len()
+        );
+        assert_eq!(
+            hints.len(),
+            arity,
+            "RisePirServer::from_parts: {} hints for arity {arity}",
+            hints.len()
+        );
+
+        let material: Vec<B::HintMaterial> = backend_params.iter().map(B::expand_hint_material).collect();
+
+        store.enable_mutation_log();
+        let _ = store.drain_mutations();
+
+        Self {
+            store,
+            params,
+            backend_config: config,
+            backend_params,
+            material,
+            hints,
+            block,
+            value_codec,
+        }
+    }
+
+    /// A copy of the store's flat cell array — together with
+    /// [`Self::setup`], [`Self::num_items`], and the value codec, exactly
+    /// what a state file must persist for [`Self::from_parts`] to
+    /// reassemble this server.
+    pub fn snapshot_cells(&self) -> Vec<u32> {
+        self.store.snapshot_cells()
+    }
+
+    /// Number of `(address, balance)` entries currently stored.
+    pub fn num_items(&self) -> u64 {
+        self.store.num_items()
+    }
+
     /// Discards buffered mutations and returns `err` — the single exit
     /// path every [`Self::apply_block`] failure funnels through. See
     /// [`Self::apply_block`]'s documentation for exactly what this does

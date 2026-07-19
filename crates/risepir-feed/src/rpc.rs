@@ -192,12 +192,12 @@ impl RpcFeed {
 
     /// One finalized block's complete [`BlockUpdate`]: traced transaction
     /// effects as absolute `changes`, EIP-4895 withdrawals as relative
-    /// `credits`, keys already `keccak256`-hashed (ADR-0008).
-    ///
-    /// Also returns the raw `(address, post_balance)` pairs alongside —
-    /// the reconciliation loop samples from them (it needs raw addresses
-    /// to ask a reference RPC).
-    pub async fn block_update(&self, n: u64) -> Result<(BlockUpdate, Vec<(Address, Balance)>), FeedError> {
+    /// `credits`, keys already `keccak256`-hashed (ADR-0008). The raw
+    /// (pre-hash) addresses ride alongside in [`FetchedBlock`] — the
+    /// reconciliation loop needs them to ask a reference RPC, and a
+    /// partial-mode deployment needs the credit recipients to filter
+    /// credits it cannot honestly resolve (no complete prior).
+    pub async fn block_update(&self, n: u64) -> Result<FetchedBlock, FeedError> {
         let hex_n = format!("0x{n:x}");
 
         let block = self
@@ -210,7 +210,7 @@ impl RpcFeed {
                 detail: format!("block {n} not available on this endpoint"),
             });
         }
-        let credits_raw = credits_from_block(&block)?;
+        let credited = credits_from_block(&block)?;
 
         let trace = self
             .rpc
@@ -219,25 +219,35 @@ impl RpcFeed {
                 json!([hex_n, {"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}]),
             )
             .await?;
-        let changes_raw = changes_from_trace(&trace)?;
+        let changed = changes_from_trace(&trace)?;
 
-        let changes = changes_raw
-            .iter()
-            .map(|(a, b)| (keccak256(a), *b))
-            .collect();
-        let credits = credits_raw
-            .iter()
-            .map(|(a, b)| (keccak256(a), *b))
-            .collect();
-        Ok((
-            BlockUpdate {
+        let changes = changed.iter().map(|(a, b)| (keccak256(a), *b)).collect();
+        let credits = credited.iter().map(|(a, b)| (keccak256(a), *b)).collect();
+        Ok(FetchedBlock {
+            update: BlockUpdate {
                 block: n,
                 changes,
                 credits,
             },
-            changes_raw,
-        ))
+            changed,
+            credited,
+        })
     }
+}
+
+/// What [`RpcFeed::block_update`] hands back: the hashed-key
+/// [`BlockUpdate`] the server consumes, plus the raw-address views the
+/// deployment's own loops need (reconciliation sampling, partial-mode
+/// credit filtering). `changed`/`credited` are exactly the pre-hash
+/// counterparts of `update.changes`/`update.credits`, index-aligned.
+pub struct FetchedBlock {
+    /// The server-facing update (keys `keccak256`-hashed, ADR-0008).
+    pub update: BlockUpdate,
+    /// Raw `(address, post-block balance)` per tx-changed account.
+    pub changed: Vec<(Address, Balance)>,
+    /// Raw `(address, amount_wei)` per withdrawal, block order, duplicates
+    /// kept.
+    pub credited: Vec<(Address, Balance)>,
 }
 
 // ─── Pure parsers (unit-tested on canned fixtures; no I/O) ──────────────
@@ -544,7 +554,7 @@ mod live_tests {
         let confirm = RpcClient::new(CONFIRM_URL);
 
         let n = feed.finalized().await.expect("finalized");
-        let (update, raw_changes) = feed.block_update(n).await.expect("block_update");
+        let FetchedBlock { update, changed: raw_changes, .. } = feed.block_update(n).await.expect("block_update");
         assert_eq!(update.block, n);
         assert!(
             !update.changes.is_empty(),

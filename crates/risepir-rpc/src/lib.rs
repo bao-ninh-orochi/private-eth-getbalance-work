@@ -47,6 +47,8 @@ mod private_eth;
 pub mod rpc;
 
 pub mod demo;
+pub mod mainnet;
+pub mod state;
 
 pub use error::RpcError;
 pub use risepir_proto::keccak256;

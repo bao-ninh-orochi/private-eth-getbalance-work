@@ -118,6 +118,28 @@ impl NodeState {
         Ok(())
     }
 
+    /// Verified read of the balance currently stored for `key`
+    /// ([`RisePirServer::balance_of`]), under the read lock — what the
+    /// reconciliation loop diffs against an independent reference RPC
+    /// (`docs/sync.md`).
+    pub async fn balance_of(
+        &self,
+        key: &risepir_proto::AddressHash,
+    ) -> Result<Option<risepir_proto::Balance>, ServerError> {
+        self.inner.read().await.server.balance_of(key)
+    }
+
+    /// Run `f` over the wrapped server under the read lock — the escape
+    /// hatch state persistence uses to snapshot cells/setup/num_items
+    /// atomically with respect to the block-follow writer, without this
+    /// crate having to know any state-file format.
+    pub async fn with_server<R>(
+        &self,
+        f: impl FnOnce(&RisePirServer<Segmented3aryScheme, SimplePirBackend>) -> R,
+    ) -> R {
+        f(&self.inner.read().await.server)
+    }
+
     /// Build the axum [`Router`] exposing every RisePIR HTTP endpoint over
     /// `state`. All routes are read-side (`/answer` takes the state's read
     /// lock, never the write lock) — [`Self::apply_block`] is driven

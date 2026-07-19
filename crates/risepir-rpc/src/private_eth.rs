@@ -58,6 +58,14 @@ pub struct PrivateEth {
     /// above.
     pub(crate) plaintext_bits: u32,
     pub(crate) chain_id: u64,
+    /// `NotFound` policy. `false` (complete nonzero set, ADR-0015):
+    /// absence ⟺ zero, answer `0x0`. `true` (partial deployment — no
+    /// complete snapshot; only accounts touched since bootstrap are
+    /// tracked): absence means *unknown*, and answering `0x0` for an
+    /// account that merely predates the bootstrap would be a wrong
+    /// answer, so `NotFound` becomes [`RpcError::NotInTrackedSet`]
+    /// instead. Erroring is fine; a silently wrong `0x0` is not.
+    pub(crate) strict_not_found: bool,
     pub(crate) proxy_upstream: Option<String>,
     /// A plain HTTP client for forwarding a denied method's raw body to
     /// `proxy_upstream` verbatim (ADR-0012) — deliberately a fresh
@@ -171,6 +179,7 @@ impl PrivateEth {
 
         match lookup {
             Lookup::Found(balance) => Ok(balance),
+            Lookup::NotFound if self.strict_not_found => Err(RpcError::NotInTrackedSet),
             Lookup::NotFound => Ok(0),
             Lookup::DecodeFailed => Err(RpcError::DecodeFailed),
         }

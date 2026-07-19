@@ -113,6 +113,12 @@ impl From<RpcError> for JsonRpcError {
                 -32000,
                 "server is resyncing (the client fell behind the server's retained delta window); try again",
             ),
+            RpcError::NotInTrackedSet => Self::new(
+                -32000,
+                "account not in tracked set (partial deployment: no complete snapshot loaded; only \
+                 accounts whose balance changed since bootstrap are served — 0x0 would be a guess, \
+                 and this endpoint never guesses)",
+            ),
             other => Self::internal(other),
         }
     }

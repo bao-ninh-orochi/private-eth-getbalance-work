@@ -350,6 +350,16 @@ one-repo deploy-key limit, and a passphrase-protected
 `~/.ssh/google_compute_engine` blocking non-interactive `gcloud compute ssh`
 (fix: regenerate the key passphrase-less, or `ssh-add` it).
 
+**Graceful stop (learned the hard way, 2026-07-19):** launch the server with
+`tmux new-session -d -s risepir "cd … && exec ./target/release/risepir-rpc …"`
+— the `exec` makes the binary the pane process — and stop it with the anchored
+`pkill -INT -f "^\./target/release/risepir-rpc"`, waiting for
+`state saved; exiting` in the log before `instances stop`. A broad
+`pkill -f risepir-rpc` also hits the tmux wrapper shell; tmux then SIGHUPs the
+pane group and the server dies mid-save (0-byte `.tmp`; atomic tmp+rename means
+the previous good state survives, and partial mode loses nothing — but a
+complete-set deployment would lose its fast restart).
+
 **Cost hygiene:** `gcloud compute instances stop risepir` when idle (only the
 disk's ~$4/mo keeps billing against credit); `…delete` to zero it;
 `gcloud billing projects describe risepir-poc` / the console's Billing page shows

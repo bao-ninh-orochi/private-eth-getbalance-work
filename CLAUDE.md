@@ -84,14 +84,31 @@ gcloud --quiet compute ssh risepir --command='...'
 # resume after a stop:
 gcloud compute instances start risepir
 gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
-  "cd ~/private-ETH-getBalance && ./target/release/risepir-rpc mainnet --partial \
+  "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet --partial \
    --state ~/risepir-state.bin >> ~/server.log 2>&1"'
 ```
 
-On start the server loads the state file and replays the missed blocks (the
-external IP changes across stop/start; the tunnel command doesn't care:
-`gcloud compute ssh risepir -- -L 8545:localhost:8545`). Stopping the meter:
-SIGINT the server first (`pkill -INT -f risepir-rpc` — saves state), then
-`gcloud compute instances stop risepir`. VM SSH key and the GitHub account key
-`risepir-gcp-vm` are already set up; the VM burns ~$0.80/day of trial credit
-while running, ~$4/mo stopped (disk only).
+The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
+signalling it never involves a wrapper shell. With a state file present the
+server loads it and replays the missed blocks; without one, partial mode just
+re-bootstraps empty at the current finalized head — loss-free. (The external IP
+changes across stop/start; the tunnel doesn't care:
+`gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
+
+Stopping the meter — in this order:
+
+```bash
+gcloud --quiet compute ssh risepir \
+  --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 20 && tail -1 ~/server.log'
+#   → wait for "state saved; exiting"
+gcloud compute instances stop risepir
+```
+
+The **anchored** pattern matters: a broad `pkill -f risepir-rpc` also kills the
+tmux wrapper shell, tmux then SIGHUPs the pane group, and the server dies
+mid-save with a 0-byte `.tmp` (this happened on 2026-07-19; harmless in partial
+mode, but a complete-set deployment would lose a multi-hour bootstrap's fast
+restart). When checking from `gcloud … --command`, bracket the pattern
+(`pgrep -f "risepir-rp[c]"`) or the probe matches its own ssh wrapper. VM SSH
+key and the GitHub account key `risepir-gcp-vm` are already set up; the VM
+burns ~$0.80/day of trial credit while running, ~$4/mo stopped (disk only).

@@ -210,12 +210,17 @@ file's bit-identical `A`/hints).
    the co-located front end, tunnel instead: `ssh -L 8545:localhost:8545 <box>`
    (zero flags needed — the default loopback bind then just works).
 3. **Build on the box** (cross-compiling from macOS to Linux is avoidable
-   friction): install rustup + git, give the box read access to the private
-   IKPIR repo — a deploy key (`ssh-keygen` on the box, add the public key as a
-   read-only deploy key on `bao-ninh-orochi/IKPIR` *and* clone this repo via
-   SSH), then `cargo build --release -p risepir-rpc`. On a 2 GB instance add
-   swap first (`fallocate -l 4G /swapfile …`) or build once on a larger spot
-   box and copy the binary (same arch).
+   friction): install rustup + git, then give the box read access to *both*
+   private repos. **Not per-repo deploy keys** — GitHub allows a deploy key on
+   only one repository, and two repos are needed (this one plus the pinned
+   IKPIR dep). Instead: `ssh-keygen` on the box and add the public key as an
+   **account SSH key** (github.com/settings/keys), plus
+   `git config --global url."git@github.com:".insteadOf "https://github.com/"`
+   — required because cargo fetches the IKPIR dep by its https URL, and the
+   rewrite routes that fetch through the SSH key. Then clone via SSH and
+   `cargo build --release -p risepir-rpc`. On a 2 GB instance add swap first
+   (`fallocate -l 4G /swapfile …`) or build once on a larger spot box and copy
+   the binary (same arch).
 4. **Run** under `nohup`/`tmux`/systemd:
    `./risepir-rpc mainnet --partial --bind 0.0.0.0` (demo) or the full
    `--snapshot … --state …` form (§2.2). Then on the laptop:
@@ -323,9 +328,13 @@ gcloud compute firewall-rules create risepir-pir \
 (As on AWS: never open 8545 to the world.)
 
 **On the VM** — identical to §3.5's build-on-box recipe: `sudo apt-get update &&
-sudo apt-get install -y build-essential git curl pkg-config`, install rustup, add
-a read-only deploy key for the private IKPIR repo, clone, `cargo build --release
--p risepir-rpc`, run in `tmux` with `--state`. Pull the snapshot shards straight
+sudo apt-get install -y build-essential git curl pkg-config tmux`, install
+rustup, add the VM's `ssh-keygen` public key as an **account** SSH key
+(github.com/settings/keys — see §3.5 for why per-repo deploy keys do not work
+here) with the https→SSH `insteadOf` rewrite, clone, `cargo build --release
+-p risepir-rpc`, run in `tmux` with `--state`. The instance-create warning
+about disk size vs 10 GB image size is expected and harmless — Debian grows
+the root partition on first boot (`df -h /` shows the full disk). Pull the snapshot shards straight
 from the export bucket: `gcloud storage cp 'gs://<your-bucket>/balances-*.csv.gz' .`
 (if the VM's default service account lacks bucket read, the two-minute fix is
 `gcloud auth login` on the VM and retry).

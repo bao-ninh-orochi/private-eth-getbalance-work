@@ -27,7 +27,7 @@ use risepir_proto::keccak256;
 /// public accessor (deliberately — it is accumulator-internal
 /// bookkeeping, not part of the rewind's public contract), so this type
 /// tracks its own copy, updated in lockstep with the client under the same
-/// lock (see [`Self::sync_to`]).
+/// lock (see `Self::sync_to`).
 ///
 /// # Concurrency (ADR-0010)
 ///
@@ -131,7 +131,7 @@ impl PrivateEth {
     /// argument to equal the client's `pending_head` *exactly*
     /// ("the response names the epoch," ADR-0006) — so after `answer`
     /// returns, this catches `pending_head` up to exactly that call's own
-    /// `at_block` (a second, surgical [`Self::sync_to`], never a guess)
+    /// `at_block` (a second, surgical `Self::sync_to`, never a guess)
     /// before calling `finish`. Because the whole method holds `client`'s
     /// lock throughout, nothing else can move `pending_head` in between,
     /// so this second sync is always sufficient — no retry loop needed.

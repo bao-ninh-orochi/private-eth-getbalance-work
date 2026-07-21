@@ -81,7 +81,7 @@ const CSP: &str = "default-src 'none'; \
      base-uri 'none'";
 
 impl WebAssets {
-    /// Read every file in [`MANIFEST`] from `dir`.
+    /// Read every file in `MANIFEST` from `dir`.
     ///
     /// # Errors
     ///

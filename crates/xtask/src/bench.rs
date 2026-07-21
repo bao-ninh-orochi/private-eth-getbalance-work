@@ -20,7 +20,7 @@
 //! 1. **Full-rebuild time** — the §7 headline denominator — at several
 //!    account scales, up to the largest that safely fits this machine's
 //!    16 GB and completes in a reasonable time (see
-//!    [`unsafe_to_attempt_top_scale`] for the fallback logic; any scale
+//!    `unsafe_to_attempt_top_scale` for the fallback logic; any scale
 //!    that could not be reached is labelled, never silently dropped).
 //! 2. **Per-block patch time** as a curve over mutations/block (`K`), at a
 //!    fixed mid scale — the "N-independent in op count, plateaus once the
@@ -58,7 +58,7 @@
 //! `changes_per_block` equal to the *largest* `K` the run needs, and takes
 //! the first `K` entries of each emitted block for a smaller `K`. Every
 //! entry is still a genuine `MockFeed`-generated `(address, realistic
-//! balance)` pair — see [`sliced_block`].
+//! balance)` pair — see `sliced_block`.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -83,7 +83,7 @@ const BALANCE_BITS: u32 = 96;
 const CHECKSUM_BITS: u32 = 16;
 
 /// Operational safety ceiling for the adaptive top-scale fallback (see
-/// [`unsafe_to_attempt_top_scale`]) — not a reported number, just a guard
+/// `unsafe_to_attempt_top_scale`) — not a reported number, just a guard
 /// against a multi-minute-or-worse run on an unexpectedly slow machine.
 const MAX_PROJECTED_REBUILD_SECS: f64 = 240.0;
 /// Generous multiplicative pad over a naive linear extrapolation from the
@@ -120,7 +120,7 @@ pub struct BenchConfig {
     pub seed: u64,
     /// Full-rebuild account scales (item 1). The *last* (largest) entry is
     /// subject to the adaptive safety fallback (see
-    /// [`unsafe_to_attempt_top_scale`]); every other entry is always
+    /// `unsafe_to_attempt_top_scale`); every other entry is always
     /// attempted as given.
     pub scales: Vec<u64>,
     /// The fixed mid scale the patch curve (item 2), delta-bytes (item 3),
@@ -151,7 +151,7 @@ impl Default for BenchConfig {
     /// `docs/plan.md` §7 already report, so this run's numbers are
     /// directly comparable to those — the full Correction-4 `K` curve at
     /// 1M, and `lwe_dim = 1275` (`SimpleConfig::default()`, applied in
-    /// [`build_scale`]).
+    /// `build_scale`).
     fn default() -> Self {
         Self {
             seed: 0xB0DA_C0DE_5CA1_E000,
@@ -254,7 +254,7 @@ pub struct BenchReport {
     pub requested_top_scale: u64,
     /// The largest scale actually built and measured — equals
     /// `requested_top_scale` unless the adaptive safety fallback (see
-    /// [`unsafe_to_attempt_top_scale`]) reduced it.
+    /// `unsafe_to_attempt_top_scale`) reduced it.
     pub reached_top_scale: u64,
     /// `Some(reason)` iff `reached_top_scale < requested_top_scale` — the
     /// brief requires any unreached scale to be labelled explicitly, never

@@ -127,7 +127,7 @@ impl<B: IncrementalPirBackend> RisePirClient<B> {
     ///
     /// See [`ClientError::NonContiguousDelta`] /
     /// [`ClientError::SegmentCountMismatch`] /
-    /// [`ClientError::DeltaOverflow`] — [`PendingDelta::ingest`] performs
+    /// [`ClientError::DeltaOverflow`] — `PendingDelta::ingest` performs
     /// every check.
     pub fn ingest_delta(&mut self, d: &BlockDelta) -> Result<(), ClientError> {
         self.delta.ingest(d)
@@ -139,7 +139,7 @@ impl<B: IncrementalPirBackend> RisePirClient<B> {
     ///
     /// # Why `upto` must equal the pending delta's current head
     ///
-    /// [`PendingDelta`] keeps only the *summed* effect since the pinned
+    /// `PendingDelta` keeps only the *summed* effect since the pinned
     /// block, not the individual per-block deltas that produced it (see
     /// that type's docs) — so there is no way to fold only part of it
     /// while leaving a correct remainder pinned at some intermediate
@@ -254,7 +254,7 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
     ///
     /// Step 2 needs `ΔD[block₀ → E']` — the *entire* accumulated delta
     /// from the pinned block up to the block the response was actually
-    /// computed at. [`PendingDelta`] only ever holds that entire sum up
+    /// computed at. `PendingDelta` only ever holds that entire sum up
     /// to its own head; if the response were answered at some other
     /// block, the correction this client can compute would be for the
     /// wrong span, silently producing a wrong balance instead of the

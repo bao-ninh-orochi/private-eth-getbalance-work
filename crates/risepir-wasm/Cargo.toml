@@ -2,6 +2,7 @@
 name        = "risepir-wasm"
 version     = "0.1.0"
 edition.workspace = true
+license.workspace   = true
 publish     = false
 description = "The response-rewind RisePIR client compiled for the browser (ADR-0019): a pure-compute wasm32 module over risepir-client + risepir-http's wire codec. Builds the LWE query, rewinds the response, and scans — in the page, so the queried address never leaves the machine. All I/O is the host's; this module never touches the network."
 

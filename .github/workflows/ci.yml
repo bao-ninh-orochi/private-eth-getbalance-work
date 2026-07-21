@@ -1,0 +1,99 @@
+# CI (ADR-0021). Gates that run here and why:
+#   clippy -D warnings + cargo test  — every push and PR (fast, network-free)
+#   xtask conformance                — PRs only (release build, ~minutes;
+#                                      byte-exact vs a synthetic ground truth,
+#                                      fully network-free: MockFeed)
+#   cargo-deny                       — advisories / licenses / sources
+# The live feed gate and fuzzing are nightly (nightly.yml): they need the
+# network / long wall-clock and must never flake a merge.
+#
+# `cargo fmt --check` is deliberately absent for now — see ADR-0021: the tree
+# predates rustfmt.toml, and the gate turns on right after the one-off
+# mechanical reformat lands.
+#
+# The pinned IKPIR dependency is a *private* repo: every job that touches
+# cargo needs the IKPIR_TOKEN secret — a fine-grained PAT with read-only
+# Contents access to bao-ninh-orochi/IKPIR only (deploy keys are disabled on
+# that repo; ADR-0021). `.cargo/config.toml` sets `git-fetch-with-cli`, so
+# plain git config is all the wiring cargo needs. To provision:
+#   github.com/settings/personal-access-tokens → new fine-grained token,
+#   Resource owner bao-ninh-orochi, repository access: only IKPIR,
+#   permissions: Contents Read-only; then
+#   gh secret set IKPIR_TOKEN -R bao-ninh-orochi/private-ETH-getBalance
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate the private IKPIR dependency
+        env:
+          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
+        run: |
+          if [ -z "$IKPIR_TOKEN" ]; then
+            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace
+      - name: browser client compiles for its real target
+        # The host-target build above already covers risepir-wasm's rlib;
+        # this catches what only wasm32 can — above all the getrandom
+        # custom-backend wiring (ADR-0019: entropy is a build error there,
+        # not a runtime hope).
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p risepir-wasm --target wasm32-unknown-unknown
+
+  conformance:
+    name: conformance (byte-exact vs ground truth)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate the private IKPIR dependency
+        env:
+          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
+        run: |
+          if [ -z "$IKPIR_TOKEN" ]; then
+            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo run -p xtask --release -- conformance
+
+  deny:
+    name: cargo-deny (advisories, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate the private IKPIR dependency
+        env:
+          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
+        run: |
+          if [ -z "$IKPIR_TOKEN" ]; then
+            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

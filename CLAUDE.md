@@ -14,6 +14,8 @@ today** and there is a **live GCP deployment** (below).
    decisions get a new ADR.
 4. [`docs/HANDOFF.md`](docs/HANDOFF.md) — what is left (short version: the
    user-run BigQuery export upgrades the partial demo to the complete set).
+5. [`docs/threat-model.md`](docs/threat-model.md) — the adversary definitions;
+   a change that moves a security boundary updates it in the same commit.
 
 ## The binding rules
 
@@ -55,6 +57,13 @@ today** and there is a **live GCP deployment** (below).
   the rayon kernels via its own default-on `parallel` feature. A new crate
   depending on it needs that forwarding feature or it silently builds the scalar
   kernels the numbers were not measured against (ADR-0019).
+- CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
+  --all-targets -- -D warnings` + the tests on every push, conformance on PRs,
+  and runs the live gate plus the `fuzz/` targets nightly. It fetches the
+  private IKPIR dep via the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR
+  only, Contents read-only — deploy keys are disabled on that repo).
+  `cargo fmt` is not yet a gate — no mass reformat until the in-flight
+  branches land.
 
 ## Git conventions
 

@@ -1,0 +1,71 @@
+# Nightly gates (ADR-0021): everything that needs the network or long
+# wall-clock, and must therefore never gate a merge.
+#
+#   live feed gate — validates diffMode trace parsing byte-exactly against an
+#                    independent provider on a real finalized block. Depends
+#                    on two third-party keyless RPCs being up; a red night is
+#                    a signal to investigate, not an emergency.
+#   fuzz smoke     — coverage-guided fuzzing of every attacker-facing decoder
+#                    (fuzz/), a few minutes per target. Long exploratory runs
+#                    stay local; this catches regressions.
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  live-feed-gate:
+    name: live feed gate (real mainnet, independent provider)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate the private IKPIR dependency
+        env:
+          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
+        run: |
+          if [ -z "$IKPIR_TOKEN" ]; then
+            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo test -p risepir-feed --release -- --ignored
+
+  fuzz-smoke:
+    name: fuzz smoke (attacker-facing decoders)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate the private IKPIR dependency
+        env:
+          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
+        run: |
+          if [ -z "$IKPIR_TOKEN" ]; then
+            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            fuzz
+      - name: Install nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked
+      - name: Run each fuzz target briefly
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "── fuzzing $target ──"
+            cargo +nightly fuzz run "$target" -- -max_total_time=120
+          done

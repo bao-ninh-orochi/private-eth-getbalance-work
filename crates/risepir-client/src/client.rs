@@ -219,6 +219,9 @@ where
         let mut to_send = Vec::with_capacity(arity);
         let mut ctx_queries = Vec::with_capacity(arity);
         let mut rows = Vec::with_capacity(arity);
+        // `indices` is a fixed `[u32; 4]` with only the first `arity`
+        // entries meaningful — the `0..arity` bound is load-bearing.
+        #[allow(clippy::needless_range_loop)]
         for j in 0..arity {
             let row = indices[j] % segment_size;
             let q = B::client_query(&mut self.states[j], row);
@@ -318,6 +321,9 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
 
         let (fp, indices) = self.params.candidate_buckets(key);
         let segment_size = self.params.segment_size();
+        // `indices` is a fixed `[u32; 4]`; only the first `arity` entries
+        // are meaningful, so the `0..arity` bound is load-bearing.
+        #[allow(clippy::needless_range_loop)]
         for j in 0..arity {
             if ctx.rows[j] != indices[j] % segment_size {
                 return Err(ClientError::KeyContextMismatch);
@@ -336,6 +342,9 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
         let mut acc = vec![0u8; value_size];
         let mut found_mask: u64 = 0;
 
+        // `j` addresses four parallel per-segment structures; the indexed
+        // form keeps them visibly in lockstep.
+        #[allow(clippy::needless_range_loop)]
         for j in 0..arity {
             // Step 2: resp -= qᵀ·ΔD[block₀ → E'], this segment's whole delta.
             B::rewind_response(
@@ -561,6 +570,9 @@ mod tests {
         let mut acc = vec![0u8; value_size];
         let mut found = false;
 
+        // `j` addresses four parallel per-segment structures; the indexed
+        // form keeps them visibly in lockstep.
+        #[allow(clippy::needless_range_loop)]
         for j in 0..arity {
             B::rewind_response(
                 &client.states[j],
@@ -1067,6 +1079,9 @@ mod tests {
             let (fp, indices) = params.candidate_buckets(&key);
             let key_tag = codec.key_tag(&key);
 
+            // `indices` is a fixed `[u32; 4]`; only the first `arity`
+            // entries are meaningful, so the bound is load-bearing.
+            #[allow(clippy::needless_range_loop)]
             for j in 0..params.arity() {
                 let bucket = indices[j];
                 for s in 0..bucket_size {

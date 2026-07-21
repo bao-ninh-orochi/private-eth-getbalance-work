@@ -134,6 +134,31 @@ async fn setup_head_and_answer_round_trip() {
     assert_eq!(at_block, 0);
 }
 
+#[tokio::test]
+async fn healthz_reports_ok_and_head() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state);
+
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"ok 0", "fresh node: head is 0");
+}
+
+#[tokio::test]
+async fn setup_concurrency_cap_is_invisible_to_sequential_clients() {
+    // The `/setup` route carries a small concurrency cap (bandwidth-
+    // exhaustion mitigation, threat model §3). Sequential fetches — the
+    // honest-client pattern — must be entirely unaffected by it.
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state);
+
+    for _ in 0..3 {
+        let (status, body) = get(&app, "/setup").await;
+        assert_eq!(status, StatusCode::OK);
+        wire::decode_setup(&body).expect("decode_setup");
+    }
+}
+
 // ── (b) malformed body -> 400, never a panic ────────────────────────────
 
 #[tokio::test]

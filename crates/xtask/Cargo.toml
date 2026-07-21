@@ -2,6 +2,7 @@
 name        = "xtask"
 version     = "0.1.0"
 edition.workspace = true
+license.workspace   = true
 publish     = false
 description = "Repo-local developer tooling. Today: the Stage 0.5 conformance harness — one command proving the private client's answers are byte-identical to in-process ground truth across >=1000 sampled addresses x >=100 consecutive blocks, spanning every account category, diffed continuously (docs/plan.md §6, §8)."
 

@@ -1,0 +1,58 @@
+# Coverage-guided fuzzing of every attacker-facing decoder (roadmap B2,
+# ADR-0021). Standalone workspace on purpose: cargo-fuzz needs nightly and
+# its own profile settings, and must not perturb the root workspace's
+# members or lockfile.
+#
+#   cargo +nightly fuzz run wire_setup -- -max_total_time=300
+#
+# CI runs every target briefly each night (.github/workflows/nightly.yml).
+
+[package]
+name    = "risepir-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+risepir-http  = { path = "../crates/risepir-http" }
+risepir-proto = { path = "../crates/risepir-proto" }
+
+# Must match the root workspace's pin exactly, or the `CuckooParams` type
+# handed to `decode_query_bundle` would come from a different crate build.
+segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }
+
+[[bin]]
+name = "wire_setup"
+path = "fuzz_targets/wire_setup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_query"
+path = "fuzz_targets/wire_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_response"
+path = "fuzz_targets/wire_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_block_delta"
+path = "fuzz_targets/proto_block_delta.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -29,11 +29,13 @@ against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
 which is also the complete runbook (including the BigQuery snapshot export that
 upgrades `--partial` to the complete ~100 M-account set).
 
-Seven crates, **164 tests**, plus two heavier gates: `cargo run -p xtask
+Seven crates, **166 tests**, plus two heavier gates: `cargo run -p xtask
 --release -- conformance` (≥1200 addrs × 120 blocks, byte-identical, all account
 categories) and the live test `cargo test -p risepir-feed --release --
 --ignored` (trace-derived balances vs an independent provider on a real
-finalized block).
+finalized block). CI enforces clippy + tests on every push, conformance on
+PRs, and runs the live gate plus coverage-guided fuzzing of every
+attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
 
 | crate | role |
 |---|---|
@@ -50,6 +52,7 @@ finalized block).
 | doc | what |
 |---|---|
 | [`docs/plan.md`](docs/plan.md) | **authoritative current spec** — read first |
+| [`docs/threat-model.md`](docs/threat-model.md) | what is defended, what is detected, what is *knowingly* not |
 | [`docs/deploy.md`](docs/deploy.md) | **the runbook**: demo in 5 min, complete mainnet, costs, live evidence |
 | [`docs/adr/README.md`](docs/adr/README.md) | every decision, with rationale + rejected alternatives |
 | [`docs/sync.md`](docs/sync.md) | keeping the DB current from the chain |
@@ -78,3 +81,10 @@ is the one ordering that must not be gotten wrong. Hint updating thus becomes op
 garbage collection, and steady-state PIR traffic is ~zero because a client queries each
 account once and then follows the public delta stream. This response-rewind appears
 novel (see `docs/verification.md`).
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option — matching the upstream IKPIR primitive. See
+[`SECURITY.md`](SECURITY.md) for reporting vulnerabilities and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the gates a change must pass.

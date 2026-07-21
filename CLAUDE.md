@@ -14,6 +14,8 @@ today** and there is a **live GCP deployment** (below).
    decisions get a new ADR.
 4. [`docs/HANDOFF.md`](docs/HANDOFF.md) — what is left (short version: the
    user-run BigQuery export upgrades the partial demo to the complete set).
+5. [`docs/threat-model.md`](docs/threat-model.md) — the adversary definitions;
+   a change that moves a security boundary updates it in the same commit.
 
 ## The binding rules
 
@@ -46,6 +48,13 @@ today** and there is a **live GCP deployment** (below).
   `cargo test -p risepir-feed --release -- --ignored` (live: trace parsing vs an
   independent provider) → a `mainnet --partial` smoke run (deploy.md §1). Run
   the live ones after touching the feed or the apply path. Report real output.
+- CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
+  --all-targets -- -D warnings` + the tests on every push, conformance on PRs,
+  and runs the live gate plus the `fuzz/` targets nightly. It fetches the
+  private IKPIR dep via the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR
+  only, Contents read-only — deploy keys are disabled on that repo).
+  `cargo fmt` is not yet a gate — no mass reformat until the in-flight
+  branches land.
 
 ## Git conventions
 

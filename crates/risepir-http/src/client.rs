@@ -8,7 +8,7 @@
 //! a *codec* for this transport; nothing in this crate previously drove it
 //! from the *client* side over real HTTP (the existing test suite talks to
 //! the router in-process via `tower::oneshot`). Stage 0.4's JSON-RPC front
-//! end (`risepir-rpc`) needs exactly that: a [`risepir_client::RisePirClient`]
+//! end (`risepir-rpc`) needs exactly that: a `risepir_client::RisePirClient`
 //! has no network code of its own (by design — see that crate's docs), so
 //! something has to fetch `/setup`, poll `/head`, pull `/sync` deltas, and
 //! POST `/answer` bundles over the wire. This module is that something.
@@ -19,10 +19,12 @@
 //! [`crate::wire`] and [`risepir_proto::codec`] (the same codecs
 //! [`crate::node`]'s handlers use) and reports transport/decode failures
 //! as a clean [`ClientError`] — it never constructs a
-//! [`risepir_client::RisePirClient`] or interprets a response itself. That
+//! `risepir_client::RisePirClient` or interprets a response itself. That
 //! keeps the PIR *protocol* logic in exactly one place
 //! (`risepir-client`) regardless of whether it is driven in-process or
 //! over a real socket.
+
+use std::time::Duration;
 
 use ikpir_common::backend::simple::{SimpleQuery, SimpleResponse};
 use ikpir_common::SimplePirBackend;
@@ -30,6 +32,45 @@ use risepir_proto::{codec, BlockDelta};
 use risepir_server::SetupBundle;
 
 use crate::wire::{self, WireError};
+
+// ─── transport guardrails ────────────────────────────────────────────────
+//
+// This client talks to a server the threat model does *not* ask it to
+// trust for availability or resource-safety (§4.2: an on-path attacker or
+// dishonest operator controls every byte). Two consequences:
+//
+// 1. Timeouts. A server that accepts the connection and then stalls must
+//    not hang the front end forever. `READ_STALL_TIMEOUT` bounds silence
+//    on the socket, not total transfer time — a complete-set `/setup` is
+//    gigabytes and legitimately takes minutes; a stalled byte stream is
+//    the failure signal, elapsed time is not.
+//
+// 2. Response-size caps, per endpoint. "Validate every length before
+//    allocating" must start at the transport: the decoders bound every
+//    parsed length, but a body is buffered *before* decoding, so an
+//    unbounded read would let a hostile server OOM the client with a
+//    10-terabyte stream. Every cap below is orders of magnitude above any
+//    legitimate response at that endpoint.
+
+/// TCP connect bound.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max silence between bytes on an in-flight response (never total time).
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `/head` (8 bytes) and `/mode` (1 byte).
+const MAX_TINY_BODY_BYTES: usize = 64;
+/// `/answer`: a response bundle is `arity × reshape_row_width × 4` bytes
+/// plus framing — well under a MB at every measured geometry.
+const MAX_ANSWER_BODY_BYTES: usize = 64 << 20; // 64 MiB
+/// `/sync`: a coalesced delta over the server's whole retention window is
+/// a few MB at mainnet change rates (deltas telescope, ADR-0005).
+const MAX_SYNC_BODY_BYTES: usize = 1 << 30; // 1 GiB
+/// `/setup`: the one legitimately huge response — the full per-segment
+/// hint set is ~588 MB at the complete mainnet set (`docs/numbers.md`),
+/// so the cap only excludes the absurd.
+const MAX_SETUP_BODY_BYTES: usize = 8 << 30; // 8 GiB
+/// Error bodies are diagnostic text; anything longer is noise.
+const MAX_ERROR_BODY_BYTES: usize = 64 << 10; // 64 KiB
 
 /// Errors from every [`PirHttpClient`] call.
 ///
@@ -122,14 +163,19 @@ impl PirHttpClient {
     pub fn new(base: impl Into<String>) -> Self {
         let base = base.into();
         let base = base.strip_suffix('/').map(str::to_string).unwrap_or(base);
-        Self {
-            base,
-            http: reqwest::Client::new(),
-        }
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_STALL_TIMEOUT)
+            .build()
+            // Only fails on TLS-backend initialisation; with the crate's
+            // static rustls configuration that is a build-environment
+            // defect, not a runtime input.
+            .expect("reqwest client construction");
+        Self { base, http }
     }
 
     /// `GET /setup`: the full [`SetupBundle`] a fresh
-    /// [`risepir_client::RisePirClient`] bootstraps from.
+    /// `risepir_client::RisePirClient` bootstraps from.
     ///
     /// # Errors
     ///
@@ -138,7 +184,7 @@ impl PirHttpClient {
     /// [`wire::decode_setup`]).
     pub async fn setup(&self) -> Result<SetupBundle<SimplePirBackend>, ClientError> {
         let resp = self.http.get(format!("{}/setup", self.base)).send().await?;
-        let bytes = ok_body(resp).await?;
+        let bytes = ok_body(resp, MAX_SETUP_BODY_BYTES).await?;
         Ok(wire::decode_setup(&bytes)?)
     }
 
@@ -152,7 +198,7 @@ impl PirHttpClient {
     /// docs).
     pub async fn head(&self) -> Result<u64, ClientError> {
         let resp = self.http.get(format!("{}/head", self.base)).send().await?;
-        let bytes = ok_body(resp).await?;
+        let bytes = ok_body(resp, MAX_TINY_BODY_BYTES).await?;
         let arr: [u8; 8] = bytes
             .as_slice()
             .try_into()
@@ -173,7 +219,7 @@ impl PirHttpClient {
     /// value `0` or `1`.
     pub async fn mode(&self) -> Result<bool, ClientError> {
         let resp = self.http.get(format!("{}/mode", self.base)).send().await?;
-        let bytes = ok_body(resp).await?;
+        let bytes = ok_body(resp, MAX_TINY_BODY_BYTES).await?;
         match bytes.as_slice() {
             [0] => Ok(false),
             [1] => Ok(true),
@@ -210,7 +256,7 @@ impl PirHttpClient {
         if resp.status() == reqwest::StatusCode::CONFLICT {
             return Ok(None);
         }
-        let bytes = ok_body(resp).await?;
+        let bytes = ok_body(resp, MAX_SYNC_BODY_BYTES).await?;
         let delta = codec::decode_block_delta(&bytes, plaintext_bits, arity)?;
         Ok(Some(delta))
     }
@@ -237,7 +283,7 @@ impl PirHttpClient {
     ) -> Result<(Vec<SimpleResponse>, u64), ClientError> {
         let body = wire::encode_query_bundle(queries);
         let resp = self.http.post(format!("{}/answer", self.base)).body(body).send().await?;
-        let bytes = ok_body(resp).await?;
+        let bytes = ok_body(resp, MAX_ANSWER_BODY_BYTES).await?;
         Ok(wire::decode_response_bundle(&bytes, reshape_row_width_per_seg, arity)?)
     }
 }
@@ -247,14 +293,43 @@ impl PirHttpClient {
 /// [`ClientError::Status`]. Reads the body to bytes only after the status
 /// check passes, or best-effort as UTF-8 text for the error message
 /// otherwise — never assumes an error body is even valid UTF-8.
-async fn ok_body(resp: reqwest::Response) -> Result<Vec<u8>, ClientError> {
+///
+/// `max_len` caps how much of the body is ever buffered (see the
+/// transport-guardrails section above): the declared `Content-Length` is
+/// checked before a single byte, and the streamed accumulation re-checks
+/// as chunks arrive so a lying or absent header cannot bypass the cap.
+async fn ok_body(resp: reqwest::Response, max_len: usize) -> Result<Vec<u8>, ClientError> {
     let status = resp.status();
     if status != reqwest::StatusCode::OK {
         let status_code = status.as_u16();
-        let body = resp.text().await.unwrap_or_default();
+        let body = String::from_utf8_lossy(&read_capped(resp, MAX_ERROR_BODY_BYTES).await.unwrap_or_default())
+            .into_owned();
         return Err(ClientError::Status { status: status_code, body });
     }
-    Ok(resp.bytes().await?.to_vec())
+    if let Some(declared) = resp.content_length() {
+        if declared > max_len as u64 {
+            return Err(ClientError::Wire(format!(
+                "declared response body of {declared} bytes exceeds this call's {max_len}-byte bound"
+            )));
+        }
+    }
+    let body = read_capped(resp, max_len).await?;
+    Ok(body)
+}
+
+/// Streamed body accumulation with a hard byte cap — the transport-layer
+/// half of "validate every length before allocating".
+async fn read_capped(mut resp: reqwest::Response, max_len: usize) -> Result<Vec<u8>, ClientError> {
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if out.len().saturating_add(chunk.len()) > max_len {
+            return Err(ClientError::Wire(format!(
+                "response body exceeded this call's {max_len}-byte bound mid-stream"
+            )));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

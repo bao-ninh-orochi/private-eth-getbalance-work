@@ -185,7 +185,7 @@ fn write_bits(buf: &mut [u8], bit_pos: &mut usize, value: u128, num_bits: u32) {
     }
 }
 
-/// Inverse of [`write_bits`]: reads `num_bits` bits (`<= 128`) starting at
+/// Inverse of `write_bits`: reads `num_bits` bits (`<= 128`) starting at
 /// `*bit_pos` and returns them as the low bits of a `u128`. Advances
 /// `*bit_pos` by `num_bits`. `num_bits == 0` reads nothing and returns `0`
 /// — no special-casing needed, the loop simply does not execute.
@@ -244,7 +244,7 @@ impl ValueCodec {
     }
 
     /// `key_tag = H₂(address)`: the value-side half of the 64-bit-effective
-    /// fingerprint (ADR-0009, see [`KEY_TAG_SEED`]'s docs for why this is a
+    /// fingerprint (ADR-0009, see `KEY_TAG_SEED`'s docs for why this is a
     /// *different* hash from the store's own positioning fingerprint).
     /// Masked to the low `key_tag_bits` bits: `0` if `key_tag_bits == 0`
     /// (the check is disabled), the full 64-bit hash if `key_tag_bits >=
@@ -263,7 +263,7 @@ impl ValueCodec {
 
     /// Reads the low `key_tag_bits` bits of `value_bytes` — the `key_tag`
     /// stored there, with no comparison and no length validation. Pure:
-    /// `key_tag_bits == 0` yields `0` for free, since [`read_bits`]'s loop
+    /// `key_tag_bits == 0` yields `0` for free, since `read_bits`'s loop
     /// simply does not execute for zero bits — no explicit branch needed.
     ///
     /// # Constraints
@@ -272,7 +272,7 @@ impl ValueCodec {
     /// callers pass slot value bytes already sized from this same codec's
     /// `value_bits` (which includes `key_tag_bits` as its low bits), so
     /// this is a precondition, not a runtime check (mirrors
-    /// [`write_bits`]/[`read_bits`]'s own preconditions).
+    /// `write_bits`/`read_bits`'s own preconditions).
     pub fn extract_key_tag(&self, value_bytes: &[u8]) -> u64 {
         let mut pos = 0usize;
         read_bits(value_bytes, &mut pos, self.key_tag_bits) as u64

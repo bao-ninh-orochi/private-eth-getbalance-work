@@ -21,6 +21,8 @@ libfuzzer-sys = "0.4"
 
 risepir-http  = { path = "../crates/risepir-http" }
 risepir-proto = { path = "../crates/risepir-proto" }
+risepir-rpc   = { path = "../crates/risepir-rpc" }
+ikpir-common  = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }
 
 # Must match the root workspace's pin exactly, or the `CuckooParams` type
 # handed to `decode_query_bundle` would come from a different crate build.
@@ -50,6 +52,13 @@ bench = false
 [[bin]]
 name = "proto_block_delta"
 path = "fuzz_targets/proto_block_delta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_load"
+path = "fuzz_targets/state_load.rs"
 test = false
 doc = false
 bench = false

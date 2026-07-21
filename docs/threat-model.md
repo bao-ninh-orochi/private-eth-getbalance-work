@@ -57,6 +57,14 @@ timeout and a small concurrency cap on `/setup` bound the trivial cases;
 production-grade rate limiting, per-IP quotas, and a CDN for `/setup` (it is
 immutable per epoch pin) are documented follow-ups, not present.
 
+The same discipline runs in the *other* direction: the client transport
+(`risepir-http/src/client.rs`) caps every response body per endpoint before
+buffering and bounds connect/stall time, so a hostile or wedged **server**
+cannot OOM or hang a front end. The state-file loader applies it to disk
+input too (`setup_len` bounded by the file's own size before allocation,
+`RPST2` whole-file checksum) — "validate every length before allocating"
+holds on every input path, not just the listener.
+
 ## 4. Adversary: the PIR operator
 
 ### 4.1 Honest-but-curious (assumed)
@@ -172,6 +180,8 @@ the address and undoes the system. It is an operator audit tool, full stop.
 | Feed poisoning between reconcile checkpoints | detected with lag, sampled (§6) |
 | Feed + reconcile providers collude | undetected (§6) |
 | Volumetric DoS | partially mitigated (§3) |
+| Hostile server OOMs/hangs a client | bounded: per-endpoint body caps + stall timeouts (§3) |
+| Disk corruption of the state file silently loads | detected at load: `RPST2` whole-file checksum |
 | Cuckoo false positive answers garbage for an absent account | ~2⁻⁶⁰ (ADR-0009), bounded by conformance sampling |
 | LWE noise corrupts an SCF fingerprint cell → silent `0x0` | inherent to the filter layer, documented (ADR-0009 residual) |
 | Side channels in client decode | best-effort branchless scan upstream; a constant-time audit is out of scope (upstream SECURITY.md) |

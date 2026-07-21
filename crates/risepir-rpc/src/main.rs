@@ -109,9 +109,9 @@ async fn run_mainnet(cfg: MainnetConfig) {
         println!("Ctrl-C saves state before exiting.");
     }
 
-    tokio::signal::ctrl_c().await.expect("install Ctrl-C handler");
+    shutdown_signal().await;
     if let Some(path) = state_path {
-        eprintln!("risepir-rpc mainnet: Ctrl-C — saving state to {} ...", path.display());
+        eprintln!("risepir-rpc mainnet: shutdown signal — saving state to {} ...", path.display());
         let codec = mainnet_value_codec();
         let complete = handle.complete;
         let result = handle
@@ -124,6 +124,27 @@ async fn run_mainnet(cfg: MainnetConfig) {
         }
     }
     std::process::exit(0);
+}
+
+/// Resolves on SIGINT (Ctrl-C) *or* — on unix — SIGTERM. Handling SIGTERM
+/// matters because it is what `systemd`, `docker stop`, and most process
+/// managers send by default: without this, a bare SIGTERM would kill the
+/// process with **no state save**, silently discarding the fast-restart
+/// file (the systemd unit's `KillSignal=SIGINT` papers over it, but the
+/// binary should not depend on every supervisor being configured that
+/// way).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r.expect("install Ctrl-C handler"),
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.expect("install Ctrl-C handler");
 }
 
 async fn run_client(cfg: FrontConfig) {

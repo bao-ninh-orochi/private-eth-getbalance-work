@@ -3,6 +3,7 @@ name        = "risepir-http"
 version     = "0.1.0"
 edition.workspace = true
 license.workspace   = true
+rust-version.workspace = true
 publish     = false
 description = "SimplePIR-concrete binary wire codec + axum HTTP server exposing the RisePIR endpoints (answer/sync/setup/head/delta) over risepir-server (docs/plan.md §3.4, ADR-0006, ADR-0010)."
 

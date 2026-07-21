@@ -3,6 +3,7 @@ name        = "risepir-feed"
 version     = "0.1.0"
 edition.workspace = true
 license.workspace   = true
+rust-version.workspace = true
 publish     = false
 description = "Chain-follow feed for the RisePIR private eth_getBalance service: a Feed trait producing BlockUpdates plus a deterministic, seeded mock (Stage 0) with realistic wei-scale balances and exact ground truth. Real `rpc`/`exex` feeds come later (docs/sync.md)."
 

@@ -55,6 +55,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
         run: cargo test --workspace
+      - name: rustdoc (deny warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - name: browser client compiles for its real target
         # The host-target build above already covers risepir-wasm's rlib;
         # this catches what only wasm32 can — above all the getrandom

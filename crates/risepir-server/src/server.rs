@@ -342,7 +342,7 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// an *absent* account (routinely emitted by a live feed for accounts
     /// a block touches without their balance leaving zero) could destroy
     /// a fingerprint-colliding *foreign* account's entry. So each change
-    /// first runs [`crate::verified::locate`] — the server-side twin of
+    /// first runs `crate::verified::locate` — the server-side twin of
     /// the client's joint fp + `key_tag` mask — and only then acts:
     ///
     /// For each `(address_hash, balance)` in `update.changes`, in order:

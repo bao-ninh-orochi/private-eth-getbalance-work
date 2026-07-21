@@ -342,7 +342,12 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     tokio::spawn({
         let router = NodeState::router_with_web(node.clone(), web_assets);
         async move {
-            axum::serve(pir_listener, router).await.expect("PIR HTTP server crashed");
+            if let Err(e) = axum::serve(pir_listener, router).await {
+                // A dead listener with a live process is a silent outage;
+                // die loudly and let the supervisor restart the unit.
+                eprintln!("risepir-rpc mainnet: fatal: PIR listener crashed: {e}");
+                std::process::exit(1);
+            }
         }
     });
 
@@ -393,7 +398,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     tokio::spawn({
         let router = crate::rpc::router(private_eth);
         async move {
-            axum::serve(rpc_listener, router).await.expect("JSON-RPC server crashed");
+            if let Err(e) = axum::serve(rpc_listener, router).await {
+                eprintln!("risepir-rpc mainnet: fatal: JSON-RPC listener crashed: {e}");
+                std::process::exit(1);
+            }
         }
     });
 

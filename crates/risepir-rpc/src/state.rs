@@ -7,18 +7,32 @@
 //! # Format (all integers little-endian)
 //!
 //! ```text
-//! magic  b"RPST1"
+//! magic  b"RPST2"
 //! u8     complete            (1 = complete nonzero set; 0 = partial)
 //! u32×3  key_tag_bits, balance_bits, checksum_bits
 //! u64    num_items
 //! u64    setup_len,  then setup_len bytes   (risepir_http::wire::encode_setup)
 //! u64    cells_len,  then cells_len × u32   (the store's flat cell array)
+//! u64    xxh3-64 of every preceding byte    (v2 only)
 //! ```
 //!
 //! The setup section reuses the HTTP transport's own `GET /setup` codec —
 //! one codec, one set of length-validation rules, no second serializer to
 //! drift. Writes go to `<path>.tmp` then rename, so a crash mid-save
 //! never truncates the previous good state.
+//!
+//! # Why the trailing checksum (v2)
+//!
+//! v1's structural checks (magic, codec widths, geometry-exact cell
+//! count, trailing-bytes probe, store reconstruction) catch truncation
+//! and format drift, but **not a bit flip inside the cells**: a flipped
+//! bit in a slot's *fingerprint* region makes the candidate-bucket scan
+//! miss and the account silently reads `0x0` — the exact failure class
+//! the repo's first rule forbids, delivered by a disk. The whole-file
+//! xxh3 turns any storage-layer corruption into a loud
+//! [`StateError::Corrupt`] at load. Legacy `RPST1` files still load
+//! (with a stderr warning) so existing deployments upgrade on their next
+//! save rather than re-bootstrapping.
 //!
 //! # Scale note
 //!
@@ -36,7 +50,8 @@ use risepir_proto::ValueCodec;
 use risepir_server::{RisePirServer, SetupBundle};
 use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
 
-const MAGIC: &[u8; 5] = b"RPST1";
+const MAGIC_V1: &[u8; 5] = b"RPST1";
+const MAGIC: &[u8; 5] = b"RPST2";
 /// Cells per streamed chunk (256 KiB of bytes at 4 B/cell).
 const CHUNK_CELLS: usize = 64 * 1024;
 
@@ -84,13 +99,59 @@ fn io_err(e: impl std::fmt::Display) -> StateError {
     StateError::Io(e.to_string())
 }
 
+/// `Write` adapter that folds every byte written through it into an xxh3
+/// state, so [`save`] computes the trailing checksum in the same streamed
+/// pass that writes the file (never a second copy of the ~10 GB cells).
+struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: xxhash_rust::xxh3::Xxh3,
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// `Read` twin of [`HashingWriter`]: everything read through it is folded
+/// into the hash, so [`load`] verifies in its single streamed pass. The
+/// trailing checksum itself is read via [`Self::read_unhashed`] so it is
+/// excluded from its own coverage.
+struct HashingReader<R: Read> {
+    inner: R,
+    hasher: xxhash_rust::xxh3::Xxh3,
+}
+
+impl<R: Read> HashingReader<R> {
+    fn read_unhashed(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        self.inner.read_exact(buf)
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+}
+
 /// Serialize `server` (+ the completeness marker) to `path`, atomically
-/// (`<path>.tmp` + rename).
+/// (`<path>.tmp` + rename). Always writes the current (`RPST2`,
+/// checksummed) format.
 pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) -> Result<(), StateError> {
     let tmp = path.with_extension("tmp");
     {
         let file = File::create(&tmp).map_err(io_err)?;
-        let mut w = BufWriter::new(file);
+        let mut w = HashingWriter {
+            inner: BufWriter::new(file),
+            hasher: xxhash_rust::xxh3::Xxh3::new(),
+        };
 
         w.write_all(MAGIC).map_err(io_err)?;
         w.write_all(&[u8::from(complete)]).map_err(io_err)?;
@@ -113,7 +174,12 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
             }
             w.write_all(&chunk).map_err(io_err)?;
         }
-        w.flush().map_err(io_err)?;
+
+        // Trailing checksum of everything above — written raw to the
+        // inner writer (it must not fold into itself).
+        let digest = w.hasher.digest();
+        w.inner.write_all(&digest.to_le_bytes()).map_err(io_err)?;
+        w.inner.flush().map_err(io_err)?;
     }
     std::fs::rename(&tmp, path).map_err(io_err)
 }
@@ -126,13 +192,41 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
 /// rejected loudly instead.
 pub fn load(path: &Path, config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
     let file = File::open(path).map_err(io_err)?;
-    let mut r = BufReader::new(file);
+    let total_len = file.metadata().map_err(io_err)?.len();
+    load_from(BufReader::new(file), total_len, config, codec)
+}
+
+/// [`load`] over an in-memory byte slice — what the state-file fuzz
+/// target drives, and handy in tests. Identical validation to [`load`].
+pub fn load_bytes(bytes: &[u8], config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+    load_from(bytes, bytes.len() as u64, config, codec)
+}
+
+/// The single decode path behind [`load`] / [`load_bytes`]. `total_len`
+/// is the input's real size, used to bound every header-declared length
+/// *before* it sizes an allocation — a corrupt or hostile file must
+/// produce a clean [`StateError`], never an OOM (the repo's
+/// validate-every-length rule applies to state files too, not just the
+/// network).
+fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+    let mut r = HashingReader {
+        inner: reader,
+        hasher: xxhash_rust::xxh3::Xxh3::new(),
+    };
 
     let mut magic = [0u8; 5];
     r.read_exact(&mut magic).map_err(io_err)?;
-    if &magic != MAGIC {
-        return Err(StateError::Corrupt("bad magic (not an RPST1 state file)".to_string()));
-    }
+    let checksummed = match &magic {
+        m if m == MAGIC => true,
+        m if m == MAGIC_V1 => {
+            eprintln!(
+                "risepir-rpc: WARNING: legacy RPST1 state file (no whole-file checksum) — \
+                 loading with structural checks only; the next save upgrades it to RPST2"
+            );
+            false
+        }
+        _ => return Err(StateError::Corrupt("bad magic (not an RPST1/RPST2 state file)".to_string())),
+    };
     let mut flag = [0u8; 1];
     r.read_exact(&mut flag).map_err(io_err)?;
     let complete = match flag[0] {
@@ -161,6 +255,13 @@ pub fn load(path: &Path, config: ikpir_common::SimpleConfig, codec: &ValueCodec)
     let num_items = read_u64(&mut r)?;
 
     let setup_len = read_u64(&mut r)?;
+    // Bound by the input's real size before allocating: a header claiming
+    // more bytes than the file holds is corruption, not an allocation.
+    if setup_len > total_len {
+        return Err(StateError::Corrupt(format!(
+            "setup_len {setup_len} exceeds the file's own size ({total_len} bytes)"
+        )));
+    }
     let setup_len = usize::try_from(setup_len).map_err(|_| StateError::Corrupt("setup_len overflow".to_string()))?;
     let mut setup_bytes = vec![0u8; setup_len];
     r.read_exact(&mut setup_bytes).map_err(io_err)?;
@@ -192,8 +293,24 @@ pub fn load(path: &Path, config: ikpir_common::SimpleConfig, codec: &ValueCodec)
         }
         filled += take;
     }
-    // Anything after the cells is corruption, same posture as the wire
-    // codecs' TrailingBytes.
+
+    if checksummed {
+        // v2: the whole-file xxh3 covers every byte read so far. Read the
+        // stored digest *unhashed* (it cannot cover itself) and compare.
+        let computed = r.hasher.digest();
+        let mut stored = [0u8; 8];
+        r.read_unhashed(&mut stored).map_err(io_err)?;
+        let stored = u64::from_le_bytes(stored);
+        if computed != stored {
+            return Err(StateError::Corrupt(format!(
+                "whole-file checksum mismatch (stored {stored:#018x}, computed {computed:#018x}) — \
+                 the file is corrupt; restore from backup or re-bootstrap"
+            )));
+        }
+    }
+
+    // Anything after the cells (+ v2 checksum) is corruption, same
+    // posture as the wire codecs' TrailingBytes.
     let mut probe = [0u8; 1];
     match r.read(&mut probe) {
         Ok(0) => {}
@@ -307,6 +424,73 @@ mod tests {
         let loaded = load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(!loaded.complete);
+    }
+
+    /// The failure class RPST2 exists for: a single flipped bit deep in
+    /// the cells section passes every *structural* check (geometry-exact
+    /// count, trailing probe, store reconstruction) — under v1 it loaded
+    /// "successfully" and could silently read a colliding account as
+    /// `0x0`. The whole-file checksum must reject it loudly instead.
+    #[test]
+    fn mid_cells_bit_flip_rejected_by_checksum() {
+        let server = small_server();
+        let path = tmp("bitflip.bin");
+        save(&server, &codec(), true, &path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mid = bytes.len() / 2; // well inside the cells section
+        bytes[mid] ^= 0x01;
+        match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()) {
+            Err(StateError::Corrupt(msg)) => assert!(msg.contains("checksum"), "unexpected rejection: {msg}"),
+            Err(other) => panic!("bit flip must be a checksum rejection, got {other}"),
+            Ok(_) => panic!("bit flip must not load"),
+        }
+    }
+
+    /// A legacy RPST1 file (no trailing checksum) still loads — existing
+    /// deployments upgrade on their next save instead of re-bootstrapping.
+    /// Constructed from a real v2 file: strip the 8-byte trailer, patch
+    /// the magic — that *is* the v1 format.
+    #[test]
+    fn legacy_rpst1_still_loads() {
+        let mut server = small_server();
+        let addr = keccak256(&[9u8; 20]);
+        server
+            .apply_block(&BlockUpdate { block: 3, changes: vec![(addr, 777u128)], credits: vec![] })
+            .unwrap();
+        let path = tmp("legacy.bin");
+        save(&server, &codec(), false, &path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        bytes.truncate(bytes.len() - 8);
+        bytes[..5].copy_from_slice(MAGIC_V1);
+
+        let loaded = load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
+        assert!(!loaded.complete);
+        assert_eq!(loaded.server.block(), 3);
+        assert_eq!(loaded.server.balance_of(&addr).unwrap(), Some(777));
+    }
+
+    /// A header that declares more setup bytes than the file holds must be
+    /// a clean rejection *before* any allocation is sized from it.
+    #[test]
+    fn oversized_setup_len_rejected_without_allocation() {
+        let server = small_server();
+        let path = tmp("oversize.bin");
+        save(&server, &codec(), true, &path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        // setup_len lives right after magic(5)+flag(1)+widths(12)+num_items(8).
+        let off = 5 + 1 + 12 + 8;
+        bytes[off..off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()) {
+            Err(StateError::Corrupt(msg)) => assert!(msg.contains("exceeds"), "unexpected rejection: {msg}"),
+            Err(other) => panic!("oversized setup_len must be rejected, got {other}"),
+            Ok(_) => panic!("oversized setup_len must not load"),
+        }
     }
 
     #[test]

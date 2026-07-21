@@ -18,7 +18,7 @@
 //! head, which is exactly the server's head at that instant: the
 //! `ResponseBlockMismatch` / malformed-query cases `RisePirClient::finish`
 //! and `RisePirServer::answer` guard against cannot arise here by
-//! construction. That is why [`diff_sample`] `.expect`s those `Result`s
+//! construction. That is why `diff_sample` `.expect`s those `Result`s
 //! rather than folding an `Err` into [`ConformanceReport::mismatches`]: an
 //! `Err` here would mean the harness itself is wired wrong, not that the
 //! private client gave a wrong answer.
@@ -58,7 +58,7 @@
 //! # The diff rule
 //!
 //! One rule, applied uniformly to every category and every checkpoint —
-//! see [`diff_sample`]: `Lookup::Found(b)` must equal `balance_of(key)`
+//! see `diff_sample`: `Lookup::Found(b)` must equal `balance_of(key)`
 //! and that must be nonzero; `Lookup::NotFound` requires
 //! `balance_of(key) == 0`; `Lookup::DecodeFailed` is always a mismatch —
 //! no in-process LWE corruption can occur, so a checksum failure here can

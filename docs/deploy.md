@@ -458,6 +458,46 @@ reboot belongs under the unit. A liveness probe is served at
 `GET /healthz` on `:8645` (`ok <head-block>` — a stalling number is the
 block-lag signal).
 
+**State-file backup & restore (drill it once before trusting it):** the
+state file is atomic-by-rename and, as of `RPST2`, carries a whole-file
+xxh3 checksum, so a copy is a valid backup exactly when `load` accepts it.
+
+```bash
+# back up (server running is fine — copy the *state* file, never the .tmp):
+gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bin ~/risepir-state.bak'
+# restore = stop server, put the backup in place, start; the server replays
+# saved_block+1..finalized from the feed — the backup's age only costs
+# replay time (~1–2 s/block), never correctness:
+gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bak ~/risepir-state.bin'
+```
+
+A corrupt file (including a single flipped bit — the checksum catches what
+structural checks cannot) is **rejected at load**; partial mode then
+re-bootstraps empty, loss-free, while a complete-set deployment restores
+the backup or re-runs the snapshot bootstrap. Legacy `RPST1` files load
+with a warning and upgrade to `RPST2` on their next save.
+
+**TLS (required the moment either port leaves localhost):** plaintext HTTP
+means anyone on-path can *be* the operator (threat model §4.2), and the
+browser front end additionally needs TLS for a non-localhost origin. Don't
+teach the binary TLS — put a reverse proxy in front and keep the listeners
+loopback-only:
+
+```bash
+sudo apt-get install -y caddy       # auto-provisions Let's Encrypt
+# /etc/caddy/Caddyfile — replace the hostname; DNS must already point here:
+#   pir.example.com {
+#       reverse_proxy 127.0.0.1:8645
+#   }
+sudo systemctl reload caddy
+```
+
+Serve **only** the PIR port (`:8645`) this way — it is what remote clients
+and the browser front end need. `:8545` stays loopback/SSH-tunnel: it
+answers *plaintext account queries* by design, so exposing it publicly
+hands every visitor's queried address to the network (ADR-0012's warning,
+one layer up).
+
 **Cost hygiene:** `gcloud compute instances stop risepir` when idle (only the
 disk's ~$4/mo keeps billing against credit); `…delete` to zero it;
 `gcloud billing projects describe risepir-poc` / the console's Billing page shows

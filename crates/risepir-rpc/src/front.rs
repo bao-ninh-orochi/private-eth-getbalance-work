@@ -140,7 +140,13 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
     tokio::spawn({
         let router = crate::rpc::router(private_eth);
         async move {
-            axum::serve(rpc_listener, router).await.expect("JSON-RPC server crashed");
+            if let Err(e) = axum::serve(rpc_listener, router).await {
+                // A dead listener with a live process is a silent outage;
+                // die loudly so the wallet sees a refused connection, not
+                // an indefinite hang against a half-alive front end.
+                eprintln!("risepir-rpc client: fatal: JSON-RPC listener crashed: {e}");
+                std::process::exit(1);
+            }
         }
     });
 

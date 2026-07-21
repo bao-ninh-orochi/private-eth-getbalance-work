@@ -220,7 +220,12 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     let pir_addr = pir_listener.local_addr().expect("PIR local_addr");
     let pir_router = NodeState::router_with_web(node_state.clone(), web_assets);
     tokio::spawn(async move {
-        axum::serve(pir_listener, pir_router).await.expect("PIR HTTP server crashed");
+        if let Err(e) = axum::serve(pir_listener, pir_router).await {
+            // A dead listener with a live process is a silent outage; die
+            // loudly instead and let the supervisor restart the whole unit.
+            eprintln!("risepir-rpc: fatal: PIR listener crashed: {e}");
+            std::process::exit(1);
+        }
     });
 
     // Background follow loop: every `cfg.block_interval`, pull one block
@@ -277,7 +282,10 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     let rpc_addr = rpc_listener.local_addr().expect("RPC local_addr");
     let rpc_router = crate::rpc::router(private_eth);
     tokio::spawn(async move {
-        axum::serve(rpc_listener, rpc_router).await.expect("JSON-RPC server crashed");
+        if let Err(e) = axum::serve(rpc_listener, rpc_router).await {
+            eprintln!("risepir-rpc: fatal: JSON-RPC listener crashed: {e}");
+            std::process::exit(1);
+        }
     });
 
     DemoHandle {

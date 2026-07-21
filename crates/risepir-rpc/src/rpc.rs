@@ -130,9 +130,28 @@ impl From<RpcError> for JsonRpcError {
 #[derive(Deserialize)]
 struct GetBalanceParams(String, String);
 
-/// Build the JSON-RPC axum router: a single `POST /`.
+/// Maximum accepted JSON-RPC request body. A legitimate request here is
+/// a few hundred bytes (`eth_getBalance` + params); the cap only exists
+/// so the listener never buffers an unbounded hostile body (the same
+/// posture as the PIR transport's `MAX_ANSWER_BODY_BYTES`).
+const MAX_RPC_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Per-request service timeout. Generous: at complete-mainnet scale one
+/// private lookup legitimately spends seconds in the PIR answer matvec;
+/// what this bounds is a wedged request holding a connection forever.
+const RPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Build the JSON-RPC axum router: a single `POST /`, body-capped and
+/// time-bounded (threat model §3 applies to this listener too).
 pub fn router(state: Arc<PrivateEth>) -> Router {
-    Router::new().route("/", post(handle)).with_state(state)
+    Router::new()
+        .route("/", post(handle))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_RPC_BODY_BYTES))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            RPC_REQUEST_TIMEOUT,
+        ))
+        .with_state(state)
 }
 
 /// `POST /`: the one JSON-RPC entry point. Never panics on malformed

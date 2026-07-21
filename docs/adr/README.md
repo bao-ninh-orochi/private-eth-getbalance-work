@@ -342,3 +342,52 @@ feed's own reads (withdrawal prior-value), reliable at the 64-bit-effective fing
 **Consequence:** the store discards addresses after hashing, so recovery at a larger
 size comes from the external snapshot (ADR-0011/0014), not from local state. Accepted —
 the snapshot is authoritative and re-fetchable, and `TableFull` is years away at ~75%.
+
+*(ADR-0019 — web front end / WASM rewind client — lives on the in-flight web branch.)*
+
+### ADR-0020 — Threat model: documented trust assumption + operator-side detection, not verifiable PIR **[NEW]**
+
+**Chosen:** write the adversary definitions down ([`docs/threat-model.md`](../threat-model.md))
+and adopt, explicitly, the *documented honest-but-curious operator* posture: the
+system's integrity mechanisms (ADR-0005/0009/0017) defend against **accident**;
+against a **malicious operator** the defense is disclosure plus operator-side
+detection (the sampled reconcile), with signed store digests → public anchoring →
+full verifiable PIR (VeriSimplePIR-style) recorded as future rungs, none of which
+stop *targeted* lying to one user.
+**Rejected:** (a) implementing verifiability now — for SimplePIR-based schemes this
+is a research effort (plausibly a second paper), and a Merkle-proof-per-answer
+"fix" defeats the system outright because the proof path names the account;
+(b) leaving the assumption implicit, which is how PoCs quietly overclaim.
+**Why:** the roadmap's A1 open question — "full verifiability, or a documented,
+honestly-stated trust assumption plus detection?" — needed an explicit answer
+before any other hardening is prioritizable; both are defensible for a PoC and
+the second is the one that keeps the artifact honest *today*. The threat model
+also pins two operational rules that were previously folklore: the reconcile
+check is operator-side only (client-side per-query use reveals the address), and
+plaintext HTTP widens "the operator" to "anyone on-path", making TLS a
+prerequisite for naming a trusted party at all.
+
+### ADR-0021 — CI: GitHub Actions with a read-only deploy key for the private primitive **[NEW]**
+
+**Chosen:** GitHub Actions (`.github/workflows/`): clippy `-D warnings` + full
+workspace tests on every push/PR; the network-free `xtask conformance` gate on
+PRs; the live feed gate + short coverage-guided fuzz runs nightly (network-
+dependent and flaky-by-nature jobs never gate merges); `cargo-deny` for
+advisories/licenses/sources. The private `bao-ninh-orochi/IKPIR` dependency is
+fetched with a **fine-grained PAT** scoped to that one repo, Contents
+read-only, stored as an Actions secret (`IKPIR_TOKEN`) here and wired through
+an `insteadOf` rewrite + `git-fetch-with-cli`. A missing secret fails with an
+explicit `::error` naming this ADR, not a cryptic fetch error.
+**Rejected:** a read-only deploy key — the *preferred* least-privilege shape,
+but **deploy keys are disabled on the IKPIR repo** (verified: `gh repo
+deploy-key add` → HTTP 422 "Deploy keys are disabled for this repository",
+2026-07-21 — the same constraint deploy.md §3.5 hit for the VM build);
+vendoring IKPIR (drifts from the pinned rev and bloats the repo);
+`cargo fmt --check` in CI *now* — the tree predates
+`rustfmt.toml` (296 files of drift) and a mechanical reformat while the web
+branch is in flight would manufacture conflicts, so the gate turns on in a
+formatting-only commit after in-flight branches land.
+**Why:** 183 tests, a conformance harness, and a live gate existed and ran only
+when a human remembered — the highest impact-per-hour item in the roadmap. The
+deploy-key choice is the standard least-privilege answer to "CI must read a
+private sibling repo".

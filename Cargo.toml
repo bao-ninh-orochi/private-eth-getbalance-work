@@ -4,6 +4,7 @@ members  = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 # The IKPIR primitive, pinned at the `perf/optimized` tip (042d868) — the
 # build docs/numbers.md §7's headline was measured against. One place, not

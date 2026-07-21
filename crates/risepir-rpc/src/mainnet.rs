@@ -251,7 +251,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             let encoded = codec.encode(&key, balance).map_err(|e| e.to_string())?;
             store.insert(key, &encoded).map_err(|e| format!("{e:?}"))?;
             ingested += 1;
-            if ingested % 5_000_000 == 0 {
+            if ingested.is_multiple_of(5_000_000) {
                 eprintln!(
                     "risepir-rpc mainnet:   {ingested} accounts in {:.0}s ...",
                     started.elapsed().as_secs_f64()
@@ -454,10 +454,11 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             }
             last = n;
 
-            if cfg.reconcile_every > 0 && n % cfg.reconcile_every == 0 {
-                if !reconcile(&confirm, &node, n, &changed, &credited, cfg.complete, cfg.reconcile_samples).await {
-                    return; // reconcile() already logged CRITICAL
-                }
+            if cfg.reconcile_every > 0
+                && n.is_multiple_of(cfg.reconcile_every)
+                && !reconcile(&confirm, &node, n, &changed, &credited, cfg.complete, cfg.reconcile_samples).await
+            {
+                return; // reconcile() already logged CRITICAL
             }
         }
 

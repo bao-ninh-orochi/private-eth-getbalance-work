@@ -1,0 +1,44 @@
+[package]
+name        = "risepir-wasm"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+publish     = false
+description = "The response-rewind RisePIR client compiled for the browser (ADR-0019): a pure-compute wasm32 module over risepir-client + risepir-http's wire codec. Builds the LWE query, rewinds the response, and scans — in the page, so the queried address never leaves the machine. All I/O is the host's; this module never touches the network."
+
+[lib]
+# `cdylib` is the wasm artifact; `rlib` keeps the same code linkable into
+# this workspace's native test binaries, so the ABI state machine below is
+# exercised by `cargo test --workspace` against a real in-process server
+# rather than only through a browser.
+crate-type = ["cdylib", "rlib"]
+
+# Not `forbid`: the entropy shim (`entropy.rs`) is FFI and irreducibly
+# unsafe. `deny` + one scoped, documented `allow` keeps that the *only*
+# unsafe block in the crate, and makes any second one a build failure.
+[lints.rust]
+unsafe_code = "deny"
+
+# No `parallel`: `wasm32-unknown-unknown` has no threads, and ikpir-common's
+# rayon kernels do not degrade gracefully there — above their fan-out
+# thresholds (which a real query's matvec is comfortably over) they would
+# reach for a thread pool that cannot exist. See the workspace manifest.
+[dependencies]
+risepir-proto  = { path = "../risepir-proto",  default-features = false }
+risepir-server = { path = "../risepir-server", default-features = false }
+risepir-client = { path = "../risepir-client", default-features = false }
+# Only the wire codec — no axum, no reqwest. Sharing the server's own
+# encoder is the point: a hand-rolled JavaScript decoder of the same format
+# is exactly the skew that yields a wrong answer instead of a build error.
+risepir-http   = { path = "../risepir-http",   default-features = false }
+
+ikpir-common     = { workspace = true, default-features = false }
+segmented-cuckoo = { workspace = true }
+
+# Reached only through `rand`, under the LWE secret sampling. Named here
+# because this crate is what supplies its `custom` backend.
+getrandom = "0.3"
+
+[dev-dependencies]
+# The native ABI test drives a real server through the real transport.
+risepir-feed = { path = "../risepir-feed" }

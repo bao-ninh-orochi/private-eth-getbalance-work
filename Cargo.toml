@@ -11,7 +11,24 @@ license = "MIT OR Apache-2.0"
 # seven: every crate says `{ workspace = true }`. The former path deps
 # pointed at ../../../CANS2026/Incremental-Keyword-PIR, a checkout that has
 # since been renamed, which is exactly the fragility a pinned rev removes.
+#
+# `ikpir-common` is inherited with `default-features = false` — **not**
+# because anything here wants the single-threaded kernels, but because a
+# dependent cannot subtract a default feature that is switched on at the
+# workspace level (cargo ignores a member's `default-features = false` when
+# the workspace entry does not set it, with a warning), and the browser
+# client must subtract exactly one: `parallel`/rayon, which has no threads
+# to fan out to on `wasm32-unknown-unknown` and panics rather than degrades
+# (ADR-0019).
+#
+# So every crate here re-enables it through its own **default-on**
+# `parallel` feature, which forwards to `ikpir-common/parallel`. Net effect
+# for every existing build: unchanged, rayon kernels on. Only
+# `risepir-wasm` (and anything built `--no-default-features`) opts out.
+# If you add a crate that depends on `ikpir-common`, give it the same
+# default-on `parallel` forwarding feature — otherwise it silently builds
+# the scalar kernels the headline numbers were not measured against.
 [workspace.dependencies]
-ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }
+ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868", default-features = false }
 segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }
 ikpir-server     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }

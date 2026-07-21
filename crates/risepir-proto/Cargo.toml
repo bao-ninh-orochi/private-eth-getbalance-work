@@ -9,8 +9,18 @@ description = "Pure types, geometry math, and wire codec for the RisePIR-backed 
 [lints.rust]
 unsafe_code = "forbid"
 
+# `parallel` forwards ikpir-common's (default-on) rayon kernels. Default-on
+# here too, so every existing build is unchanged; the browser client
+# (`risepir-wasm`, ADR-0019) turns it off, because `wasm32-unknown-unknown`
+# has no threads to fan out to. Expressed as a feature rather than a
+# `cfg(target_arch)` because feature selection is what a dependent crate can
+# actually control.
+[features]
+default  = ["parallel"]
+parallel = ["ikpir-common/parallel"]
+
 [dependencies]
-ikpir-common = { workspace = true }
+ikpir-common = { workspace = true, default-features = false }
 
 # `ValueCodec::key_tag`'s hash (ADR-0009): deliberately the *same* xxh3
 # crate `segmented-cuckoo` uses for the SCF's own fingerprint, but called

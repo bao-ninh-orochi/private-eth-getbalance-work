@@ -123,6 +123,10 @@ pub struct MainnetConfig {
     /// Override the LWE dimension (tests only — `None` means the real
     /// `SimpleConfig::default()`, `lwe_dim` 1275 / sigma 6.4).
     pub lwe_dim: Option<u32>,
+    /// Serve the browser front end (ADR-0019) from this directory, on the
+    /// PIR port's own origin. `None` leaves the deployment headless — the
+    /// PIR transport and `cast`/MetaMask still work exactly as before.
+    pub web_dir: Option<PathBuf>,
 }
 
 impl Default for MainnetConfig {
@@ -144,6 +148,7 @@ impl Default for MainnetConfig {
             reconcile_samples: 8,
             ring_capacity: 600,
             lwe_dim: None,
+            web_dir: None,
         }
     }
 }
@@ -161,6 +166,8 @@ pub struct MainnetHandle {
     pub head_at_start: u64,
     /// Shared node state — `main` uses it for the Ctrl-C state save.
     pub node: Arc<NodeState>,
+    /// Whether the browser front end is being served (ADR-0019).
+    pub web_served: bool,
 }
 
 /// Fatal deployment-configuration error: print and exit. Everything this
@@ -317,12 +324,23 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     let node = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), complete));
 
     // ── PIR HTTP transport ─────────────────────────────────────────────
+    // Loaded before binding anything: a missing or unreadable asset is a
+    // startup failure, not a 404 the first visitor discovers.
+    let web_assets = match &cfg.web_dir {
+        Some(dir) => match risepir_http::WebAssets::load(dir) {
+            Ok(assets) => Some(assets),
+            Err(e) => die(format!("--web {}: {e}", dir.display())),
+        },
+        None => None,
+    };
+    let web_served = web_assets.is_some();
+
     let pir_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.pir_port))
         .await
         .unwrap_or_else(|e| die(format!("bind PIR port {}: {e}", cfg.pir_port)));
     let pir_addr = pir_listener.local_addr().expect("PIR local_addr");
     tokio::spawn({
-        let router = NodeState::router(node.clone());
+        let router = NodeState::router_with_web(node.clone(), web_assets);
         async move {
             axum::serve(pir_listener, router).await.expect("PIR HTTP server crashed");
         }
@@ -380,6 +398,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     });
 
     MainnetHandle {
+        web_served,
         rpc_addr,
         pir_addr,
         complete,
@@ -453,6 +472,13 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 return;
             }
             last = n;
+
+            // Feed `GET /recent` (ADR-0019). Only *after* a successful
+            // apply: an address is offered to the front end as queryable
+            // exactly when the deployment actually holds it, never before.
+            // These are the block's own touched addresses — public chain
+            // data, and the same list for every caller.
+            node.note_recent(changed.iter().map(|(addr, _)| *addr)).await;
 
             if cfg.reconcile_every > 0
                 && n.is_multiple_of(cfg.reconcile_every)

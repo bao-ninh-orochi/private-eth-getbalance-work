@@ -55,6 +55,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
         run: cargo test --workspace
+      - name: browser client compiles for its real target
+        # The host-target build above already covers risepir-wasm's rlib;
+        # this catches what only wasm32 can — above all the getrandom
+        # custom-backend wiring (ADR-0019: entropy is a build error there,
+        # not a runtime hope).
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p risepir-wasm --target wasm32-unknown-unknown
 
   conformance:
     name: conformance (byte-exact vs ground truth)

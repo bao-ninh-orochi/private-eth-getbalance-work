@@ -4,7 +4,7 @@
 //! auto-`Send + Sync`, so the lock gives concurrent readers on the hot
 //! `/answer` path).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use std::time::Duration;
@@ -52,6 +52,12 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// semaphore is a non-event outside an attack.
 pub const SETUP_MAX_CONCURRENT: usize = 2;
 
+/// How many recently-touched addresses `GET /recent` retains
+/// ([`NodeState::note_recent`]). Small on purpose: this is a "here is
+/// something you can actually ask about" affordance for the browser front
+/// end in a partial deployment, not a chain index.
+pub const RECENT_CAPACITY: usize = 128;
+
 /// Everything the lock guards: the PIR server, its sliding delta-ring
 /// window, and a bounded per-block delta index for immutable
 /// `GET /delta/{block}` lookups. `per_block` exists because [`DeltaRing`]
@@ -94,6 +100,29 @@ pub struct NodeState {
     /// groups fit the body" — see those functions' docs for the
     /// out-of-bounds server/client panic that exactness closes.
     backend_params: Vec<SimpleServerParams>,
+    /// Recently-touched **addresses** (not key hashes), newest last, for
+    /// `GET /recent`.
+    ///
+    /// # Why this exists, and why it costs no privacy
+    ///
+    /// A partial deployment (ADR-0015/0017) only knows accounts touched
+    /// since it bootstrapped, so a visitor typing an arbitrary address
+    /// gets an honest "not in the tracked set" error and learns nothing
+    /// about the system. This gives the front end a handful of addresses
+    /// that *are* in the set, so the demo can demonstrate something.
+    ///
+    /// It leaks nothing: these are addresses from recent blocks, which is
+    /// public chain data anyone can read from any node, and it is served
+    /// to everyone identically. Crucially it does not weaken the PIR
+    /// property — fetching the list is a separate, address-free request,
+    /// and the server still cannot tell which entry (if any) the visitor
+    /// then queried. That distinction is stated on the page rather than
+    /// left for the reader to work out.
+    ///
+    /// Separate lock from `inner`: it is written by the block-follow
+    /// driver and read by `/recent`, neither of which should ever wait on
+    /// the PIR server's own lock.
+    recent: RwLock<VecDeque<[u8; 20]>>,
 }
 
 impl NodeState {
@@ -118,6 +147,29 @@ impl NodeState {
             }),
             backend_params,
             complete,
+            recent: RwLock::new(VecDeque::new()),
+        }
+    }
+
+    /// Record addresses this deployment now tracks, for `GET /recent` —
+    /// see the field's docs. Newest win; the buffer is capped at
+    /// [`RECENT_CAPACITY`] and duplicates are collapsed so a repeatedly
+    /// active account cannot crowd the list out.
+    ///
+    /// Called by the block-follow driver with the block's own touched
+    /// addresses (`risepir-rpc`'s mainnet loop), or once at startup with a
+    /// fixed set (the mock demo). Never exposed over HTTP: nothing a
+    /// client sends can put an address in this list.
+    pub async fn note_recent(&self, addrs: impl IntoIterator<Item = [u8; 20]>) {
+        let mut recent = self.recent.write().await;
+        for addr in addrs {
+            if let Some(pos) = recent.iter().position(|a| *a == addr) {
+                recent.remove(pos);
+            }
+            recent.push_back(addr);
+            while recent.len() > RECENT_CAPACITY {
+                recent.pop_front();
+            }
         }
     }
 
@@ -181,7 +233,15 @@ impl NodeState {
     /// lock, never the write lock) — [`Self::apply_block`] is driven
     /// directly by the caller, not through this router.
     pub fn router(state: Arc<NodeState>) -> Router {
-        Router::new()
+        Self::router_with_web(state, None)
+    }
+
+    /// [`Self::router`] plus, optionally, the browser front end's static
+    /// assets on the *same origin* (ADR-0019) — which is what lets the
+    /// page reach `/setup`, `/answer` and `/sync` with no CORS, no mixed
+    /// content, and a `connect-src 'self'` CSP. See [`crate::web`].
+    pub fn router_with_web(state: Arc<NodeState>, web: Option<crate::web::WebAssets>) -> Router {
+        let api = Router::new()
             .route("/answer", post(answer))
             .route("/delta/{block}", get(delta_by_block))
             .route("/sync", get(sync))
@@ -194,10 +254,15 @@ impl NodeState {
             )
             .route("/head", get(head))
             .route("/mode", get(mode))
+            .route("/recent", get(recent))
             .route("/healthz", get(healthz))
             .layer(DefaultBodyLimit::max(MAX_ANSWER_BODY_BYTES))
             .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
-            .with_state(state)
+            .with_state(state);
+        match web {
+            Some(assets) => assets.attach(api),
+            None => api,
+        }
     }
 }
 
@@ -296,6 +361,28 @@ async fn head(State(state): State<Arc<NodeState>>) -> Response {
 /// No lock needed: the flag is fixed at construction.
 async fn mode(State(state): State<Arc<NodeState>>) -> Response {
     octet_response(StatusCode::OK, vec![u8::from(state.complete)])
+}
+
+/// `GET /recent`: up to [`RECENT_CAPACITY`] recently-touched addresses,
+/// newest first, as `count:u32-le ‖ count × 20 bytes` — the same binary
+/// discipline as every other response here, and trivially parsed by the
+/// front end.
+///
+/// Public chain data, identical for every caller, and separate from any
+/// query: see [`NodeState`]'s `recent` field for why serving it does not
+/// weaken the PIR property.
+async fn recent(State(state): State<Arc<NodeState>>) -> Response {
+    let recent = state.recent.read().await;
+    let mut body = Vec::with_capacity(4 + recent.len() * 20);
+    body.extend_from_slice(&(recent.len() as u32).to_le_bytes());
+    for addr in recent.iter().rev() {
+        body.extend_from_slice(addr);
+    }
+    drop(recent);
+    let mut resp = octet_response(StatusCode::OK, body);
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
 }
 
 /// `GET /healthz`: liveness + readiness in one — `200` with the plain-text

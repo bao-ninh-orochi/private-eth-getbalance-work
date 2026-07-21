@@ -17,7 +17,7 @@ keyword-PIR). Work in `/Users/admin/Documents/private-ETH-getBalance` (git repo,
 never guess an API** (but do not build against the checkout: it moves; the pin is the
 truth).
 
-## Where things stand (2026-07-19)
+## Where things stand (2026-07-21)
 
 **The PoC works against real mainnet.** `risepir-rpc mainnet --partial` follows
 finalized blocks over keyless public RPC (dRPC traces ⊕ withdrawals), serves private
@@ -27,9 +27,20 @@ Recorded evidence (deploy.md §5): 8/8 private queries byte-exact vs publicnode 
 live-changed accounts; in-loop reconcile exact at every checkpoint; strict
 not-found errors (never `0x0`) in partial mode; Ctrl-C state save + instant reload.
 
-164 tests green; `xtask conformance` PASS (1201×120, 0 mismatches); the live feed
-gate (`cargo test -p risepir-feed --release -- --ignored`) validates the diffMode
-trace parsing byte-exactly against a second provider.
+**There is now a browser front end** (ADR-0019): `crates/risepir-wasm` compiles the
+*same* `risepir-client` rewind client to wasm32, and `risepir-rpc mock|mainnet --web
+web` serves `web/` from the PIR port's own origin, so a visitor's address never
+leaves the page. Live-verified 2026-07-21 (`docs/deploy.md` §5.1): a real mainnet
+balance fetched in a browser, byte-exact against `rpc.flashbots.net` at the same
+height. First load is 49 MB of hint at `--partial-capacity 1000000`; client compute
+is ~10 ms/lookup. Its residual trust (you trust whoever serves the page; the network
+still sees who is asking) is stated on the page itself.
+
+186 tests green; `xtask conformance` PASS (1201×120, 15117 checks, 0 mismatches); the
+live feed gate (`cargo test -p risepir-feed --release -- --ignored`) validates the
+diffMode trace parsing byte-exactly against a second provider; and two browser gates
+(`node web/test/e2e.mjs` / `node web/test/browser.mjs`, both against a running
+`--web` server, neither needing npm).
 
 Structural work this round: IKPIR deps pinned (the old path deps were dead);
 **verified fp ∧ `key_tag` store ops** close the fingerprint-collision
@@ -60,6 +71,12 @@ snapshot (~1–2 s/block on keyless tiers).
   injection in `server_setup` (`docs/verification.md`).
 - Optional polish: MetaMask walkthrough screenshots; a public deployment on the
   Oracle free-tier box.
+- **Web front end, deliberately deferred** (ADR-0019 records why, and what each
+  needs): caching the hint across visits (sound only against the delta-ring
+  retention check — a `409` must force a re-download); public exposure, which
+  needs a hostname + certificate before it is honest to serve client code over
+  the open internet; and serving the page from a *different* party than the PIR
+  server, which is the stronger arrangement for the code-delivery trust.
 
 ## The binding rules (do not violate)
 

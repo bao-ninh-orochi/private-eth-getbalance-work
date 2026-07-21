@@ -48,6 +48,15 @@ today** and there is a **live GCP deployment** (below).
   `cargo test -p risepir-feed --release -- --ignored` (live: trace parsing vs an
   independent provider) → a `mainnet --partial` smoke run (deploy.md §1). Run
   the live ones after touching the feed or the apply path. Report real output.
+- Touching the browser client (`crates/risepir-wasm`, `web/`) adds two more:
+  `node web/test/e2e.mjs <pir-url>` (real wasm host) and
+  `node web/test/browser.mjs <pir-url>` (headless Chromium — it is the only
+  thing that can see a CSP, and it has already caught one). Both need a server
+  running with `--web web`; both adapt to `GET /mode`; neither needs npm.
+- `ikpir-common` is inherited `default-features = false`; every crate re-enables
+  the rayon kernels via its own default-on `parallel` feature. A new crate
+  depending on it needs that forwarding feature or it silently builds the scalar
+  kernels the numbers were not measured against (ADR-0019).
 - CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
   --all-targets -- -D warnings` + the tests on every push, conformance on PRs,
   and runs the live gate plus the `fuzz/` targets nightly. It fetches the
@@ -73,7 +82,19 @@ mainnet/mock --bind 0.0.0.0   expose listeners (PIR :8645, JSON-RPC :8545)
 client --pir-url http://host:8645
                               front end + rewind client on THIS machine against
                               a remote PIR server (address never leaves it)
+mock/mainnet --web web        also serve the browser front end on the PIR port
+                              (ADR-0019); build it first with
+                              `cargo run -p xtask --release -- web`
 ```
+
+The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind
+client compiled to wasm **in the page**, so the address never leaves the
+browser. Same origin as the PIR transport on purpose (no CORS, no mixed
+content, `connect-src 'self'` CSP). Assets are read once at startup — restart
+after editing `web/*`. First load is the whole product constraint: 49 MB at
+`--partial-capacity 1000000`, 588 MB at the complete mainnet set (which is
+where the CLI `client` takes over). Its residual trust — you trust whoever
+serves the page — is stated on the page itself, not just in the ADR.
 
 Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
 operator). `"latest"` = **finalized**, ~13 min behind the public head, by design

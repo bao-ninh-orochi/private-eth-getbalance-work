@@ -16,6 +16,12 @@ size. See [`docs/plan.md`](docs/plan.md) §7.
 cargo build --release -p risepir-rpc
 ./target/release/risepir-rpc mainnet --partial     # zero-prerequisite live demo
 ./target/release/risepir-rpc mock                  # synthetic demo, no network
+
+# ...or in a browser (ADR-0019): the same client, compiled to wasm, in the page
+rustup target add wasm32-unknown-unknown
+cargo run -p xtask --release -- web                # builds web/client.wasm
+./target/release/risepir-rpc mainnet --partial --partial-capacity 1000000 --web web
+open http://127.0.0.1:8645/
 ```
 
 `mainnet` follows finalized blocks over keyless public RPC (dRPC traces ⊕
@@ -24,12 +30,19 @@ block withdrawals), answers `eth_getBalance` privately on `:8545`
 accounts against an independent provider every few blocks, and persists/reloads
 its full PIR state. A third subcommand, `client --pir-url http://<server>:8645`,
 runs the JSON-RPC front end + rewind client on *your* machine against a remote
-PIR server (`--bind 0.0.0.0`) — the queried address never leaves your machine. Recorded live evidence — 8/8 private queries byte-exact
+PIR server (`--bind 0.0.0.0`) — the queried address never leaves your machine.
+A **browser front end** (`--web web`) runs that same rewind client as
+WebAssembly *in the page*, so the address never leaves the browser either: a
+real mainnet balance was fetched this way and confirmed byte-exact against an
+independent provider ([`docs/deploy.md`](docs/deploy.md) §1.5, §5.1). What it
+does not protect — you trust whoever serves you the page, and the network still
+sees who is asking — is stated on the page itself, and argued in ADR-0019.
+Recorded live evidence — 8/8 private queries byte-exact
 against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
 which is also the complete runbook (including the BigQuery snapshot export that
 upgrades `--partial` to the complete ~100 M-account set).
 
-Seven crates, **166 tests**, plus two heavier gates: `cargo run -p xtask
+Eight crates, **188 tests**, plus two heavier gates: `cargo run -p xtask
 --release -- conformance` (≥1200 addrs × 120 blocks, byte-identical, all account
 categories) and the live test `cargo test -p risepir-feed --release --
 --ignored` (trace-derived balances vs an independent provider on a real
@@ -45,6 +58,7 @@ attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
 | `risepir-feed` | chain ingest: seeded mock, BigQuery snapshot loader, mainnet rpc feed |
 | `risepir-http` | axum PIR transport + binary wire codec + HTTP client |
 | `risepir-rpc` | JSON-RPC `:8545` front end + `mock`/`mainnet` binary + state files |
+| `risepir-wasm` | the same rewind client as a browser (wasm32) module — pure compute, one import |
 | `xtask` | conformance harness + measured numbers table |
 
 ## Docs

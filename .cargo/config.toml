@@ -10,6 +10,24 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
+# The browser client (`crates/risepir-wasm`, ADR-0019). A target-specific
+# `rustflags` **replaces** `[build] rustflags` rather than appending to it,
+# which is exactly what this needs twice over:
+#
+#   * `target-cpu=native` is meaningless-to-fatal for wasm32 — the host CPU
+#     is not the target, and the value would be rejected;
+#   * `getrandom_backend="custom"` is mandatory. `wasm32-unknown-unknown`
+#     has no ambient entropy source, so `getrandom` (under `rand`, under
+#     the LWE secret sampling in `sample_slot`) refuses to build for it
+#     unless a backend is named. `custom` routes it to the host-supplied
+#     `crypto.getRandomValues` shim in `risepir-wasm`'s `entropy` module.
+#     This failing *loudly at compile time* is the property that matters:
+#     a browser client that silently sampled its LWE secret from a
+#     deterministic fallback would still look like it worked while
+#     leaking the queried address.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']
+
 # The pinned IKPIR git dep lives in a private repo; cargo's built-in libgit2
 # fetch cannot use the system credential helper, so fetch via the git CLI
 # (which can — the same credentials `git push` on this repo already uses).

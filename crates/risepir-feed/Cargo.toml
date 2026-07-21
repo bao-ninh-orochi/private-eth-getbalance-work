@@ -9,6 +9,13 @@ description = "Chain-follow feed for the RisePIR private eth_getBalance service:
 [lints.rust]
 unsafe_code = "forbid"
 
+# Default-on rayon kernels — see the workspace manifest's `ikpir-common`
+# note (ADR-0019). This crate only reaches them through `risepir-proto`;
+# its dev-dependencies pull the rest with their own defaults.
+[features]
+default  = ["parallel"]
+parallel = ["risepir-proto/parallel"]
+
 [dependencies]
 risepir-proto = { path = "../risepir-proto" }
 

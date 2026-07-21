@@ -23,6 +23,7 @@
 //! stream and the rewind, which is exactly what it is for.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,6 +96,9 @@ pub struct DemoConfig {
     pub block_interval: Duration,
     /// [`DeltaRing::new`]'s capacity, in blocks.
     pub ring_capacity: usize,
+    /// Serve the browser front end (ADR-0019) from this directory, on the
+    /// PIR port's own origin. `None` leaves the demo headless.
+    pub web_dir: Option<PathBuf>,
 }
 
 impl Default for DemoConfig {
@@ -112,6 +116,7 @@ impl Default for DemoConfig {
             deletes_per_block: 10,
             block_interval: Duration::from_secs(1),
             ring_capacity: 600,
+            web_dir: None,
         }
     }
 }
@@ -126,6 +131,8 @@ pub struct DemoHandle {
     pub pir_addr: SocketAddr,
     /// `(address, balance)` pairs seeded at startup — see the module docs.
     pub demo_accounts: Vec<([u8; 20], u128)>,
+    /// Whether the browser front end is being served (ADR-0019).
+    pub web_served: bool,
 }
 
 /// The fixed list of known demo accounts (module docs explain why these
@@ -195,11 +202,23 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let node_state = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), true));
 
+    // The mock universe is complete, so every address answers — but the
+    // front end still offers these as one-click examples, and they are the
+    // only addresses in it a human can name (see the module docs).
+    node_state.note_recent(demo_accounts.iter().map(|(addr, _)| *addr)).await;
+
+    // Loaded before binding: a missing asset is a startup failure, not a
+    // 404 the first visitor discovers.
+    let web_assets = cfg.web_dir.as_ref().map(|dir| {
+        risepir_http::WebAssets::load(dir).unwrap_or_else(|e| panic!("--web {}: {e}", dir.display()))
+    });
+    let web_served = web_assets.is_some();
+
     let pir_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.pir_port))
         .await
         .expect("bind PIR HTTP port");
     let pir_addr = pir_listener.local_addr().expect("PIR local_addr");
-    let pir_router = NodeState::router(node_state.clone());
+    let pir_router = NodeState::router_with_web(node_state.clone(), web_assets);
     tokio::spawn(async move {
         axum::serve(pir_listener, pir_router).await.expect("PIR HTTP server crashed");
     });
@@ -261,5 +280,10 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         axum::serve(rpc_listener, rpc_router).await.expect("JSON-RPC server crashed");
     });
 
-    DemoHandle { rpc_addr, pir_addr, demo_accounts }
+    DemoHandle {
+        rpc_addr,
+        pir_addr,
+        demo_accounts,
+        web_served,
+    }
 }

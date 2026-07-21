@@ -60,10 +60,27 @@
 //! (which has no Frodo equivalent) or grow a discriminant byte nothing
 //! here needs yet.
 
+//! # Feature gating (ADR-0019)
+//!
+//! [`wire`] is unconditional; [`node`] (axum) and [`client`] (reqwest) sit
+//! behind the default-on `server` / `client` features. The browser client
+//! takes this crate with `--no-default-features` so it shares the *exact*
+//! codec the server encodes with — a second, hand-written JavaScript
+//! decoder is precisely the kind of skew that produces a wrong answer
+//! rather than a build error.
+
+#[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "server")]
 pub mod node;
+#[cfg(feature = "server")]
+pub mod web;
 pub mod wire;
 
+#[cfg(feature = "client")]
 pub use client::{ClientError, PirHttpClient};
+#[cfg(feature = "server")]
 pub use node::{NodeState, MAX_ANSWER_BODY_BYTES};
+#[cfg(feature = "server")]
+pub use web::WebAssets;
 pub use wire::WireError;

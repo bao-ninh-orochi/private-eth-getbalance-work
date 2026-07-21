@@ -80,3 +80,32 @@ Duty cycle assumes a 12 s block (`docs/plan.md` §7's framing — the honest mea
 | 100,000 | 0.041 s | 1.1468 ms | 35× | 0.0096% |
 | 1,000,000 | 0.386 s | 2.4159 ms | 160× | 0.0201% |
 | 9,437,184 | 6.225 s | 2.9683 ms | 2097× | 0.0247% |
+
+## 7. Browser client (wasm32), measured
+
+`crates/risepir-wasm` — the same `risepir-client` rewind client compiled to
+`wasm32-unknown-unknown` with `parallel` (rayon) off, run under Node 24 on the
+same machine. Single-threaded, no SIMD, and **no `target-cpu=native`** (that flag
+is meaningless for wasm; see `.cargo/config.toml`). Per-segment geometry is §4a's;
+a lookup pays all three segments.
+
+| accounts | `client_setup` (expand `A` from seed) | `client_query` /seg | `client_decode` /seg | **per lookup (×3)** |
+|---:|---:|---:|---:|---:|
+| 100,000 | 0.5 s | 0.6 ms | 0.7 ms | **4 ms** |
+| 1,000,000 | 0.2 s | 1.7 ms | 1.7 ms | **10 ms** |
+| 9,437,184 | 0.4 s | 4.4 ms | 4.6 ms | **27 ms** |
+
+So the browser is not compute-bound; the binding constraint is the one-time hint
+download (§4c), which is why ADR-0019 treats first-load size, not latency, as the
+product limit. The wasm artifact itself is 157 KB.
+
+Hint download and client memory per candidate deployment size (computed from
+`Geometry::sizes`, the same source as §4c):
+
+| accounts | hint (first load) | client RAM (A+hint) |
+|---:|---:|---:|
+| 250,000 | 23.13 MB | 47.0 MB |
+| 500,000 | 35.50 MB | 70.1 MB |
+| 1,000,000 | 48.96 MB | 99.1 MB |
+| 4,000,000 | 99.14 MB | 198.2 MB |
+| 100,000,000 (complete mainnet nonzero) | 588.38 MB | 1175.8 MB |

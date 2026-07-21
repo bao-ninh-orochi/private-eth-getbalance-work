@@ -8,9 +8,16 @@ description = "Response-rewind RisePIR client: pins (A, H0, block0) and corrects
 [lints.rust]
 unsafe_code = "forbid"
 
-[dependencies]
-risepir-proto  = { path = "../risepir-proto" }
-risepir-server = { path = "../risepir-server" }
+# See `risepir-proto`'s own `[features]`: default-on, forwarded, and turned
+# off only by the browser client (ADR-0019) — this crate is the one that
+# actually runs there.
+[features]
+default  = ["parallel"]
+parallel = ["ikpir-common/parallel", "risepir-proto/parallel", "risepir-server/parallel"]
 
-ikpir-common = { workspace = true }
+[dependencies]
+risepir-proto  = { path = "../risepir-proto", default-features = false }
+risepir-server = { path = "../risepir-server", default-features = false }
+
+ikpir-common = { workspace = true, default-features = false }
 segmented-cuckoo = { workspace = true }

@@ -12,6 +12,18 @@ path = "src/main.rs"
 [lints.rust]
 unsafe_code = "forbid"
 
+# Default-on rayon kernels, forwarded to every sibling — see the workspace
+# manifest's `ikpir-common` note (ADR-0019).
+[features]
+default  = ["parallel"]
+parallel = [
+    "ikpir-common/parallel",
+    "risepir-proto/parallel",
+    "risepir-server/parallel",
+    "risepir-client/parallel",
+    "risepir-http/parallel",
+]
+
 [dependencies]
 # Sibling crates in this workspace.
 risepir-proto  = { path = "../risepir-proto" }

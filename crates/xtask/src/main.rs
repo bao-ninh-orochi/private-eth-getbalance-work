@@ -3,6 +3,7 @@
 //! ```text
 //! xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]
 //! xtask bench [--write]
+//! xtask web
 //! ```
 //!
 //! `conformance` runs the Stage 0.5 conformance harness (`docs/plan.md`
@@ -24,6 +25,9 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("conformance") => run_conformance(&args[2..]),
         Some("bench") => run_bench(&args[2..]),
+        Some("web") => {
+            xtask::web::run();
+        }
         Some("--help" | "-h") | None => {
             print_usage();
             std::process::exit(0);
@@ -107,6 +111,7 @@ fn parse_value<T: std::str::FromStr>(args: &[String], i: &mut usize, name: &str)
 fn print_usage() {
     eprintln!("usage: xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]");
     eprintln!("       xtask bench [--write]");
+    eprintln!("       xtask web                 (build the browser client's wasm into web/client.wasm)");
 }
 
 /// Runs the Stage 3 measured numbers table

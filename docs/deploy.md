@@ -67,6 +67,92 @@ cast balance <that-address> --rpc-url http://127.0.0.1:8545
   to); those accounts keep erroring until a transaction touches them.
 - RAM: ~600 MB at the default `--partial-capacity 4000000`.
 
+## 1.5 The browser front end (ADR-0019)
+
+The same rewind client, compiled to WebAssembly and running **in the page**, so a
+visitor with a browser gets the same privacy property the CLI client has: the
+address is hashed, turned into an LWE query, and rewound locally — the server
+sees ciphertext of a fixed size and never learns which account was asked about.
+
+```bash
+rustup target add wasm32-unknown-unknown      # once
+cargo run -p xtask --release -- web           # builds web/client.wasm (~157 KB)
+
+# mock: complete synthetic set, every address answers, no network
+./target/release/risepir-rpc mock --web web
+# live mainnet, partial set, 49 MB first load (see the table below)
+./target/release/risepir-rpc mainnet --partial --partial-capacity 1000000 --web web
+```
+
+Then open the **PIR** port in a browser (`http://127.0.0.1:8645/`), not the
+JSON-RPC one. Same origin as the PIR transport is deliberate: no CORS, no mixed
+content, and the page can be served under a `connect-src 'self'` CSP so it
+cannot POST anywhere else.
+
+**First load is the whole product constraint.** The page downloads the PIR hint
+once; everything after that is a few KB per query. Pick `--partial-capacity` for
+the trade you want:
+
+| `--partial-capacity` | first load | RAM (client) | ~time before the table fills |
+|---:|---:|---:|---|
+| 250,000 | 23 MB | ~46 MB | ~1.5 h |
+| 500,000 | 35 MB | ~70 MB | ~3 h |
+| **1,000,000** | **49 MB** | **~99 MB** | **~5 h** |
+| 4,000,000 (default) | 99 MB | ~198 MB | ~1 day |
+
+Client compute is not the constraint: a full lookup is **10 ms** at 1 M accounts
+(three segments, single-threaded wasm, no SIMD), and expanding `A` from its seed
+at startup is another ~0.2 s. At the complete ~100 M-account mainnet set the hint
+would be **588 MB** — past what a web page should ask for, which is where
+`risepir-rpc client` on a real machine takes over.
+
+**What the page tells the visitor** (all of it enforced, none of it decorative):
+the deployment's mode (complete ⇒ absence is exactly `0`; partial ⇒ absence is an
+*error*), the block each answer is as of, that `latest` means *finalized* and so
+runs ~13 min behind a block explorer, the exact bytes that left the browser, and
+— stated on the page, not buried here — that the code delivering all this comes
+from the same server, so a user who needs to trust nothing should run the client
+themselves.
+
+In partial mode `GET /recent` gives the page up to 128 recently-touched addresses
+to offer as examples, since an arbitrary address is (honestly) not in the tracked
+set. That list is public chain data, identical for every caller, and fetched
+without any address — the server still cannot tell which one, if any, is queried.
+
+### Gates
+
+```bash
+node web/test/e2e.mjs     http://127.0.0.1:8645   # protocol, in a real wasm host
+node web/test/browser.mjs http://127.0.0.1:8645   # the page, in headless Chromium
+```
+
+`e2e.mjs` drives the real wasm through the real `web/pir.js` and asserts, among
+other things, that the module's **only** import is the entropy shim (it cannot
+phone home) and that two queries for one address ship different ciphertext of
+identical length. `browser.mjs` drives Brave/Chrome/Chromium over the DevTools
+protocol and checks what only a browser can: that the page boots under its own
+CSP, that WebAssembly finds real entropy there, and that an untracked account
+renders as an error rather than a `0`. Both adapt to `GET /mode`, so they are
+valid against either deployment. Neither needs npm.
+
+### Operational notes
+
+- **Assets are read once, at startup.** Editing `web/*` under a running server
+  changes nothing until it is restarted — deliberate (the bytes served cannot
+  change under a live deployment, and a missing file is a startup error rather
+  than a 404 a visitor discovers), but it will catch you while iterating.
+- **`web/client.wasm` is a build artifact**, not checked in. `cargo run -p xtask
+  --release -- web` after every pull that touches the client crates.
+- **No caching of the hint between visits** — deliberate (ADR-0019): a cached
+  hint is only sound while the server still retains the deltas from its pinned
+  block, and that argument is not worth standing between a user and a balance
+  yet. A reload re-downloads.
+- **Not exposed publicly.** `--bind 0.0.0.0` would serve it to the internet over
+  plain HTTP, which is the weakest form of the code-delivery caveat above (anyone
+  on path can swap the client). Doing it properly means a hostname and a
+  certificate — see §3.5/§3.6 for the VM, and ADR-0019 for why serving the page
+  from a *different* party than the PIR server is the stronger arrangement.
+
 ## 2. Complete mainnet — snapshot bootstrap
 
 Two phases: a one-time BigQuery export (§2.1 — the only step needing a Google
@@ -416,6 +502,33 @@ parameters (`lwe_dim` 1275):
 - `Ctrl-C` wrote a 51 MB state file; restart loaded it in <0.1 s at the same
   block, PARTIAL flag preserved, and resumed following.
 - A truncated dRPC response mid-run was retried and recovered automatically.
+
+### 5.1 Browser front end, live (2026-07-21)
+
+`mainnet --partial --partial-capacity 1000000 --web web` on a laptop, keyless dRPC
+feed, real LWE parameters — the whole lookup performed **inside a browser page**:
+
+- Bootstrapped empty at finalized block 25,580,831; the page loaded the 49 MB hint
+  and answered from it while the server kept advancing (the rewind, not a
+  re-download: hint pinned at 25,580,894, client caught up to 25,580,895, 7,606
+  delta cells pending).
+- `0xffda2922535c1d5c12b6fec01b15186be39787af` → **44033478848147061 wei** at
+  finalized block 25,580,895, displayed in the page. Independently confirmed
+  **byte-exact** by `rpc.flashbots.net` at that same height.
+- `0xfffc65b9c0fc94a34f1e5d9f2a78623f37f47fc8` → **3148629001800 wei** at block
+  25,580,844, likewise byte-exact against `rpc.flashbots.net` (`1rpc.io` had
+  already pruned that state — unavailable, not disagreeing).
+- What crossed the wire for that lookup: **39,335 bytes** of LWE query, 38,419
+  bytes of response, 22,525 bytes of public delta. Zero addresses, in any form.
+- An untracked address rendered as an **error** explaining why it will not answer
+  `0`, never a zero balance.
+- Gates, both green against this deployment: `node web/test/e2e.mjs` (18 checks,
+  including "the wasm module's only import is the entropy shim" and "two queries
+  for one address ship different ciphertext of identical length") and
+  `node web/test/browser.mjs` in headless Brave (12 checks, including no CSP
+  violations and no uncaught page errors).
+- Full lookup round trip: **41 ms** over loopback, of which ~10 ms is client
+  crypto.
 
 ## 6. Who does what, explicitly
 

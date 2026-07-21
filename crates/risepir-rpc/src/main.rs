@@ -2,11 +2,13 @@
 //!
 //! ```text
 //! risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
+//!                     [--web <dir>]
 //! risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]
 //!                     [--state <file>] [--partial] [--partial-capacity <N>]
 //!                     [--feed-url <url>] [--confirm-url <url>]
 //!                     [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
 //!                     [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]
+//!                     [--web <dir>]
 //! ```
 //!
 //! `mock` is the Stage-0 demo (synthetic chain, small LWE dim, seeded
@@ -55,6 +57,9 @@ async fn run_mock(cfg: DemoConfig) {
     println!("RisePIR private eth_getBalance — mock demo");
     println!("  PIR HTTP transport: http://{}", handle.pir_addr);
     println!("  JSON-RPC:           http://{}", handle.rpc_addr);
+    if handle.web_served {
+        println!("  Web front end:      http://{}/   <- open this in a browser", handle.pir_addr);
+    }
     println!();
     println!("Demo accounts (deterministic, wei-exact — query any of them):");
     for (addr, balance) in &handle.demo_accounts {
@@ -92,6 +97,9 @@ async fn run_mainnet(cfg: MainnetConfig) {
         }
     );
     println!("  serving from block: {} (follows finalized, ~13 min behind head)", handle.head_at_start);
+    if handle.web_served {
+        println!("  Web front end:      http://{}/   <- open this in a browser", handle.pir_addr);
+    }
     println!();
     println!("Try:");
     println!("  cast balance <address> --rpc-url http://{}", handle.rpc_addr);
@@ -168,6 +176,7 @@ fn parse_mock(args: &[String]) -> DemoConfig {
             "--pir-port" => cfg.pir_port = parse_next(args, &mut i, "--pir-port"),
             "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
             "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
+            "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -221,6 +230,7 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--reconcile-every" => cfg.reconcile_every = parse_next(args, &mut i, "--reconcile-every"),
             "--reconcile-samples" => cfg.reconcile_samples = parse_next(args, &mut i, "--reconcile-samples"),
             "--lwe-dim" => cfg.lwe_dim = Some(parse_next(args, &mut i, "--lwe-dim")),
+            "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -261,17 +271,21 @@ fn unknown(flag: &str) -> ! {
 fn print_usage() {
     eprintln!("usage:");
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
+    eprintln!("                      [--web <dir>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
     eprintln!("                      [--state <file>] [--partial] [--partial-capacity <N>]");
     eprintln!("                      [--feed-url <url>] [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
-    eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]");
+    eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
     eprintln!("  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]");
     eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
     eprintln!();
     eprintln!("mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial.");
     eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
     eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
+    eprintln!("--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind");
+    eprintln!("client, compiled to wasm and running in the page, so the address never leaves the browser.");
+    eprintln!("Build its wasm first: cargo run -p xtask --release -- web");
     eprintln!("See docs/deploy.md for the full runbook.");
 }
 

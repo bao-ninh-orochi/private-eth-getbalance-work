@@ -8,23 +8,36 @@ description = "SimplePIR-concrete binary wire codec + axum HTTP server exposing 
 [lints.rust]
 unsafe_code = "forbid"
 
+# `wire` — the binary codec — is the only part of this crate the browser
+# client (ADR-0019) can use: `node` needs axum/tokio and `client` needs
+# reqwest, neither of which belongs in (or builds for) a wasm32 client that
+# does its I/O through the host's `fetch`. Both are default-on, so every
+# existing dependent is unchanged; `--no-default-features` leaves exactly
+# the codec, which is precisely the thing that must not fork between the
+# browser and the server.
+[features]
+default  = ["parallel", "server", "client"]
+parallel = ["risepir-proto/parallel", "risepir-server/parallel"]
+server   = ["dep:axum", "dep:tokio"]
+client   = ["dep:reqwest"]
+
 [dependencies]
 # Sibling crates in this workspace.
-risepir-proto  = { path = "../risepir-proto" }
-risepir-server = { path = "../risepir-server" }
+risepir-proto  = { path = "../risepir-proto", default-features = false }
+risepir-server = { path = "../risepir-server", default-features = false }
 
-ikpir-common = { workspace = true }
+ikpir-common = { workspace = true, default-features = false }
 segmented-cuckoo = { workspace = true }
 
-axum  = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+axum  = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"], optional = true }
 
 # Stage 0.4: the async counterpart to this crate's own axum server —
 # `client` drives the RisePIR HTTP transport from the JSON-RPC front end
 # (`risepir-rpc`) over real HTTP. `default-features = false` +
 # `rustls-tls` avoids pulling in a native TLS toolchain for what is,
 # today, a plain-HTTP localhost deployment.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 
 [dev-dependencies]
 # Dev-only: the integration test in `tests/http.rs` drives a MockFeed

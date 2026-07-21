@@ -8,13 +8,19 @@ description = "Batched RisePIR server library: one epoch and one delta bundle pe
 [lints.rust]
 unsafe_code = "forbid"
 
+# See `risepir-proto`'s own `[features]`: default-on, forwarded, and turned
+# off only by the browser client (ADR-0019).
+[features]
+default  = ["parallel"]
+parallel = ["ikpir-common/parallel", "risepir-proto/parallel"]
+
 [dependencies]
 # Sibling crate in this workspace: Geometry/Sizes, BlockUpdate/BlockDelta,
 # ValueCodec, and the wire codec. Pure types, no I/O (see its own docs).
-risepir-proto = { path = "../risepir-proto" }
+risepir-proto = { path = "../risepir-proto", default-features = false }
 
 segmented-cuckoo = { workspace = true }
-ikpir-common = { workspace = true }
+ikpir-common = { workspace = true, default-features = false }
 
 [dev-dependencies]
 # Dev-only: the one thing ikpir-server *is* used for here is as an

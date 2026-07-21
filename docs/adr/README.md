@@ -342,3 +342,116 @@ feed's own reads (withdrawal prior-value), reliable at the 64-bit-effective fing
 **Consequence:** the store discards addresses after hashing, so recovery at a larger
 size comes from the external snapshot (ADR-0011/0014), not from local state. Accepted —
 the snapshot is authoritative and re-fetchable, and `TableFull` is years away at ~75%.
+
+### ADR-0019 — The web front end builds its PIR query **in the browser**, in wasm **[NEW — user-scoped]**
+
+**Chosen:** compile the existing `risepir-client` rewind client to
+`wasm32-unknown-unknown` as a new workspace member (`crates/risepir-wasm`) and run
+query construction, response rewind, and the bucket scan **in the page**. JavaScript
+(`web/pir.js`) performs every fetch; the wasm module performs every cryptographic
+operation and **never touches the network**. The server (`--web <dir>`) serves the
+page from the *same origin* as the PIR transport.
+
+**Rejected — the naive web architecture:** browser POSTs an address to a backend, the
+backend runs the PIR query and returns the balance. This is the default shape of every
+web app and it destroys the entire point: the backend learns the address. It would be a
+fast balance API wearing this project's name. Not built, not offered as a mode, not
+reachable by a flag.
+
+**Rejected — browser as a thin UI over a user-run local helper.** `risepir-rpc client
+--pir-url …` already puts the rewind client on the user's machine, and a page talking
+to `localhost:8545` would inherit that. It remains the *strongest* option and the docs
+point at it — but it does not answer the question asked ("serve users on the web"),
+requires installing a Rust binary, and does not actually remove the trust discussed
+below: the page would still choose what to send to the helper.
+
+**Rejected — `wasm-bindgen`.** The data crossing the boundary is byte buffers and one
+`u128`. A plain `cdylib` with C-ABI exports needs no code generator, no version-matched
+CLI, and no `npm`: `cargo build --target wasm32-unknown-unknown` *is* the build, so the
+artifact anyone audits is the artifact that ships. The whole host ABI is ~20 functions
+over two Rust-owned buffers.
+
+**Rejected — a separate repo.** The client must stay pinned to the server's IKPIR rev,
+`Geometry`, wire codec, and `ValueCodec` seeds. In-workspace makes that a build error;
+cross-repo makes it a *wrong answer*. Sharing `risepir-http::wire` (behind
+`--no-default-features`, so no axum/reqwest) rather than hand-writing a JavaScript
+decoder is the same argument one level down.
+
+**Why the browser is viable at all — measured, not assumed.** Both risks flagged when
+this was only a hypothesis were checked before any of it was built:
+
+| | measured |
+|---|---|
+| Does the stack even compile to wasm? | Yes, with `parallel` (rayon) off — it has no threads to fan out to and does not degrade gracefully. 157 KB `cdylib`. |
+| Client compute, per lookup (3 segments), single-threaded, no SIMD, no `target-cpu=native` | **4 ms** @100 k · **10 ms** @1 M · **27 ms** @9.4 M accounts |
+| `client_setup` (expanding `A` from its seed) | 0.2–0.5 s |
+| First-load hint download (`Geometry`, computed) | 16.5 MB @100 k · 49 MB @1 M · 99 MB @4 M · 140 MB @9.4 M |
+
+So latency — the risk that would have killed this — is a non-issue; SimplePIR client
+work is a rounding error next to the network. The binding constraint is the one-time
+hint download, and it is a **product** limit, not a cryptographic one.
+
+**Consequence — the scale ceiling, stated plainly.** At the complete mainnet nonzero
+set (~100 M accounts) the hint is **588 MB** and the client needs ~1.2 GB of RAM. That
+is not a web page. The browser client is honest at demo/partial scale (the deployment
+this ships with runs `--partial-capacity 1000000` ⇒ 49 MB); at full mainnet scale the
+answer is `risepir-rpc client` on a machine that can hold it, paying the download once
+and keeping it. The web front end does not pretend otherwise.
+
+**The residual trust, which is real and is stated on the page itself.** PIR guarantees
+the server learns nothing about *which* account was queried — but the code that builds
+the query is delivered by that same server. Whoever serves the page chooses what the
+client does; over plain HTTP, so does anyone on the network path. This is the classic
+browser-delivered-crypto problem and it is not solved here, it is *disclosed*: the page
+says so, in the "What this does not protect" section, above the fold of the limits, and
+points at the local client for anyone who needs more. Three things narrow it:
+
+- **Same-origin + `connect-src 'self'` CSP.** The page is structurally unable to POST
+  anywhere but the server it already talks to. That constrains a *tampered page*; it
+  cannot constrain a *dishonest origin*, and the ADR does not claim it does.
+  (`'wasm-unsafe-eval'` is also required — Chromium classes wasm compilation as script
+  evaluation — which permits wasm only, leaving `eval`/`new Function` blocked.)
+- **The wasm module's only import is `env.risepir_fill_random`.** No fetch, no clock,
+  no storage. It is structurally incapable of exfiltrating anything itself, and
+  `web/test/e2e.mjs` asserts that import list so it stays that way.
+- **The same Rust, both places.** The wasm client is `risepir-client`, the crate the
+  CLI client uses, so "audit the client" is one audit.
+
+**Not covered, also stated on the page:** network metadata. PIR hides *which account*,
+not *who is asking, when, how often, from where*. The client works fine over Tor and
+the page says so.
+
+**Entropy is a build error, not a runtime hope.** The LWE secret comes from
+`rand::rng()` → `getrandom`, which has no ambient source on `wasm32-unknown-unknown`
+and **refuses to compile** unless a backend is named. That refusal is load-bearing: a
+client that silently fell back to a fixed seed would return perfectly correct balances
+while letting the server subtract `A·s` and read the queried bucket straight out of the
+query — correct-looking, silent, total failure. So `.cargo/config.toml` pins
+`getrandom_backend="custom"` for that target and `crates/risepir-wasm/src/entropy.rs`
+routes it to the host's `crypto.getRandomValues`; the import is mandatory, so a host
+that forgot to wire it gets an instantiation crash, not a downgrade. Tests assert
+repeated queries for one address ship *different* ciphertext of *constant* length.
+
+**Consequence — `parallel` became a feature everywhere.** `ikpir-common` is now
+inherited with `default-features = false` at the workspace root (a member cannot
+subtract a default the workspace switched on), and every crate re-enables it through
+its own **default-on** `parallel` feature. Every existing build is unchanged; only the
+wasm client opts out. A new crate that depends on `ikpir-common` must add the same
+forwarding feature or it silently builds the scalar kernels the headline numbers were
+not measured against — noted in the manifest.
+
+**Deferred deliberately — caching the hint across visits.** A cached hint stays valid
+only while the server retains the deltas from its pinned block (`DeltaRing`, and
+`range` is strict: any missing block ⇒ `409` ⇒ the client must re-download rather than
+guess). That mechanism *is* sound enough to cache against — a re-bootstrapped server
+starts an empty ring, so a stale-lineage hint gets a `409` rather than a wrong answer —
+but it is one more correctness argument standing between a user and a balance, for a
+UX win that a local deployment does not need. Not built; the requirement for building
+it safely is recorded here.
+
+**`GET /recent` (new endpoint).** A partial deployment only knows accounts touched
+since bootstrap, so a visitor typing an arbitrary address gets an honest error and
+learns nothing about the system. `/recent` serves up to 128 recently-touched addresses
+— public chain data, identical for every caller, and address-free as a request. It does
+not weaken PIR: the server still cannot tell which entry, if any, was then queried, and
+the page says exactly that rather than leaving it to be inferred.

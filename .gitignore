@@ -1,1 +1,7 @@
 /target
+
+# Build artifact of `cargo run -p xtask --release -- web` (the browser
+# client, ADR-0019). Not checked in: it is compiled output, and a stale
+# committed copy of a client whose Rust has since changed is exactly the
+# skew the in-workspace build exists to prevent.
+/web/client.wasm

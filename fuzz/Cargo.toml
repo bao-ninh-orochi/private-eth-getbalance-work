@@ -22,11 +22,11 @@ libfuzzer-sys = "0.4"
 risepir-http  = { path = "../crates/risepir-http" }
 risepir-proto = { path = "../crates/risepir-proto" }
 risepir-rpc   = { path = "../crates/risepir-rpc" }
-ikpir-common  = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }
+ikpir-common  = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "3d60fa7" }
 
 # Must match the root workspace's pin exactly, or the `CuckooParams` type
 # handed to `decode_query_bundle` would come from a different crate build.
-segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "042d868" }
+segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "3d60fa7" }
 
 [[bin]]
 name = "wire_setup"

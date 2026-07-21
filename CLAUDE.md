@@ -39,7 +39,7 @@ today** and there is a **live GCP deployment** (below).
 ## Build & test
 
 - The PIR primitive is a **pinned git dep**: `bao-ninh-orochi/IKPIR` @
-  `042d868` (`perf/optimized` tip). Needs read access to that private repo;
+  `3d60fa7` (`perf/optimized` tip, 2026-07-21). Needs read access to that private repo;
   `.cargo/config.toml` sets `git-fetch-with-cli` + `target-cpu=native`. The
   local checkout at `../CANS2026/RisePIR` drifts — read it for API signatures,
   **never** path-dep it.

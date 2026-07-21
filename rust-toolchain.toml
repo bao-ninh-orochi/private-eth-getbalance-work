@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned to the toolchain the workspace is actually developed and verified
+# on (183 tests + conformance green on this channel, 2026-07-21). CI
+# installs exactly this via rustup's automatic pin discovery. Bump
+# deliberately and in its own commit — the docs/numbers.md measurements
+# are toolchain-sensitive. (Upstream IKPIR pins 1.85.0 for its paper
+# numbers; this repo's numbers were measured on its own pin, not that one.)
+channel    = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile    = "minimal"

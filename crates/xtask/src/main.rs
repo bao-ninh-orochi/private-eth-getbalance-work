@@ -14,7 +14,7 @@
 //! `bench` runs the Stage 3 measured numbers table (`docs/plan.md` §7,
 //! `docs/verification.md` §7) — see `xtask::bench` — and prints it to
 //! stdout; pass `--write` to also overwrite `docs/numbers.md` (a curated
-//! reference measured against IKPIR perf/optimized `042d868` — only overwrite
+//! reference measured against the pinned IKPIR perf/optimized rev — only overwrite
 //! from that build). Always run with `--release` (see `xtask::bench`'s module
 //! docs for why).
 
@@ -150,18 +150,18 @@ fn run_bench(rest: &[String]) {
     println!("{markdown}");
 
     // `docs/numbers.md` is a *curated reference* measured against IKPIR
-    // perf/optimized (042d868) — see the "IKPIR build" note the report itself
+    // the pinned perf/optimized rev — see the "IKPIR build" note the report itself
     // carries. Overwriting it is therefore an explicit, opt-in choice
-    // (`--write`), and should only be done from a build against 042d868, so a
+    // (`--write`), and should only be done from a build against the pinned rev, so a
     // casual run against the current `main`-based local path-dep cannot silently
     // clobber the reference with slower single-threaded numbers.
     if write {
         let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/numbers.md");
         std::fs::write(&out_path, &markdown)
             .unwrap_or_else(|e| panic!("xtask bench: failed to write {}: {e}", out_path.display()));
-        println!("Wrote {} — ensure this build was against IKPIR perf/optimized (042d868).", out_path.display());
+        println!("Wrote {} — ensure this build was against the pinned IKPIR rev (root Cargo.toml).", out_path.display());
     } else {
-        println!("(printed only; pass `--write` to overwrite docs/numbers.md — only from a build against IKPIR 042d868)");
+        println!("(printed only; pass `--write` to overwrite docs/numbers.md — only from a build against the pinned IKPIR rev)");
     }
 }
 

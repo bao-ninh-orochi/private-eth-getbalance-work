@@ -1,19 +1,19 @@
 # RisePIR numbers table — Stage 3 (measured)
 
 Machine: 8-core Apple Silicon, 16 GB RAM, target-cpu=native (.cargo/config.toml)
-Date: 2026-07-17
+Date: 2026-07-22
 Config: arity 3, bucket_size 4, fingerprint_bits 32, value = key_tag(32) ‖ balance(96) ‖ checksum(16) = 144 bits (ADR-0009), lwe_dim 1275 / sigma 6.4 (`SimpleConfig::default()`), mock seed 0xB0DAC0DE5CA1E000
 Every number below is measured with `std::time::Instant` against a real, built `RisePirServer` — except the byte sizes in §4, which are computed from `Geometry::sizes` (deterministic, not timed).
 
-**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers here are measured against the IKPIR `perf/optimized` tree (`042d868`) — the default-on rayon-parallel matvec/GEMM config that `docs/plan.md` §7 and `docs/verification.md` report against, and this project's intended production dependency (the "switch the path deps to the pinned git dep `rev = 042d868`" open item). The repo's current local path-dep points at `main` (`3287c39`), which lacks the parallel kernels, so an `xtask bench` run against that build reports substantially slower, single-threaded rebuild/answer times (the §3 delta-byte and §4 size figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite this file, and only do so from a build against `042d868`.
+**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers here are measured against the workspace's pinned IKPIR `perf/optimized` rev (`3d60fa7`, 2026-07-21 — see the root `Cargo.toml`), with the default-on `parallel` feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite this file, and only do so from a build against the pinned rev — bump the rev and these numbers together, never separately.
 
 ## 1. Full-rebuild time (the headline denominator)
 
 | accounts | full rebuild (measured) |
 |---:|---:|
-| 100,000 | 0.041 s |
-| 1,000,000 | 0.386 s |
-| 9,437,184 | 6.225 s |
+| 100,000 | 0.044 s |
+| 1,000,000 | 0.392 s |
+| 9,437,184 | 6.677 s |
 
 ## 2. Per-block patch time vs. mutations/block (K), at 1,000,000 accounts
 
@@ -21,11 +21,11 @@ Each point: 5 warm-up blocks discarded, then 10 measured blocks averaged (`docs/
 
 | K (mutations/block) | patch time (ms/block, measured) |
 |---:|---:|
-| 50 | 1.2336 |
-| 150 | 1.3335 |
-| 300 | 2.4159 |
-| 600 | 3.1380 |
-| 1200 | 4.9744 |
+| 50 | 1.8002 |
+| 150 | 2.3088 |
+| 300 | 3.5643 |
+| 600 | 5.0571 |
+| 1200 | 7.9530 |
 
 ## 3. Per-block delta bytes: compact vs. naive (K≈300, 1,000,000 accounts, realistic wei-scale balances)
 
@@ -69,7 +69,7 @@ A client holds `A` + hint for every segment; server DB / hint / query / response
 | metric | value |
 |---|---:|
 | queries measured | 20 |
-| avg `server.answer(&queries)` latency | 2.5171 ms |
+| avg `server.answer(&queries)` latency | 2.6845 ms |
 
 ## 6. The headline: full rebuild ÷ per-block patch (K≈300)
 
@@ -77,35 +77,6 @@ Duty cycle assumes a 12 s block (`docs/plan.md` §7's framing — the honest mea
 
 | accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) | duty cycle @ 12s block |
 |---:|---:|---:|---:|---:|
-| 100,000 | 0.041 s | 1.1468 ms | 35× | 0.0096% |
-| 1,000,000 | 0.386 s | 2.4159 ms | 160× | 0.0201% |
-| 9,437,184 | 6.225 s | 2.9683 ms | 2097× | 0.0247% |
-
-## 7. Browser client (wasm32), measured
-
-`crates/risepir-wasm` — the same `risepir-client` rewind client compiled to
-`wasm32-unknown-unknown` with `parallel` (rayon) off, run under Node 24 on the
-same machine. Single-threaded, no SIMD, and **no `target-cpu=native`** (that flag
-is meaningless for wasm; see `.cargo/config.toml`). Per-segment geometry is §4a's;
-a lookup pays all three segments.
-
-| accounts | `client_setup` (expand `A` from seed) | `client_query` /seg | `client_decode` /seg | **per lookup (×3)** |
-|---:|---:|---:|---:|---:|
-| 100,000 | 0.5 s | 0.6 ms | 0.7 ms | **4 ms** |
-| 1,000,000 | 0.2 s | 1.7 ms | 1.7 ms | **10 ms** |
-| 9,437,184 | 0.4 s | 4.4 ms | 4.6 ms | **27 ms** |
-
-So the browser is not compute-bound; the binding constraint is the one-time hint
-download (§4c), which is why ADR-0019 treats first-load size, not latency, as the
-product limit. The wasm artifact itself is 157 KB.
-
-Hint download and client memory per candidate deployment size (computed from
-`Geometry::sizes`, the same source as §4c):
-
-| accounts | hint (first load) | client RAM (A+hint) |
-|---:|---:|---:|
-| 250,000 | 23.13 MB | 47.0 MB |
-| 500,000 | 35.50 MB | 70.1 MB |
-| 1,000,000 | 48.96 MB | 99.1 MB |
-| 4,000,000 | 99.14 MB | 198.2 MB |
-| 100,000,000 (complete mainnet nonzero) | 588.38 MB | 1175.8 MB |
+| 100,000 | 0.044 s | 1.9482 ms | 23× | 0.0162% |
+| 1,000,000 | 0.392 s | 3.5643 ms | 110× | 0.0297% |
+| 9,437,184 | 6.677 s | 4.9594 ms | 1346× | 0.0413% |

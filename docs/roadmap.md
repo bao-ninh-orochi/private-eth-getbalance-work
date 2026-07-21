@@ -107,8 +107,9 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
    **D3** Xatu bulk replay if the snapshot→head join is long.
 9. **D4 — ERC-20 (`balanceOf` is a storage slot; scope to one token, e.g.
    USDC).** Highest product upside on the list. **D5** multi-query batching
-   couples to the IKPIR upstream thread (its `perf/optimized` refresh — the
-   pin is 26+ commits behind — is its own follow-up).
+   couples to the IKPIR upstream thread (the `perf/optimized` refresh
+   landed 2026-07-22 — pin at `3d60fa7`, numbers re-measured; batching
+   still needs an upstream `answer_batch` API).
 10. **Hygiene tail:** flip the `cargo fmt --check` CI gate on in a
     formatting-only commit (rustfmt.toml is in place; ~296 files of drift);
     C6 read replicas (verify against ADR-0010 first — the answer path may

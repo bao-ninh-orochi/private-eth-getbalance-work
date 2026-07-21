@@ -690,15 +690,13 @@ impl BenchReport {
         writeln!(
             out,
             "**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers \
-             here must be measured against the IKPIR `perf/optimized` tree (`042d868`) — the \
-             default-on rayon-parallel matvec/GEMM config that `docs/plan.md` §7 and \
-             `docs/verification.md` report against, and this project's intended production dependency \
-             (the \"switch the path deps to the pinned git dep `rev = 042d868`\" open item). The \
-             repo's current local path-dep points at `main` (`3287c39`), which lacks the parallel \
-             kernels, so an `xtask bench` run against that build reports substantially slower, \
-             single-threaded rebuild/answer times (the sizes and delta-byte figures are unaffected). \
-             `xtask bench` prints to stdout by default; pass `--write` to overwrite this file, and \
-             only do so from a build against `042d868`."
+             here are measured against the workspace's pinned IKPIR `perf/optimized` rev \
+             (`3d60fa7`, 2026-07-21 — see the root `Cargo.toml`), with the default-on `parallel` \
+             feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports \
+             substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte \
+             figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to \
+             overwrite this file, and only do so from a build against the pinned rev — bump the rev \
+             and these numbers together, never separately."
         )
         .unwrap();
         if let Some(reason) = &self.top_scale_fallback_reason {

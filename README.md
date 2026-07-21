@@ -42,7 +42,7 @@ against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
 which is also the complete runbook (including the BigQuery snapshot export that
 upgrades `--partial` to the complete ~100 M-account set).
 
-Eight crates, **188 tests**, plus two heavier gates: `cargo run -p xtask
+Eight crates, **191 tests**, plus two heavier gates: `cargo run -p xtask
 --release -- conformance` (≥1200 addrs × 120 blocks, byte-identical, all account
 categories) and the live test `cargo test -p risepir-feed --release --
 --ignored` (trace-derived balances vs an independent provider on a real
@@ -78,7 +78,7 @@ attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
 ## Build
 
 Depends on the IKPIR primitive, pinned as a git dependency
-(`bao-ninh-orochi/IKPIR` @ `042d868`, the `perf/optimized` tip) — building needs
+(`bao-ninh-orochi/IKPIR` @ `3d60fa7`, the `perf/optimized` tip) — building needs
 read access to that repo; `.cargo/config.toml` sets `git-fetch-with-cli` (system
 git credentials) and `target-cpu=native` (git deps do **not** inherit the
 upstream perf config).

@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -14,6 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::RwLock;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 
 use ikpir_common::backend::simple::SimpleServerParams;
 use ikpir_common::SimplePirBackend;
@@ -29,6 +33,24 @@ use crate::wire;
 /// the transport layer too, not just the codec: an attacker should not be
 /// able to force an unbounded read just by sending a very long body).
 pub const MAX_ANSWER_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Per-request service timeout. Bounds both a slow-trickled request body
+/// and a handler stuck behind the write lock; expiry is a clean `408`,
+/// never a hung connection held open indefinitely (threat model §3). The
+/// response *body* transfer is not under this clock — every response here
+/// is fully materialized before it is sent, so a slow download only
+/// occupies a socket, not a handler.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum concurrent `GET /setup` responses. `/setup` is by far the
+/// largest response this server produces (~47 MB at 1M accounts — the
+/// whole per-segment hint set), which makes it the cheapest
+/// bandwidth-exhaustion lever an attacker has (roadmap C3). A small cap
+/// queues the excess instead of fanning out gigabytes; queued requests
+/// that outlive [`REQUEST_TIMEOUT`] are shed with a clean `408`. Honest
+/// clients fetch `/setup` once per bootstrap, so contention on this
+/// semaphore is a non-event outside an attack.
+pub const SETUP_MAX_CONCURRENT: usize = 2;
 
 /// Everything the lock guards: the PIR server, its sliding delta-ring
 /// window, and a bounded per-block delta index for immutable
@@ -163,10 +185,18 @@ impl NodeState {
             .route("/answer", post(answer))
             .route("/delta/{block}", get(delta_by_block))
             .route("/sync", get(sync))
-            .route("/setup", get(setup))
+            .route(
+                "/setup",
+                // Route-scoped cap — see `SETUP_MAX_CONCURRENT`. Applied
+                // via `route`'s method-router layer so no other endpoint
+                // shares the semaphore.
+                get(setup).layer(ConcurrencyLimitLayer::new(SETUP_MAX_CONCURRENT)),
+            )
             .route("/head", get(head))
             .route("/mode", get(mode))
+            .route("/healthz", get(healthz))
             .layer(DefaultBodyLimit::max(MAX_ANSWER_BODY_BYTES))
+            .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
             .with_state(state)
     }
 }
@@ -266,6 +296,20 @@ async fn head(State(state): State<Arc<NodeState>>) -> Response {
 /// No lock needed: the flag is fixed at construction.
 async fn mode(State(state): State<Arc<NodeState>>) -> Response {
     octet_response(StatusCode::OK, vec![u8::from(state.complete)])
+}
+
+/// `GET /healthz`: liveness + readiness in one — `200` with the plain-text
+/// body `ok <head-block>` (e.g. `ok 19123456`). Taking the read lock is
+/// deliberate: a server wedged behind a stuck writer fails this probe via
+/// the request timeout instead of reporting healthy while unable to
+/// answer. For monitors, a stalling head number is the block-lag signal
+/// (roadmap C7); anything beyond that belongs to real metrics, not a
+/// health probe.
+async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
+    let inner = state.inner.read().await;
+    let h = inner.server.block();
+    drop(inner);
+    (StatusCode::OK, format!("ok {h}")).into_response()
 }
 
 // ─── small helpers ────────────────────────────────────────────────────

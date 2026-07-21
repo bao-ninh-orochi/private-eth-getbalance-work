@@ -2,6 +2,7 @@
 name        = "risepir-http"
 version     = "0.1.0"
 edition.workspace = true
+license.workspace   = true
 publish     = false
 description = "SimplePIR-concrete binary wire codec + axum HTTP server exposing the RisePIR endpoints (answer/sync/setup/head/delta) over risepir-server (docs/plan.md §3.4, ADR-0006, ADR-0010)."
 
@@ -18,6 +19,14 @@ segmented-cuckoo = { workspace = true }
 
 axum  = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+
+# Production hardening on the listener (threat model §3): a per-request
+# timeout (tower-http, returns a clean 408 instead of surfacing an error
+# type) and a concurrency cap on the huge-response `/setup` route (tower's
+# semaphore-based limit). Both are already in the dependency graph via
+# axum; the explicit entries only switch on the named features.
+tower      = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["timeout"] }
 
 # Stage 0.4: the async counterpart to this crate's own axum server —
 # `client` drives the RisePIR HTTP transport from the JSON-RPC front end

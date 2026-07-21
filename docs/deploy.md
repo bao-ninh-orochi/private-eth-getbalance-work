@@ -360,6 +360,18 @@ pane group and the server dies mid-save (0-byte `.tmp`; atomic tmp+rename means
 the previous good state survives, and partial mode loses nothing — but a
 complete-set deployment would lose its fast restart).
 
+**Supervision (preferred over tmux):** [`ops/systemd/risepir.service`](../ops/systemd/risepir.service)
+runs the same command under systemd — survives reboots, restarts on failure,
+and encodes the graceful stop above as `KillSignal=SIGINT` +
+`TimeoutStopSec=300`, so `systemctl stop risepir` *is* the
+wait-for-`state saved; exiting` recipe with no wrapper shell to mis-signal.
+Edit the `User=`/path lines to the VM login, `cp` to `/etc/systemd/system/`,
+`systemctl enable --now risepir`; logs via `journalctl -u risepir -f`. The
+tmux recipe stays valid for throwaway runs; anything that should outlive a
+reboot belongs under the unit. A liveness probe is served at
+`GET /healthz` on `:8645` (`ok <head-block>` — a stalling number is the
+block-lag signal).
+
 **Cost hygiene:** `gcloud compute instances stop risepir` when idle (only the
 disk's ~$4/mo keeps billing against credit); `…delete` to zero it;
 `gcloud billing projects describe risepir-poc` / the console's Billing page shows

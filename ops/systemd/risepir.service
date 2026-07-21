@@ -1,0 +1,50 @@
+# systemd unit for the RisePIR server (deploy.md §3.6 "Supervision", roadmap C1).
+#
+# Replaces the tmux recipe: survives reboots, restarts on failure, and —
+# the part the tmux shape got wrong once (deploy.md "Graceful stop") —
+# stops via SIGINT straight to the binary with a generous save window, so
+# a stop is always the graceful state-save path. There is no wrapper
+# shell: ExecStart *is* the pane-process `exec` trick, for free.
+#
+# Install (as root on the VM; edit User/paths to the actual login first):
+#   cp ops/systemd/risepir.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now risepir
+# Logs:   journalctl -u risepir -f
+# Stop:   systemctl stop risepir   (waits for "state saved; exiting")
+
+[Unit]
+Description=RisePIR private eth_getBalance server (mainnet --partial)
+Documentation=https://github.com/bao-ninh-orochi/private-ETH-getBalance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Edit these three to the deployment's login and checkout path.
+User=risepir
+WorkingDirectory=/home/risepir/private-ETH-getBalance
+ExecStart=/home/risepir/private-ETH-getBalance/target/release/risepir-rpc mainnet --partial --state /home/risepir/risepir-state.bin
+
+# Graceful shutdown = the binary's own SIGINT save path. The save is
+# seconds in partial mode but can be minutes at complete-set scale, so the
+# stop window is generous; SIGKILL after the window is safe (atomic
+# tmp+rename means the previous good state survives) but wastes the
+# fast-restart file.
+KillSignal=SIGINT
+TimeoutStopSec=300
+# Never SIGKILL the main process early; the two-phase default would.
+KillMode=mixed
+
+Restart=on-failure
+RestartSec=10
+
+# The server needs no privileges beyond its own files and outbound HTTPS.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/risepir
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

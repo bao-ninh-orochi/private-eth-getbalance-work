@@ -67,9 +67,14 @@ today** and there is a **live GCP deployment** (below).
 
 ## Git conventions
 
-- Push directly to `main` (user's private repo — no fork, no PR). Sign every
-  commit; if signing hangs: `ssh-add --apple-use-keychain`. **No AI-attribution
-  trailers or footers.**
+- Branch → PR → self-merge into `main` (the `PGR-###` rules in the global guide):
+  cut a `type/slug` branch off a synced `main`, open a PR against `origin`'s
+  `main`, get CI green, then squash-merge and delete the branch
+  (`gh pr merge <#> --squash --delete-branch`). **No fork** — `origin` is this
+  repo; there is no `upstream`. `main` is protected by convention (no direct
+  pushes; server-side branch protection needs GitHub Pro for a private repo — see
+  PGR-007). Sign every commit; if signing hangs: `ssh-add --apple-use-keychain`.
+  **No AI-attribution trailers or footers.**
 
 ## The binary (`risepir-rpc`)
 

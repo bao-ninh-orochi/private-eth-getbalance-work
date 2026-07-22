@@ -502,3 +502,25 @@ formatting-only commit after in-flight branches land.
 when a human remembered — the highest impact-per-hour item in the roadmap. The
 deploy-key choice is the standard least-privilege answer to "CI must read a
 private sibling repo".
+
+### ADR-0022 — cargo-deny runs on the host, not in the Docker action, so it sees the IKPIR credential **[NEW]**
+
+**Chosen:** run `cargo deny check` directly on the runner, with cargo-deny
+installed via `taiki-e/install-action` (SHA-pinned). It then inherits the exact
+host git config the clippy/test job uses — the `insteadOf` rewrite written by
+the "Authenticate the private IKPIR dependency" step plus
+`.cargo/config.toml`'s `git-fetch-with-cli` — so its `cargo metadata` fetch of
+the private IKPIR dep authenticates like every other job.
+**Rejected:** `EmbarkStudios/cargo-deny-action` — ADR-0021's original choice. It
+runs cargo-deny **inside a Docker container** with its own `$HOME` (`/github/home`),
+so the credential the auth step wrote to the *host* git config is invisible; the
+container's git-fetch-with-cli then fails with `fatal: could not read Username
+for 'https://github.com'` and cargo-deny reports `failed to fetch crates`.
+Also rejected: injecting credentials into the container via the action's inputs
+— a second auth path to keep in sync with the two host jobs, for no benefit.
+**Why:** the first CI run after `IKPIR_TOKEN` was finally provisioned (2026-07-22)
+exposed it — clippy+tests went green and conformance skipped correctly, and the
+*only* red job was the Dockerized deny, failing on git auth rather than on any
+advisory/license/source finding. Moving it host-side puts every cargo-touching
+job on one identical auth mechanism, which is the invariant ADR-0021's wiring
+assumed but the container silently broke. [DEVIATES from ADR-0021]

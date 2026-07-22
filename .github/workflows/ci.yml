@@ -98,4 +98,12 @@ jobs:
             exit 1
           fi
           git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # cargo-deny runs on the host, not in a container (ADR-0022): the auth
+      # step above writes the insteadOf rewrite to the runner's git config, and
+      # only a host-run cargo (via git-fetch-with-cli) sees it. The Docker-based
+      # cargo-deny-action ran with a different $HOME and could not read the
+      # private IKPIR dep — `could not read Username for 'https://github.com'`.
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-deny
+      - run: cargo deny check

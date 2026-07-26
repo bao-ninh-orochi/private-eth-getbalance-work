@@ -59,12 +59,30 @@ pub struct RpcClient {
     http: reqwest::Client,
 }
 
+/// What this client identifies itself as. **Load-bearing, not cosmetic:**
+/// `reqwest` sends no `User-Agent` at all by default, and Cloudflare-fronted
+/// public RPC endpoints reject that outright — `eth.merkle.io` answers a
+/// UA-less POST with a `403` HTML challenge page while answering the
+/// identical request with any UA set. Diagnosing that costs an afternoon,
+/// because every hand-check with `curl` (which always sends one) succeeds
+/// and only the application sees the 403.
+const USER_AGENT: &str = concat!("risepir-rpc/", env!("CARGO_PKG_VERSION"));
+
 impl RpcClient {
     /// A client for `url`. No I/O yet.
+    ///
+    /// # Panics
+    ///
+    /// If the HTTP client cannot be built — only possible from a broken
+    /// TLS backend, which is a deployment-environment failure rather than
+    /// anything this crate can recover from.
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .user_agent(USER_AGENT)
+                .build()
+                .expect("reqwest client with a static user-agent"),
         }
     }
 
@@ -128,18 +146,32 @@ impl RpcClient {
     }
 }
 
-/// The real-mainnet feed: follows `finalized` on one JSON-RPC endpoint
-/// that serves `debug_traceBlockByNumber` with the prestate tracer
-/// (verified live: dRPC's keyless `https://eth.drpc.org` does).
+/// One configured endpoint plus whether its `eth_chainId` has been
+/// confirmed to match the deployment's chain.
+///
+/// A fallback that was unreachable at startup stays in the list
+/// *unverified*; it is re-checked before its data is ever accepted (see
+/// [`RpcFeed::ensure_chain_verified`]), so "temporarily down" never
+/// becomes "silently trusted".
+struct Endpoint {
+    rpc: RpcClient,
+    chain_verified: std::sync::atomic::AtomicBool,
+}
+
+/// The real-mainnet feed: follows `finalized` over an ordered list of
+/// JSON-RPC endpoints that serve `debug_traceBlockByNumber` with the
+/// prestate tracer (verified live: dRPC's keyless `https://eth.drpc.org`
+/// does, with `https://eth.merkle.io` behind it for the blocks dRPC's
+/// free plan refuses).
 ///
 /// Not an implementation of the synchronous [`crate::Feed`] trait — this
 /// type is async through and through; the binary's follow loop drives it
 /// directly. The one seam shared with every other producer is the
 /// [`BlockUpdate`] it emits.
 pub struct RpcFeed {
-    /// Ordered endpoints: `clients[0]` is the primary, the rest are
+    /// Ordered endpoints: `endpoints[0]` is the primary, the rest are
     /// fallbacks tried in order. Never empty.
-    clients: Vec<RpcClient>,
+    endpoints: Vec<Endpoint>,
     chain_id: u64,
 }
 
@@ -174,39 +206,73 @@ impl RpcFeed {
     /// a perfectly good fallback: it is asked only for the rare block the
     /// primary refuses.
     ///
+    /// # Startup strictness, and why it differs by position
+    ///
+    /// A **chain-id mismatch is always fatal**, wherever it appears: an
+    /// endpoint serving another chain's blocks would corrupt the database,
+    /// and that is a misconfiguration no retry fixes.
+    ///
+    /// An endpoint being merely *unreachable* is treated by position:
+    ///
+    /// - **primary** — fatal, unchanged: a deployment that cannot reach
+    ///   its feed is dead on arrival.
+    /// - **fallback** — a warning. It stays in the list, unverified, and
+    ///   its chain id is checked before its data is ever used. Killing a
+    ///   deployment because a *backup* endpoint had a bad minute would
+    ///   make the fallback mechanism worse than no fallback at all —
+    ///   which is exactly what happened on 2026-07-26, when a transient
+    ///   `403` from the fallback aborted startup on a server holding a
+    ///   36 GB state file it had spent 33 minutes building.
+    ///
     /// # Errors
     ///
-    /// [`FeedError::Internal`] if `urls` is empty.
-    /// [`FeedError::ChainIdMismatch`] if **any** endpoint reports a chain
-    /// other than `expected_chain_id` — every endpoint is verified, not
-    /// just the primary, because a fallback silently serving another
-    /// chain's blocks would corrupt the database exactly like a
-    /// misconfigured primary would.
+    /// [`FeedError::Internal`] if `urls` is empty;
+    /// [`FeedError::ChainIdMismatch`] if any endpoint reports the wrong
+    /// chain; whatever the primary's `eth_chainId` failed with, if it did.
     pub async fn new_multi(urls: Vec<String>, expected_chain_id: u64) -> Result<Self, FeedError> {
         if urls.is_empty() {
             return Err(FeedError::Internal("feed needs at least one endpoint URL".to_string()));
         }
-        let mut clients = Vec::with_capacity(urls.len());
-        for url in urls {
+        let mut endpoints = Vec::with_capacity(urls.len());
+        for (i, url) in urls.into_iter().enumerate() {
             let rpc = RpcClient::new(url);
-            let got = rpc.call("eth_chainId", json!([])).await?;
-            let got = got
-                .as_str()
-                .ok_or_else(|| parse_err("eth_chainId", "result is not a string"))
-                .and_then(|s| parse_hex_u128(s).map_err(|e| parse_err("eth_chainId", &e)))?;
-            let got = u64::try_from(got).map_err(|_| parse_err("eth_chainId", "does not fit u64"))?;
-            if got != expected_chain_id {
-                return Err(FeedError::ChainIdMismatch {
-                    expected: expected_chain_id,
-                    got,
-                });
-            }
-            clients.push(rpc);
+            let verified = match verify_chain(&rpc, expected_chain_id).await {
+                Ok(()) => true,
+                // Wrong chain: fatal at any position.
+                Err(e @ FeedError::ChainIdMismatch { .. }) => return Err(e),
+                // Unreachable primary: fatal, as before.
+                Err(e) if i == 0 => return Err(e),
+                // Unreachable fallback: keep it, unverified.
+                Err(e) => {
+                    eprintln!(
+                        "risepir-feed: WARNING: fallback feed endpoint {} did not verify at startup ({e}); \
+                         keeping it in the chain — its chain id will be re-checked before any of its data is used",
+                        rpc.url()
+                    );
+                    false
+                }
+            };
+            endpoints.push(Endpoint {
+                rpc,
+                chain_verified: std::sync::atomic::AtomicBool::new(verified),
+            });
         }
         Ok(Self {
-            clients,
+            endpoints,
             chain_id: expected_chain_id,
         })
+    }
+
+    /// Confirms `ep`'s chain id if startup could not. Cheap after the
+    /// first success (one relaxed atomic load).
+    async fn ensure_chain_verified(&self, ep: &Endpoint) -> Result<(), FeedError> {
+        use std::sync::atomic::Ordering;
+        if ep.chain_verified.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        verify_chain(&ep.rpc, self.chain_id).await?;
+        ep.chain_verified.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     /// The verified chain id this feed was constructed against.
@@ -217,23 +283,27 @@ impl RpcFeed {
     /// The **primary** JSON-RPC client (for ad-hoc calls like the
     /// bootstrap-seam `eth_getBalance`).
     pub fn rpc(&self) -> &RpcClient {
-        &self.clients[0]
+        &self.endpoints[0].rpc
     }
 
     /// Every configured endpoint URL, primary first — what the deployment
     /// logs at startup so the operator can see the actual fallback order.
     pub fn urls(&self) -> Vec<&str> {
-        self.clients.iter().map(RpcClient::url).collect()
+        self.endpoints.iter().map(|e| e.rpc.url()).collect()
     }
 
     /// Current `finalized` block number (ADR-0007). Tries each endpoint
     /// in order; see [`Self::new_multi`].
     pub async fn finalized(&self) -> Result<u64, FeedError> {
         let mut failures = Vec::new();
-        for rpc in &self.clients {
-            match Self::finalized_on(rpc).await {
+        for ep in &self.endpoints {
+            if let Err(e) = self.ensure_chain_verified(ep).await {
+                failures.push(format!("{}: unverified ({e})", ep.rpc.url()));
+                continue;
+            }
+            match Self::finalized_on(&ep.rpc).await {
                 Ok(n) => return Ok(n),
-                Err(e) => failures.push(format!("{}: {e}", rpc.url())),
+                Err(e) => failures.push(format!("{}: {e}", ep.rpc.url())),
             }
         }
         Err(all_failed("eth_getBlockByNumber(finalized)", &failures))
@@ -265,10 +335,14 @@ impl RpcFeed {
     /// having a bad day.
     pub async fn block_update(&self, n: u64) -> Result<FetchedBlock, FeedError> {
         let mut failures = Vec::new();
-        for rpc in &self.clients {
-            match Self::block_update_on(rpc, n).await {
+        for ep in &self.endpoints {
+            if let Err(e) = self.ensure_chain_verified(ep).await {
+                failures.push(format!("{}: unverified ({e})", ep.rpc.url()));
+                continue;
+            }
+            match Self::block_update_on(&ep.rpc, n).await {
                 Ok(b) => return Ok(b),
-                Err(e) => failures.push(format!("{}: {e}", rpc.url())),
+                Err(e) => failures.push(format!("{}: {e}", ep.rpc.url())),
             }
         }
         Err(all_failed(&format!("block_update({n})"), &failures))
@@ -427,6 +501,22 @@ fn parse_err(method: &str, detail: &str) -> FeedError {
     }
 }
 
+/// `eth_chainId` on `rpc`, checked against `expected`. Separated out
+/// because it runs both at startup and lazily, before an endpoint that
+/// could not be checked at startup is first trusted.
+async fn verify_chain(rpc: &RpcClient, expected: u64) -> Result<(), FeedError> {
+    let got = rpc.call("eth_chainId", json!([])).await?;
+    let got = got
+        .as_str()
+        .ok_or_else(|| parse_err("eth_chainId", "result is not a string"))
+        .and_then(|s| parse_hex_u128(s).map_err(|e| parse_err("eth_chainId", &e)))?;
+    let got = u64::try_from(got).map_err(|_| parse_err("eth_chainId", "does not fit u64"))?;
+    if got != expected {
+        return Err(FeedError::ChainIdMismatch { expected, got });
+    }
+    Ok(())
+}
+
 /// Every configured endpoint declined the same call. Names each one and
 /// its reason: with fallbacks configured, "the block did not load" is
 /// almost always *one* provider's plan limit rather than the block being
@@ -497,6 +587,19 @@ mod tests {
             Err(other) => panic!("expected Internal, got {other:?}"),
             Ok(_) => panic!("an empty endpoint list must not construct an RpcFeed"),
         }
+    }
+
+    /// The client must identify itself. Cloudflare-fronted public RPC
+    /// endpoints reject a `User-Agent`-less POST with a 403 HTML page,
+    /// and `reqwest` sends none unless told to — so an empty UA silently
+    /// removes a fallback from service while `curl` checks keep passing.
+    #[test]
+    fn rpc_client_sends_a_user_agent() {
+        assert!(USER_AGENT.starts_with("risepir-rpc/"), "unexpected UA: {USER_AGENT}");
+        assert!(
+            USER_AGENT.len() > "risepir-rpc/".len(),
+            "UA must carry a version, got {USER_AGENT}"
+        );
     }
 
     /// `all_failed` must name every endpoint that declined and its

@@ -779,14 +779,22 @@ upgraded in place from the `e2-medium` that ran the partial demo.
 | peak RSS | **~37 GB** of 62 GB |
 | restart from state | **135.8 s** — "block 25613849, 200510802 accounts, complete set" |
 
+**Caught up to the head.** The snapshot→head replay closed the full
+~3,500-block gap and the server reached **finalized exactly** (`GAP=0` at block
+25,617,400). Once inside publicnode's recent window its own in-loop backstop
+came back: `reconcile at block 25617390: 8 account(s) exact vs independent
+provider`, with **zero `CRITICAL` and zero mismatch lines** across the entire
+run.
+
 **Correctness, against an independent provider.** `rpc.flashbots.net` — neither
 the feed (dRPC/merkle) nor the in-loop reconciler (publicnode), and the only
 surveyed keyless endpoint serving *archive* `eth_getBalance`, which is what a
-still-catching-up server needs to be checked against:
+still-catching-up server has to be checked against:
 
-- **11/11 private `eth_getBalance` byte-exact**, each at an explicit height,
-  through a `risepir-rpc client` doing the real PIR path (query → answer →
-  rewind → joint-mask scan).
+- **11/11 private `eth_getBalance` byte-exact**, all at the single explicit
+  height 25,617,400, through a `risepir-rpc client` doing the real PIR path
+  (query → answer → rewind → joint-mask scan). Re-run mid-catch-up against
+  bracketed heights it was likewise 11/11.
 - Two of those were accounts **absent** from the set, answering exactly `0x0`
   and matching the provider's `0x0` — and a never-funded address likewise
   `0x0`. This is the complete-set semantic the partial deployment is forbidden

@@ -89,9 +89,17 @@ pub struct MainnetConfig {
     pub rpc_port: u16,
     /// PIR HTTP listen port (`0` = ephemeral).
     pub pir_port: u16,
-    /// Feed endpoint — must serve `debug_traceBlockByNumber` +
-    /// `prestateTracer`. dRPC's keyless endpoint does.
-    pub feed_url: String,
+    /// Feed endpoints, in priority order — each must serve
+    /// `debug_traceBlockByNumber` + `prestateTracer`. dRPC's keyless
+    /// endpoint does.
+    ///
+    /// More than one is strongly recommended for a long-running
+    /// deployment: public providers refuse *individual* heavy blocks on
+    /// plan limits, deterministically, and since the follow loop may
+    /// never skip a block it would otherwise wedge there forever
+    /// (`RpcFeed::new_multi`). Later entries are consulted only when
+    /// earlier ones fail, so a rate-limited endpoint is a fine fallback.
+    pub feed_urls: Vec<String>,
     /// Independent reconciliation endpoint (recent-window `eth_getBalance`
     /// is enough). Should be a *different operator* than `feed_url`, so a
     /// lying/buggy feed is actually caught.
@@ -135,7 +143,14 @@ impl Default for MainnetConfig {
             bind: Ipv4Addr::LOCALHOST,
             rpc_port: 8545,
             pir_port: 8645,
-            feed_url: "https://eth.drpc.org".to_string(),
+            // Ordered: dRPC serves nearly every block in ~1 s but refuses
+            // occasional heavy ones on its free plan; merkle.io serves
+            // those (it rate-limits under sustained load, which does not
+            // matter for the ~1-in-600 blocks it is actually asked for).
+            feed_urls: vec![
+                "https://eth.drpc.org".to_string(),
+                "https://eth.merkle.io".to_string(),
+            ],
             confirm_url: "https://ethereum-rpc.publicnode.com".to_string(),
             snapshot: Vec::new(),
             snapshot_block: None,
@@ -190,10 +205,14 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // The feed connects first: a mainnet deployment that cannot reach its
     // feed is dead on arrival, and the chain-id check must reject a
     // wrong-network endpoint before any state is touched (chain id 1).
-    let feed = match RpcFeed::new(cfg.feed_url.clone(), 1).await {
+    let feed = match RpcFeed::new_multi(cfg.feed_urls.clone(), 1).await {
         Ok(f) => f,
-        Err(e) => die(format!("feed {}: {e}", cfg.feed_url)),
+        Err(e) => die(format!("feed {}: {e}", cfg.feed_urls.join(", "))),
     };
+    eprintln!(
+        "risepir-rpc mainnet: feed endpoints (in order): {}",
+        feed.urls().join(" -> ")
+    );
 
     // ── Bootstrap: state file > snapshot > partial ─────────────────────
     let (server, complete) = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {

@@ -137,30 +137,74 @@ impl RpcClient {
 /// directly. The one seam shared with every other producer is the
 /// [`BlockUpdate`] it emits.
 pub struct RpcFeed {
-    rpc: RpcClient,
+    /// Ordered endpoints: `clients[0]` is the primary, the rest are
+    /// fallbacks tried in order. Never empty.
+    clients: Vec<RpcClient>,
     chain_id: u64,
 }
 
 impl RpcFeed {
-    /// Connect-and-verify: fetches `eth_chainId` and rejects anything but
-    /// `expected_chain_id` — pointing a mainnet deployment at a testnet
-    /// (or vice versa) must fail at startup, not corrupt a database.
+    /// Connect-and-verify a single endpoint. Equivalent to
+    /// [`Self::new_multi`] with a one-element list.
     pub async fn new(url: impl Into<String>, expected_chain_id: u64) -> Result<Self, FeedError> {
-        let rpc = RpcClient::new(url);
-        let got = rpc.call("eth_chainId", json!([])).await?;
-        let got = got
-            .as_str()
-            .ok_or_else(|| parse_err("eth_chainId", "result is not a string"))
-            .and_then(|s| parse_hex_u128(s).map_err(|e| parse_err("eth_chainId", &e)))?;
-        let got = u64::try_from(got).map_err(|_| parse_err("eth_chainId", "does not fit u64"))?;
-        if got != expected_chain_id {
-            return Err(FeedError::ChainIdMismatch {
-                expected: expected_chain_id,
-                got,
-            });
+        Self::new_multi(vec![url.into()], expected_chain_id).await
+    }
+
+    /// Connect-and-verify an **ordered** endpoint list: `urls[0]` is the
+    /// primary, the rest are fallbacks tried in order whenever a call on
+    /// an earlier one fails.
+    ///
+    /// # Why fallbacks exist
+    ///
+    /// A single endpoint is a single point of *permanent* failure, not
+    /// just a slow one. Keyless public providers refuse individual blocks
+    /// on plan limits — dRPC answers `debug_traceBlockByNumber` for most
+    /// blocks in ~1 s but returns `HTTP 408 "Request timeout on the free
+    /// plan"` for occasional heavy ones, deterministically, however many
+    /// times it is asked. The follow loop must never skip a block (a
+    /// skipped block is a wrong balance), so it retries forever — and a
+    /// deployment following mainnet wedges permanently on the first such
+    /// block. Observed live on 2026-07-26: the complete-set deployment
+    /// stopped at block 25,613,828 and stayed there through 55 identical
+    /// retries. A second endpoint that *does* serve that block clears it
+    /// in one call.
+    ///
+    /// Fallbacks are consulted per call, in order, and the primary is
+    /// always tried first — so a rate-limited-but-permissive endpoint is
+    /// a perfectly good fallback: it is asked only for the rare block the
+    /// primary refuses.
+    ///
+    /// # Errors
+    ///
+    /// [`FeedError::Internal`] if `urls` is empty.
+    /// [`FeedError::ChainIdMismatch`] if **any** endpoint reports a chain
+    /// other than `expected_chain_id` — every endpoint is verified, not
+    /// just the primary, because a fallback silently serving another
+    /// chain's blocks would corrupt the database exactly like a
+    /// misconfigured primary would.
+    pub async fn new_multi(urls: Vec<String>, expected_chain_id: u64) -> Result<Self, FeedError> {
+        if urls.is_empty() {
+            return Err(FeedError::Internal("feed needs at least one endpoint URL".to_string()));
+        }
+        let mut clients = Vec::with_capacity(urls.len());
+        for url in urls {
+            let rpc = RpcClient::new(url);
+            let got = rpc.call("eth_chainId", json!([])).await?;
+            let got = got
+                .as_str()
+                .ok_or_else(|| parse_err("eth_chainId", "result is not a string"))
+                .and_then(|s| parse_hex_u128(s).map_err(|e| parse_err("eth_chainId", &e)))?;
+            let got = u64::try_from(got).map_err(|_| parse_err("eth_chainId", "does not fit u64"))?;
+            if got != expected_chain_id {
+                return Err(FeedError::ChainIdMismatch {
+                    expected: expected_chain_id,
+                    got,
+                });
+            }
+            clients.push(rpc);
         }
         Ok(Self {
-            rpc,
+            clients,
             chain_id: expected_chain_id,
         })
     }
@@ -170,16 +214,33 @@ impl RpcFeed {
         self.chain_id
     }
 
-    /// The underlying JSON-RPC client (for ad-hoc calls like the
+    /// The **primary** JSON-RPC client (for ad-hoc calls like the
     /// bootstrap-seam `eth_getBalance`).
-    pub const fn rpc(&self) -> &RpcClient {
-        &self.rpc
+    pub fn rpc(&self) -> &RpcClient {
+        &self.clients[0]
     }
 
-    /// Current `finalized` block number (ADR-0007).
+    /// Every configured endpoint URL, primary first — what the deployment
+    /// logs at startup so the operator can see the actual fallback order.
+    pub fn urls(&self) -> Vec<&str> {
+        self.clients.iter().map(RpcClient::url).collect()
+    }
+
+    /// Current `finalized` block number (ADR-0007). Tries each endpoint
+    /// in order; see [`Self::new_multi`].
     pub async fn finalized(&self) -> Result<u64, FeedError> {
-        let block = self
-            .rpc
+        let mut failures = Vec::new();
+        for rpc in &self.clients {
+            match Self::finalized_on(rpc).await {
+                Ok(n) => return Ok(n),
+                Err(e) => failures.push(format!("{}: {e}", rpc.url())),
+            }
+        }
+        Err(all_failed("eth_getBlockByNumber(finalized)", &failures))
+    }
+
+    async fn finalized_on(rpc: &RpcClient) -> Result<u64, FeedError> {
+        let block = rpc
             .call("eth_getBlockByNumber", json!(["finalized", false]))
             .await?;
         let num = block
@@ -197,11 +258,26 @@ impl RpcFeed {
     /// reconciliation loop needs them to ask a reference RPC, and a
     /// partial-mode deployment needs the credit recipients to filter
     /// credits it cannot honestly resolve (no complete prior).
+    ///
+    /// Tries each configured endpoint in order (see [`Self::new_multi`]);
+    /// the returned error names every endpoint and why each declined, so
+    /// a genuinely unavailable block is distinguishable from one provider
+    /// having a bad day.
     pub async fn block_update(&self, n: u64) -> Result<FetchedBlock, FeedError> {
+        let mut failures = Vec::new();
+        for rpc in &self.clients {
+            match Self::block_update_on(rpc, n).await {
+                Ok(b) => return Ok(b),
+                Err(e) => failures.push(format!("{}: {e}", rpc.url())),
+            }
+        }
+        Err(all_failed(&format!("block_update({n})"), &failures))
+    }
+
+    async fn block_update_on(rpc: &RpcClient, n: u64) -> Result<FetchedBlock, FeedError> {
         let hex_n = format!("0x{n:x}");
 
-        let block = self
-            .rpc
+        let block = rpc
             .call("eth_getBlockByNumber", json!([hex_n.clone(), false]))
             .await?;
         if block.is_null() {
@@ -212,8 +288,7 @@ impl RpcFeed {
         }
         let credited = credits_from_block(&block)?;
 
-        let trace = self
-            .rpc
+        let trace = rpc
             .call(
                 "debug_traceBlockByNumber",
                 json!([hex_n, {"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}]),
@@ -352,6 +427,17 @@ fn parse_err(method: &str, detail: &str) -> FeedError {
     }
 }
 
+/// Every configured endpoint declined the same call. Names each one and
+/// its reason: with fallbacks configured, "the block did not load" is
+/// almost always *one* provider's plan limit rather than the block being
+/// unavailable, and the operator cannot tell which without the list.
+fn all_failed(method: &str, failures: &[String]) -> FeedError {
+    FeedError::Rpc {
+        method: method.to_string(),
+        detail: format!("all {} endpoint(s) failed — {}", failures.len(), failures.join(" | ")),
+    }
+}
+
 /// `0x`-prefixed hex quantity → `u128`. Rejects empty digits, overflow,
 /// and anything not `0x…` — never guesses.
 fn parse_hex_u128(s: &str) -> Result<u128, String> {
@@ -395,6 +481,43 @@ mod tests {
     }
     fn a_hex(byte: u8) -> String {
         format!("0x{}", hex(&a(byte)))
+    }
+
+    // ── endpoint list handling ─────────────────────────────────────────
+
+    /// An empty endpoint list is a configuration error, caught before any
+    /// I/O — `clients[0]` is indexed unconditionally elsewhere, so an
+    /// empty `RpcFeed` must be unconstructible rather than a latent panic.
+    #[tokio::test]
+    async fn new_multi_rejects_an_empty_endpoint_list() {
+        match RpcFeed::new_multi(vec![], 1).await {
+            Err(FeedError::Internal(msg)) => {
+                assert!(msg.contains("at least one"), "unhelpful message: {msg}");
+            }
+            Err(other) => panic!("expected Internal, got {other:?}"),
+            Ok(_) => panic!("an empty endpoint list must not construct an RpcFeed"),
+        }
+    }
+
+    /// `all_failed` must name every endpoint that declined and its
+    /// reason: with a fallback chain, "the block did not load" is usually
+    /// one provider's plan limit, and the operator cannot tell which
+    /// without the per-endpoint detail.
+    #[test]
+    fn all_failed_names_every_endpoint_and_reason() {
+        let e = all_failed(
+            "block_update(25613828)",
+            &[
+                "https://eth.drpc.org: HTTP 408 free plan".to_string(),
+                "https://eth.merkle.io: HTTP 429".to_string(),
+            ],
+        );
+        let FeedError::Rpc { method, detail } = e else { panic!("expected Rpc") };
+        assert_eq!(method, "block_update(25613828)");
+        assert!(detail.contains("all 2 endpoint(s) failed"), "{detail}");
+        assert!(detail.contains("eth.drpc.org"), "{detail}");
+        assert!(detail.contains("eth.merkle.io"), "{detail}");
+        assert!(detail.contains("408"), "{detail}");
     }
 
     // ── changes_from_trace: the diffMode rules, one by one ─────────────

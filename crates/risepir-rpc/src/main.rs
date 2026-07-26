@@ -5,7 +5,7 @@
 //!                     [--web <dir>]
 //! risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]
 //!                     [--state <file>] [--partial] [--partial-capacity <N>]
-//!                     [--feed-url <url>] [--confirm-url <url>]
+//!                     [--feed-url <url>]... [--confirm-url <url>]
 //!                     [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
 //!                     [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]
 //!                     [--web <dir>]
@@ -230,6 +230,12 @@ fn parse_client(args: &[String]) -> FrontConfig {
 
 fn parse_mainnet(args: &[String]) -> MainnetConfig {
     let mut cfg = MainnetConfig::default();
+    // `--feed-url` is repeatable and ordered. The first occurrence
+    // *replaces* the built-in list rather than appending to it — an
+    // operator naming their own endpoint must not silently keep ours
+    // ahead of or behind it — and subsequent occurrences append, building
+    // the fallback chain left to right.
+    let mut feed_url_seen = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -242,7 +248,14 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
                 i += 1;
             }
             "--partial-capacity" => cfg.partial_capacity = parse_next(args, &mut i, "--partial-capacity"),
-            "--feed-url" => cfg.feed_url = next_value(args, &mut i, "--feed-url"),
+            "--feed-url" => {
+                let url = next_value(args, &mut i, "--feed-url");
+                if !feed_url_seen {
+                    cfg.feed_urls.clear();
+                    feed_url_seen = true;
+                }
+                cfg.feed_urls.push(url);
+            }
             "--confirm-url" => cfg.confirm_url = next_value(args, &mut i, "--confirm-url"),
             "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
             "--pir-port" => cfg.pir_port = parse_next(args, &mut i, "--pir-port"),
@@ -295,7 +308,7 @@ fn print_usage() {
     eprintln!("                      [--web <dir>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
     eprintln!("                      [--state <file>] [--partial] [--partial-capacity <N>]");
-    eprintln!("                      [--feed-url <url>] [--confirm-url <url>]");
+    eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
     eprintln!("  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]");
@@ -334,4 +347,72 @@ fn print_proxy_warning(url: &str) {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The built-in feed list is ordered and has a fallback: a lone
+    /// endpoint wedges the follow loop permanently the first time a
+    /// provider refuses one heavy block on a plan limit (see
+    /// `RpcFeed::new_multi`).
+    #[test]
+    fn default_feed_list_is_ordered_with_a_fallback() {
+        let cfg = parse_mainnet(&args(&["--partial"]));
+        assert!(
+            cfg.feed_urls.len() >= 2,
+            "a single default endpoint is a permanent single point of failure"
+        );
+        assert_eq!(cfg.feed_urls[0], "https://eth.drpc.org", "primary must stay dRPC");
+    }
+
+    /// One `--feed-url` must *replace* the built-ins, not prepend to or
+    /// append to them: an operator naming an endpoint gets exactly that
+    /// endpoint, with no surprise third party still in the chain.
+    #[test]
+    fn one_feed_url_replaces_the_defaults() {
+        let cfg = parse_mainnet(&args(&["--partial", "--feed-url", "https://example.test/rpc"]));
+        assert_eq!(cfg.feed_urls, vec!["https://example.test/rpc".to_string()]);
+    }
+
+    /// Repeats build the fallback chain left to right.
+    #[test]
+    fn repeated_feed_urls_build_the_chain_in_order() {
+        let cfg = parse_mainnet(&args(&[
+            "--partial",
+            "--feed-url",
+            "https://a.test",
+            "--feed-url",
+            "https://b.test",
+            "--feed-url",
+            "https://c.test",
+        ]));
+        assert_eq!(
+            cfg.feed_urls,
+            vec![
+                "https://a.test".to_string(),
+                "https://b.test".to_string(),
+                "https://c.test".to_string()
+            ]
+        );
+    }
+
+    /// The repeatable flag must not have disturbed its neighbours.
+    #[test]
+    fn confirm_url_is_still_single_valued() {
+        let cfg = parse_mainnet(&args(&[
+            "--partial",
+            "--feed-url",
+            "https://a.test",
+            "--confirm-url",
+            "https://independent.test",
+        ]));
+        assert_eq!(cfg.confirm_url, "https://independent.test");
+        assert_eq!(cfg.feed_urls, vec!["https://a.test".to_string()]);
+    }
 }

@@ -175,22 +175,52 @@ console.log(
 
 // ── 1. the page boots: wasm instantiated, hint loaded ─────────────────
 
-// The budget is sized for the hint download, not for page rendering: 49 MB at
-// --partial-capacity 1000000, which is seconds on loopback and around a minute
-// from a real deployment across an ocean.
-const booted = await evaluate(`
-  const deadline = Date.now() + 240000;
+// The budget is sized for the hint download, not for page rendering, so it
+// has to follow the deployment's scale: 49 MB at --partial-capacity 1000000
+// is seconds on loopback and about a minute across an ocean, but the complete
+// mainnet set ships a **830.73 MB** hint (docs/numbers.md §4c) and takes
+// minutes. A fixed 240 s budget — sized for the partial case — reported the
+// complete-set deployment as a boot failure while the page was in fact
+// booting perfectly, measured at 153 s over the public origin.
+const BOOT_BUDGET_MS = complete ? 900_000 : 240_000;
+
+// Poll in short evaluates from *this* side rather than one long-running one
+// in the page. An 831 MB navigation keeps the main frame in flight long
+// enough that the execution context is replaced underneath a single
+// `Runtime.evaluate`, which then dies with "Execution context was destroyed"
+// — the gate failing for a reason that has nothing to do with the page.
+// Short polls simply re-issue against whatever context is current.
+async function pollForBoot(deadlineMs) {
+  const deadline = Date.now() + deadlineMs;
+  let lastHarnessError = "";
   while (Date.now() < deadline) {
-    const q = document.getElementById("query");
-    const err = document.getElementById("boot-error");
-    if (err && !err.classList.contains("hidden")) return { ok: false, error: err.textContent };
-    if (q && !q.classList.contains("hidden")) {
-      return { ok: true, state: document.getElementById("state-rows").innerText };
+    try {
+      const r = await evaluate(`
+        const q = document.getElementById("query");
+        const err = document.getElementById("boot-error");
+        if (err && !err.classList.contains("hidden")) return { ok: false, error: err.textContent };
+        if (q && !q.classList.contains("hidden")) {
+          return { ok: true, state: document.getElementById("state-rows").innerText };
+        }
+        return null;
+      `);
+      if (r) return r;
+    } catch (e) {
+      // Context churn during the initial load is expected; keep polling and
+      // only surface it if we never boot at all.
+      lastHarnessError = String(e.message ?? e);
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 1000));
   }
-  return { ok: false, error: "timed out waiting for the client to boot" };
-`);
+  return {
+    ok: false,
+    error: `timed out after ${Math.round(deadlineMs / 1000)}s waiting for the client to boot${
+      lastHarnessError ? ` (last harness error: ${lastHarnessError})` : ""
+    }`,
+  };
+}
+
+const booted = await pollForBoot(BOOT_BUDGET_MS);
 
 check("the page boots and the private client initialises", booted?.ok === true, booted?.error ?? "");
 if (!booted?.ok) {
@@ -209,11 +239,18 @@ check(
 // a person would. The expected value comes from the server's own startup
 // banner (the mock's seeded demo accounts).
 
-// In a complete (mock) deployment we know an exact expected balance. In a
-// partial (live mainnet) one we take an address the server says it
-// tracks, and check the *shape* of the answer plus its block label; the
-// value itself is verified byte-exactly against independent providers by
+// `complete` is not the same thing as `mock`, though it used to be: until
+// the complete *mainnet* set was deployed (2026-07-26) the only complete
+// deployment in existence was the mock, so this gate asserted the mock's
+// seeded dust account (100 wei) whenever `/mode` said complete. Against
+// real mainnet that same address holds a real balance — 1345804390675688562
+// wei — and the gate failed on a correct deployment.
+//
+// So the exact-value assertion is now opt-in with `--mock`, and every other
+// complete deployment is checked for the *shape* of the answer plus its
+// block label. Byte-exactness against an independent provider is the job of
 // `web/test/e2e.mjs`'s reported result and docs/deploy.md's recorded runs.
+const expectMock = process.argv.includes("--mock");
 const probe = complete
   ? "0x5555555555555555555555555555555555555555"
   : await (async () => {
@@ -244,12 +281,19 @@ const lookup = await evaluate(`
 `);
 
 check("a lookup completes in the browser", lookup?.ok === true, lookup?.error ?? "");
-if (complete) {
+if (expectMock) {
   check(
     "the displayed balance is byte-exact (100 wei, the mock's dust account)",
     lookup?.wei === "100 wei",
     `got ${JSON.stringify(lookup?.wei)}`,
   );
+} else if (complete) {
+  check(
+    "a complete-set account shows an exact wei balance",
+    /^\d+ wei$/.test(lookup?.wei ?? ""),
+    `got ${JSON.stringify(lookup?.wei)} for ${probe}`,
+  );
+  console.log(`        ${probe} -> ${lookup?.wei}`);
 } else {
   check(
     "a tracked mainnet account shows an exact wei balance",

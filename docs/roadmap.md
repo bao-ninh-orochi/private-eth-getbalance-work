@@ -24,7 +24,7 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 | Shutdown | SIGINT **and** SIGTERM → graceful state save; listener crash → loud process exit (never a silent half-outage) |
 | Deployment | GCP VM; systemd unit (`ops/systemd/risepir.service`) with the graceful-stop semantics encoded; `GET /healthz` |
 | Toolchain | pinned 1.96.0; MSRV declared; rustfmt.toml present (gate deferred, §2 item 10) |
-| TLS | **none live** — reverse-proxy recipe documented (deploy.md §3.6), not yet deployed |
+| TLS | **live** — Caddy + Let's Encrypt in front of a loopback-only `:8645` (`ops/caddy/Caddyfile`, deploy.md §3.7); public origin verified 13/13 + 20/20 |
 | Rate limiting | **none** beyond the `/setup` cap |
 | Observability | still `println!`/`eprintln!` only — zero `tracing`, zero metrics (§2 item 2) |
 | Panic audit | **not done** — `clippy::unwrap_used`/`expect_used` not yet enabled (§2 item 1) |
@@ -91,8 +91,10 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
    `batched_equals_per_mutation` and the RPST2 tests are the seed of the
    pattern; this generalizes it to the whole apply/persist/rewind path.
    ~1 week, the strongest remaining correctness spend.
-5. **C2 — TLS, deployed.** The caddy recipe is written (deploy.md §3.6);
-   do it the day either port leaves localhost, with a real hostname. Hours.
+5. ~~**C2 — TLS, deployed.**~~ **Done 2026-07-26** — Caddy + Let's Encrypt on
+   a free DuckDNS hostname, listeners still loopback-only, public origin
+   verified end to end (deploy.md §3.7). What it bought and what it did *not*
+   (the DNS/CA parties now in the code-delivery chain) is in threat model §4.2.
 6. **A1 rungs — signed store digests → public anchoring.** The first
    steps past "documented trust" (ADR-0020): a per-block signed digest
    makes global tampering attributable; anchoring stops split-view. Does

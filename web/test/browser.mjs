@@ -115,21 +115,52 @@ function send(method, params = {}) {
 }
 
 /// Evaluate an async expression in the page and return its resolved value.
+///
+/// Two failure modes, deliberately distinguished. A CDP-level `error` means
+/// the *harness* could not run the expression at all — most often "Execution
+/// context was destroyed", because the initial navigation was still in flight.
+/// Returning `undefined` for that made a perfectly working page report as a
+/// boot failure with no detail attached, so it throws instead.
 async function evaluate(expression) {
   const res = await send("Runtime.evaluate", {
     expression: `(async () => { ${expression} })()`,
     awaitPromise: true,
     returnByValue: true,
   });
+  if (res.error) {
+    throw new Error(`devtools: ${res.error.message ?? JSON.stringify(res.error)}`);
+  }
   if (res.result?.exceptionDetails) {
     throw new Error(res.result.exceptionDetails.exception?.description ?? "page threw");
   }
   return res.result?.result?.value;
 }
 
+/// Wait for the initial navigation to settle before evaluating into the page.
+///
+/// Against `127.0.0.1` the document is already there by the time the debugging
+/// socket opens, so this is a no-op. Against a real origin — TLS handshake,
+/// then a document from another continent — it is not, and evaluating into a
+/// context that is about to be replaced fails the run before the page has had
+/// any chance to boot. This is the difference between the gate working on a
+/// laptop and working against a deployment.
+async function waitForDocument() {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const res = await send("Runtime.evaluate", {
+      expression: "document.readyState",
+      returnByValue: true,
+    });
+    if (!res.error && res.result?.result?.value === "complete") return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("the page never finished its initial load");
+}
+
 await send("Runtime.enable");
 await send("Log.enable");
 await send("Page.enable");
+await waitForDocument();
 
 // Which deployment is this? The page adapts to `GET /mode` and so must
 // the gate: in a complete set an absent address is exactly 0, in a partial
@@ -144,8 +175,11 @@ console.log(
 
 // ── 1. the page boots: wasm instantiated, hint loaded ─────────────────
 
+// The budget is sized for the hint download, not for page rendering: 49 MB at
+// --partial-capacity 1000000, which is seconds on loopback and around a minute
+// from a real deployment across an ocean.
 const booted = await evaluate(`
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + 240000;
   while (Date.now() < deadline) {
     const q = document.getElementById("query");
     const err = document.getElementById("boot-error");

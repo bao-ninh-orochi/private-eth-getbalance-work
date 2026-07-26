@@ -481,15 +481,13 @@ with a warning and upgrade to `RPST2` on their next save.
 means anyone on-path can *be* the operator (threat model §4.2), and the
 browser front end additionally needs TLS for a non-localhost origin. Don't
 teach the binary TLS — put a reverse proxy in front and keep the listeners
-loopback-only:
+loopback-only. This is **deployed** as of 2026-07-26; the recipe below is
+what runs, and §3.7 records it end to end.
 
 ```bash
 sudo apt-get install -y caddy       # auto-provisions Let's Encrypt
-# /etc/caddy/Caddyfile — replace the hostname; DNS must already point here:
-#   pir.example.com {
-#       reverse_proxy 127.0.0.1:8645
-#   }
-sudo systemctl reload caddy
+sudo cp ops/caddy/Caddyfile /etc/caddy/Caddyfile   # edit the hostname first
+sudo systemctl restart caddy
 ```
 
 Serve **only** the PIR port (`:8645`) this way — it is what remote clients
@@ -515,6 +513,108 @@ credit burn-down. After the credit: switch the same VM to Spot
 | this MacBook (16 GB) | $0 | complete set fits only marginally (~13–16 GB working set) — fine for partial, risky for complete |
 
 The partial demo runs on anything ≥2 GB, including AWS free-tier-class instances.
+
+## 3.7 Public HTTPS deployment (live, 2026-07-26)
+
+The browser front end is reachable on the open internet at
+**<https://private-eth-getbalance.duckdns.org>** — one hostname serving both
+the page and the PIR transport, which is what ADR-0019's same-origin
+`connect-src 'self'` CSP requires. Every command below was executed as written.
+
+Nothing else is exposed: the firewall opens **only 80/443**, both listeners stay
+on `127.0.0.1`, and Caddy has no route to `:8545`.
+
+**1. A free name, from a dynamic-DNS provider.** DuckDNS needs no registration
+(OAuth sign-in) and gives 5 subdomains. Because the GCP external IP changes
+across stop/start, the record is refreshed *from the VM*, where an empty `ip=`
+makes DuckDNS use the request's source address:
+
+```bash
+umask 077; printf '%s' '<token>' > ~/.duckdns-token       # 0600, never in git
+cat > ~/duckdns-update.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+token=$(cat "$HOME/.duckdns-token")
+curl -s "https://www.duckdns.org/update?domains=private-eth-getbalance&token=${token}&ip="
+EOF
+chmod +x ~/duckdns-update.sh && ~/duckdns-update.sh    # prints OK
+```
+
+Run it after every `instances start`, before Caddy needs the name. DuckDNS
+serves a 60 s TTL, so the name follows the VM within a minute. This is why no
+static IP is reserved: a reserved address bills ~$3.60/mo *even while the VM is
+stopped* (attached-and-reserved counts as in use), and dynamic DNS is free.
+
+**2. Firewall — 80/443 only, never the listeners.**
+
+```bash
+gcloud compute firewall-rules create risepir-web \
+  --allow=tcp:80,tcp:443 --target-tags=risepir --source-ranges=0.0.0.0/0
+```
+
+**3. Caddy, staging first.** Production ACME issuance is rate-limited and a
+misconfigured loop can lock you out for up to a week, so validate the whole
+path — DNS, `:80` reachability, proxy — against the staging CA, which is not
+rate-limited (browsers will warn; expected). Then remove the `acme_ca` line and
+restart for the real certificate. `ops/caddy/Caddyfile` is the deployed config.
+
+**4. The server, as usual.** Caddy 502s until it is up:
+
+```bash
+tmux new-session -d -s risepir "cd ~/private-ETH-getBalance && exec \
+  ./target/release/risepir-rpc mainnet --partial --partial-capacity 1000000 \
+  --web web --state ~/risepir-state.bin >> ~/server.log 2>&1"
+```
+
+### Verified on the public origin (2026-07-26, block 25616255–25616318)
+
+The first time the page had ever run anywhere but `127.0.0.1`:
+
+- `node web/test/browser.mjs https://private-eth-getbalance.duckdns.org` —
+  **13/13**, including no CSP violations and no uncaught page errors, a real
+  mainnet balance rendered (`0xfff064e0…c463` → 194008956570617841 wei), and an
+  untracked address rendering as an error rather than `0`.
+- `node web/test/e2e.mjs` against the served assets — **20/20**; the publicly
+  served `client.wasm` hashes byte-identical to the VM's build
+  (`4dee32bb…6617d`).
+- `risepir-rpc client --pir-url https://private-eth-getbalance.duckdns.org` on
+  a laptop — `0xfdd7992d…59fb` = 1791075509720685 wei, byte-exact against
+  publicnode at the same explicit height; untracked → `-32000`.
+- Certificate: Let's Encrypt, valid 2026-07-26 → 2026-10-24. `http://` → 308 →
+  `https://`. `/setup` = 48,960,201 bytes in ~10 s (curl) / ~49 s (in-browser,
+  cross-Pacific). Direct `:8645` and `:8545` from outside: unreachable.
+
+One harness bug surfaced here and is fixed in the same change:
+`web/test/browser.mjs` evaluated into the page while the initial navigation was
+still in flight, so the execution context was destroyed under it and a *working*
+page reported as a boot failure with no detail. It now waits for
+`document.readyState === "complete"` and surfaces devtools-level errors instead
+of returning `undefined`. On loopback the race never fired.
+
+### What this deployment costs, and what it does not survive
+
+Zero cash beyond the VM hours: DuckDNS, Let's Encrypt and Caddy are free, no
+static IP is reserved, and a handful of visitors is well under a gigabyte of
+egress.
+
+It is sized for **a link sent to a few colleagues**, not for public traffic:
+`SETUP_MAX_CONCURRENT = 2` means only two cold visitors bootstrap at once and
+the rest are shed with a clean `408` after `REQUEST_TIMEOUT`, at ~49 MB each;
+there is no rate limiting beyond that cap (threat model §3 names volumetric DoS
+as undefended). `/setup` behind a CDN plus per-IP quotas is roadmap C5/C3 — do
+that before sharing the link wider.
+
+**Certificate renewal needs the VM up occasionally.** Caddy renews from ~30 days
+before expiry over `:80`. Since this VM is stopped between demos, a gap longer
+than that window lets the certificate lapse and visitors get a hard TLS error;
+starting the VM for any demo inside the window fixes it automatically.
+
+**The trust chain grew, and this is the price of the free name.** Whoever holds
+the DuckDNS token can repoint the hostname at their own machine, obtain a valid
+certificate for it (DNS control is all Let's Encrypt checks), and serve a
+modified wasm client under this name — and so can DuckDNS itself. That is the
+same category as ADR-0019's disclosed code-delivery trust, one party wider. See
+threat model §4.2 and §8.
 
 ## 4. Operational notes (the never-wrong-answer contract, operationally)
 
@@ -581,6 +681,16 @@ feed, real LWE parameters — the whole lookup performed **inside a browser page
   violations and no uncaught page errors).
 - Full lookup round trip: **41 ms** over loopback, of which ~10 ms is client
   crypto.
+
+### 5.2 Public HTTPS origin, live (2026-07-26)
+
+The same front end on the open internet at
+`https://private-eth-getbalance.duckdns.org`, TLS terminated by Caddy in front
+of a loopback-only `:8645`. Evidence, commands and caveats are recorded inline
+with the runbook in **§3.7** rather than duplicated here — including the two
+gates re-run against the public origin (13/13 and 20/20), the CLI client driven
+over the public URL, and the harness race that only a non-loopback origin
+exposed.
 
 ## 6. Who does what, explicitly
 

@@ -114,21 +114,30 @@ session `risepir` with `--state ~/risepir-state.bin`, logs at `~/server.log`.
 The Mac's `gcloud` + `gh` are authenticated; the VM is drivable
 non-interactively:
 
+It is **public** at <https://private-eth-getbalance.duckdns.org> (Caddy + Let's
+Encrypt in front of a loopback-only `:8645`; deploy.md §3.7). Only 80/443 are
+open — `:8545` and `:8645` are never reachable from outside.
+
 ```bash
 gcloud --quiet compute ssh risepir --command='...'
-# resume after a stop:
+# resume after a stop — the DNS refresh comes first, the IP just changed:
 gcloud compute instances start risepir
+gcloud --quiet compute ssh risepir --command='~/duckdns-update.sh'
 gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
   "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet --partial \
-   --state ~/risepir-state.bin >> ~/server.log 2>&1"'
+   --partial-capacity 1000000 --web web --state ~/risepir-state.bin >> ~/server.log 2>&1"'
 ```
 
 The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
-signalling it never involves a wrapper shell. With a state file present the
-server loads it and replays the missed blocks; without one, partial mode just
-re-bootstraps empty at the current finalized head — loss-free. (The external IP
-changes across stop/start; the tunnel doesn't care:
-`gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
+signalling it never involves a wrapper shell. `--web web` is what serves the
+browser front end at all, and `--partial-capacity 1000000` is what keeps its
+first load at 49 MB rather than 99 MB. With a state file present the server
+loads it and replays the missed blocks — which after a long stop is thousands
+of `debug_traceBlockByNumber` calls against a keyless endpoint, so for a demo
+today prefer moving the stale file aside and re-bootstrapping empty (loss-free).
+(The external IP changes across stop/start — hence `duckdns-update.sh`, whose
+empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel
+doesn't care either: `gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
 
 Stopping the meter — in this order:
 

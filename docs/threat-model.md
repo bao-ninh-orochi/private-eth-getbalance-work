@@ -110,6 +110,26 @@ indistinguishable from a different operator. TLS is therefore a hard
 prerequisite for any deployment where "the operator" is meant to name a
 specific party — until then, trust extends to the network path.
 
+**As of 2026-07-26 the public deployment has TLS** (Caddy + Let's Encrypt in
+front of a loopback-only `:8645`, deploy.md §3.7), which closes the on-path
+gap above — and, in closing it, names the parties. *Who* is now trusted is
+worth being explicit about, because it is more than "the operator":
+
+- **Whoever controls the DNS record.** The hostname is a free DuckDNS
+  subdomain. Anyone holding the DuckDNS token — and DuckDNS itself — can
+  repoint it at another machine and obtain a valid certificate for it, since
+  DNS control is the whole of what Let's Encrypt verifies. They would then
+  serve a wasm client of their choosing under this name.
+- **The CA.** A mis-issued certificate has the same effect.
+- Both are the *same category* as ADR-0019's disclosed code-delivery trust —
+  the page's crypto is delivered by the party serving the page — just widened
+  from one party to three. TLS does not remove that trust; it makes it
+  attributable to named parties rather than to anyone on the path.
+
+A deployment that wants to reduce this buys a domain it controls, or serves
+the page from a different party than the PIR server (ADR-0019's stronger
+arrangement, which needs CORS the PIR routes do not currently emit).
+
 ## 5. Adversary: a network / traffic observer
 
 PIR hides *which record*. It does not hide **that** you asked, **when**,
@@ -175,7 +195,8 @@ the address and undoes the system. It is an operator audit tool, full stop.
 | risk | status |
 |---|---|
 | Operator forges a balance | **undefended** (§4.2) — trust assumption, stated |
-| On-path attacker replaces the session (no TLS) | **undefended** until TLS lands (§4.2) |
+| On-path attacker replaces the session | closed for the public deployment by TLS (§4.2); still open for any plaintext-HTTP or SSH-tunnel-less use |
+| DNS/CA holder serves a modified client under the deployment's name | **undefended** (§4.2) — free-subdomain provider, its token, and the CA are all in the code-delivery chain |
 | Traffic analysis / timing correlation | **undefended** (§5) |
 | Feed poisoning between reconcile checkpoints | detected with lag, sampled (§6) |
 | Feed + reconcile providers collude | undetected (§6) |

@@ -1,0 +1,19 @@
+# RisePIR public front end — Caddy terminates TLS and proxies to the PIR port.
+#
+# The binary deliberately has no TLS of its own (docs/deploy.md): keeping the
+# certificate and its ACME lifecycle out of the process that ingests
+# attacker-controlled blobs, and out of a process that would then need to bind
+# :443, is the point. Caddy obtains and renews a Let's Encrypt certificate
+# automatically via the HTTP-01 challenge on :80.
+#
+# Validate changes against the staging CA first — production issuance is
+# rate-limited and a bad loop can lock you out for a week:
+#   { acme_ca https://acme-staging-v02.api.letsencrypt.org/directory }
+
+private-eth-getbalance.duckdns.org {
+	# ONLY the PIR port is ever proxied. :8545 answers plaintext-address
+	# eth_getBalance and must never leave this machine — publishing it would
+	# hand every visitor's queried account to the operator and to anyone
+	# on-path, which is exactly what this project exists to prevent.
+	reverse_proxy 127.0.0.1:8645
+}

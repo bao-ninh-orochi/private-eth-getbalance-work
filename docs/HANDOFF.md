@@ -52,13 +52,16 @@ question: nonzero-only stays, hazard closed properly); withdrawal credits ride
 
 ## What is left
 
-**1. The complete-set run (Stage 1.d) — gated on the user's BigQuery step.**
-`docs/deploy.md` §2.1 has the exact gate query (freshness + nonzero count +
-snapshot block in one shot) and export commands. When the shards exist:
-`risepir-rpc mainnet --snapshot … --snapshot-block … --snapshot-accounts …
---state …` on a 16–24 GB box (deploy.md §2.3). Watch the geometry line it prints
-before allocating. Expect the catch-up replay to take hours for a day-old
-snapshot (~1–2 s/block on keyless tiers).
+**1. ~~The complete-set run (Stage 1.d)~~ — DONE 2026-07-26.** The gate query,
+the export, and the complete-set run all happened; the live GCP box now serves
+the complete set. See `docs/deploy.md` §2.1 (recorded gate output), §2.3
+(revised sizing) and §5.3 (live evidence).
+
+The one number that mattered: mainnet has **200,503,969** nonzero accounts, not
+the ~100–130 M this file and the runbook had assumed, which makes the server DB
+**35.43 GB** rather than 10–13 GB. The "16–24 GB box" advice was wrong by more
+than 2×; the deployment runs on a 64 GB `e2-highmem-8`. Anything that still
+quotes the old figures is stale.
 
 **2. Known open items, in priority order:**
 - **Withdrawal-recipient hard refresh** (deploy.md §4): a one-time absolute
@@ -69,14 +72,20 @@ snapshot (~1–2 s/block on keyless tiers).
   the join gets long.
 - Upstream PR candidates (offer, don't block on): batch-mutation API; seed
   injection in `server_setup` (`docs/verification.md`).
-- Optional polish: MetaMask walkthrough screenshots; a public deployment on the
-  Oracle free-tier box.
-- **Web front end, deliberately deferred** (ADR-0019 records why, and what each
-  needs): caching the hint across visits (sound only against the delta-ring
-  retention check — a `409` must force a re-download); public exposure, which
-  needs a hostname + certificate before it is honest to serve client code over
-  the open internet; and serving the page from a *different* party than the PIR
-  server, which is the stronger arrangement for the code-delivery trust.
+- Optional polish: MetaMask walkthrough screenshots. (~~A public deployment on
+  the Oracle free-tier box~~ — public deployment shipped in PR #5 on GCP; the
+  Oracle 24 GB free tier can no longer hold the 35.43 GB complete set at all.)
+- **Hint caching is now the front end's binding constraint, not a nicety.** At
+  the complete set `/setup` is **830.73 MB** and a client holds **1.66 GB**
+  resident (`docs/numbers.md` §4c) — versus 49 MB at `--partial-capacity
+  1000000`. Every page load pays that download again. ADR-0019 lists caching as
+  deferred-with-conditions (it is sound only against the delta-ring retention
+  check — a `409` must force a re-download); at 831 MB it is what decides
+  whether the browser front end is usable against the complete set at all.
+- **Web front end, remaining deferrals** (ADR-0019 records why, and what each
+  needs): ~~public exposure~~ (shipped, PR #5); and serving the page from a
+  *different* party than the PIR server, which is the stronger arrangement for
+  the code-delivery trust.
 
 ## The binding rules (do not violate)
 
@@ -96,5 +105,8 @@ snapshot (~1–2 s/block on keyless tiers).
   use them (`-- --ignored`, and a `--partial` smoke run) after touching the
   feed or the apply path.
 - Commits: signing works (`ssh-add --apple-use-keychain` was run;
-  `commit.gpgsign=true`). Push directly to `main` — the user's private repo, no
-  fork, no PR, no AI attribution trailers.
+  `commit.gpgsign=true`). **Branch → PR → self-merge** into `main` (the `PGR-###`
+  rules): no fork (`origin` *is* this repo, there is no `upstream`), CI green
+  before merging, then `gh pr merge <#> --squash --delete-branch`. `main` is
+  protected by convention — do **not** push to it directly, which is what an
+  earlier revision of this file said. No AI attribution trailers or footers.

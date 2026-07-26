@@ -524,3 +524,90 @@ exposed it — clippy+tests went green and conformance skipped correctly, and th
 advisory/license/source finding. Moving it host-side puts every cargo-touching
 job on one identical auth mechanism, which is the invariant ADR-0021's wiring
 assumed but the container silently broke. [DEVIATES from ADR-0021]
+
+### ADR-0023 — The complete set needs a 64 GB box: measure the account count before sizing anything **[DEVIATES from deploy.md §2.3]**
+
+**Chosen:** run the complete mainnet set on a **64 GB** machine (GCP
+`e2-highmem-8`, 8 vCPU, 250 GB disk), and treat the §2.1 gate query's
+`nonzero_accounts` as the *only* input to sizing.
+**Rejected:** the "16 GB floor, 24 GB comfortable" the runbook had carried since
+Stage 1 planning, and with it the Oracle Cloud Always Free 24 GB box that §2.3
+named as the $0 way to run this.
+
+**Why:** the gate query had never actually been run — §2.3's numbers came from an
+estimated "~100–130 M nonzero accounts". Run for real on 2026-07-26 it returned
+**200,503,969**. That is not a rounding difference: `Geometry::for_accounts`
+rounds the segment count up to a power of two, so 200.5 M needs 3 × 2^25 =
+100,663,296 buckets, 22 cells per slot at `plaintext_bits=8`, and a server DB of
+**35.43 GB** — about 3× the estimate, and above every free tier that existed.
+Provisioning from the old table would have meant paying for a 5.6 GB export and
+a 12-minute ingest before dying at allocation.
+
+Two consequences worth stating separately, because each is a trap on its own:
+
+- **The state save had to be fixed first.** `state::save` obtained the cells via
+  `snapshot_cells()`, which *copies* the array. At 35.43 GB that takes peak RSS
+  from ~38 GB to ~73 GB — so the save, not the serving, would have set the
+  machine size, and on a 64 GB box the process would have OOMed at the moment it
+  tried to persist a bootstrap that had already cost 25 minutes. Fixed in PR #6
+  by adding a borrowing `RisePirServer::cells()` and streaming from it; the
+  file format is byte-identical.
+- **Headroom is a step function, so budget for the step.** Load is only 0.498
+  because of the power-of-two rounding, which means account growth to
+  **301,989,888** is free — same geometry, same 35.43 GB, load arriving at
+  exactly the 0.75 target — and the very next account doubles the DB to 70.9 GB.
+  A 48 GB box would serve today's mainnet and fall over at that boundary with no
+  warning; 64 GB buys the years in between, not a safety margin.
+
+The general rule this encodes: **derive geometry from a measured count, never a
+remembered one.** The server prints its geometry line before it allocates, and
+that line — not any table in this repo — is the commitment.
+
+### ADR-0024 — The feed is an ordered endpoint list, not one URL; and the client sends a User-Agent **[NEW]**
+
+**Chosen:** `RpcFeed` takes an **ordered list** of JSON-RPC endpoints and walks
+it per call, with `https://eth.drpc.org` primary and `https://eth.merkle.io`
+behind it; `--feed-url` is repeatable. `RpcClient` identifies itself as
+`risepir-rpc/<version>`.
+**Rejected:** a single feed URL (what shipped through 2026-07-25); and making
+every endpoint's reachability fatal at startup.
+
+**Why:** a single endpoint is a single point of *permanent* failure, not a slow
+one. Keyless providers refuse **individual** heavy blocks on plan limits,
+deterministically — dRPC serves `debug_traceBlockByNumber` in ~1 s for most
+blocks and answers `HTTP 408 "Request timeout on the free plan"` for some, every
+time it is asked. The follow loop may never skip a block (a skipped block is a
+wrong balance), so it retries forever, and the deployment stops advancing for
+good. Observed 2026-07-26: the complete-set deployment wedged at block
+**25,613,828** through 55 identical retries, having served the previous 594
+blocks fine — about one refusal per 600 blocks, i.e. a dozen a day at mainnet's
+rate.
+
+Of 17 keyless endpoints surveyed on the exact block dRPC refuses, **one** served
+it: `eth.merkle.io` (200, 7.2 MB, 1.04 s). It rate-limits under sustained load,
+which is precisely why it belongs *behind* dRPC — at one block in 600 it is
+never under load. The others were rate-limited, unauthorized, or did not
+whitelist the method.
+
+Two failure modes this turned up, both worth keeping in mind beyond this repo:
+
+- **`reqwest` sends no `User-Agent`, and Cloudflare-fronted endpoints 403 that.**
+  Every check that qualified merkle.io was run with `curl`, which always sends
+  one — so the endpoint benchmarked perfectly by hand and was unusable from the
+  binary, which is the worst possible combination for diagnosis. **Validate an
+  endpoint with the client that will actually call it.**
+- **Strict startup verification made the fallback worse than none.** The first
+  cut verified `eth_chainId` on every endpoint and treated any failure as fatal,
+  so a transient 403 from the *backup* aborted startup on a server holding a
+  36 GB state file that had cost 33 minutes to build. Strictness is now by
+  position: a chain-id **mismatch** is fatal anywhere (another chain's blocks
+  would corrupt the database), an unreachable **primary** is fatal, and an
+  unreachable **fallback** is a warning — it stays in the chain marked
+  unverified and is chain-checked before any of its data is believed, so
+  "temporarily down" never becomes "silently trusted".
+
+**Trust note:** the default feed set is now two operators rather than one. Both
+see only *which blocks* this server fetches — never which account a user
+queried, which is the PIR property and is unaffected. Reconciliation still runs
+against publicnode, a third independent operator, so the never-wrong-answer
+backstop does not share an operator with either feed.

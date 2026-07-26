@@ -102,9 +102,11 @@ the trade you want:
 
 Client compute is not the constraint: a full lookup is **10 ms** at 1 M accounts
 (three segments, single-threaded wasm, no SIMD), and expanding `A` from its seed
-at startup is another ~0.2 s. At the complete ~100 M-account mainnet set the hint
-would be **588 MB** — past what a web page should ask for, which is where
-`risepir-rpc client` on a real machine takes over.
+at startup is another ~0.2 s. At the **actual** complete mainnet set —
+200,503,969 accounts, measured 2026-07-26, not the ~100 M once assumed here —
+the hint is **830.73 MB**, and a client holds **1.66 GB** resident once `A` is
+expanded alongside it (`docs/numbers.md` §4c). That is past what a web page
+should ask for, and is where `risepir-rpc client` on a real machine takes over.
 
 **What the page tells the visitor** (all of it enforced, none of it decorative):
 the deployment's mode (complete ⇒ absence is exactly `0`; partial ⇒ absence is an
@@ -122,9 +124,24 @@ without any address — the server still cannot tell which one, if any, is queri
 ### Gates
 
 ```bash
-node web/test/e2e.mjs     http://127.0.0.1:8645   # protocol, in a real wasm host
-node web/test/browser.mjs http://127.0.0.1:8645   # the page, in headless Chromium
+node web/test/e2e.mjs     http://127.0.0.1:8645          # protocol, in a real wasm host
+node web/test/browser.mjs http://127.0.0.1:8645          # the page, in headless Chromium
+node web/test/browser.mjs http://127.0.0.1:8645 --mock   # + the mock's exact seeded values
 ```
+
+**Both need Node ≥ 22.** There is no `package.json` in this repo (deliberate —
+the gates take no dependencies), so older Node treats `web/pir.js` as CommonJS
+and the import fails *before any test runs*, with a `SyntaxError: Named export
+'PirError' not found` that looks nothing like a version problem. Node ≥ 22
+detects module syntax on its own. The deployment VM ships Node 18, so run the
+gates from a workstation — which is also the more honest test, since it
+measures what a visitor's first load actually costs.
+
+`--mock` asserts the mock deployment's exact seeded balances. Without it the
+gate checks the *shape* of the answer and its block label, which is what any
+real deployment can promise; `/mode` alone cannot distinguish "the mock" from
+"the complete mainnet set", and conflating them made the gate fail against a
+perfectly correct mainnet deployment (PR #9).
 
 `e2e.mjs` drives the real wasm through the real `web/pir.js` and asserts, among
 other things, that the module's **only** import is the entropy shim (it cannot
@@ -209,9 +226,24 @@ gcloud storage cp 'gs://yourname-risepir/balances-*.csv.gz' ./snapshot/
 gcloud storage rm -r gs://yourname-risepir          # stop the meter
 ```
 
-Result: sharded `balances-000000000000.csv.gz …` files, ~3–5 GB total, rows of
+Result: sharded `balances-000000000000.csv.gz …` files, rows of
 `address,eth_balance` — exactly what `--snapshot` ingests (gzip and the header row
 are handled; anything malformed hard-fails with file:line rather than guessing).
+
+**Recorded run, 2026-07-26** (this is the gate output the live deployment was
+built from, not an estimate):
+
+```
+nonzero_accounts   200503969
+snapshot_block     25613233
+dataset_head_time  2026-07-25 23:59:59      # fresh: the previous UTC day's close
+```
+
+The intermediate table is 200,503,969 rows / 12.1 GB; the extract is **321
+shards totalling 5.64 GiB** gzipped. Pull them straight onto the server rather
+than via a laptop — same-region `gcloud storage cp` moved all 321 in **13 s at
+669 MiB/s**, and the VM needs only the `devstorage.read_only` scope it already
+has. Delete the bucket afterwards to stop the meter.
 
 ### 2.2 Run the server
 
@@ -236,14 +268,39 @@ since the save. `Ctrl-C` saves state before exiting.
 
 ### 2.3 Hardware / cost
 
-| deployment | accounts | RAM needed | a $0 way to run it |
+**These numbers were revised upward on 2026-07-26**, when the gate query was
+first actually run rather than estimated. Mainnet has **200,503,969** nonzero
+accounts — not the ~100–130 M this table assumed — and the geometry is driven by
+a power-of-two segment count, so 200.5 M rounds up to 2^25 buckets per segment
+and the server DB lands at **35.43 GB**, roughly 3× the old estimate. The
+earlier "16 GB floor" was wrong by more than 2×; anyone who provisioned from it
+would have OOMed after paying for a 5.6 GB download and a 12-minute ingest.
+
+| deployment | accounts | RAM needed | how to run it |
 |---|---:|---:|---|
 | `--partial` demo | ≤4 M tracked | ~1 GB | any laptop |
-| complete mainnet | ~100–130 M nonzero | server DB ~10–13 GB + hints/A ~3 GB ⇒ **16 GB floor, 24 GB comfortable** | Oracle Cloud Always Free (4-OCPU/24 GB Ampere A1, when capacity is available) — else a ~€13/mo 16 GB VPS |
+| complete mainnet | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h. Oracle's 24 GB Always Free tier **can no longer hold the complete set** |
 | RPC usage | — | — | dRPC + publicnode keyless tiers (the follow loop is ~5–10 requests/min steady-state) |
 
+Disk, not just RAM: the state file is ~36 GB, and `save` writes `<path>.tmp`
+before renaming, so a machine that keeps the previous state file needs **~75 GB
+free for state alone** — plus 5.7 GB of snapshot shards and the build tree.
+250 GB is comfortable.
+
 Run the gate query first — `nonzero_accounts` fixes the real number; the geometry
-line the server prints before allocating is the commitment.
+line the server prints before allocating is the commitment. At the complete set
+it reads:
+
+```
+risepir-rpc mainnet: geometry for 200503969 accounts: 100663296 buckets, server DB 35.43 GB, load 0.498
+```
+
+The load factor of 0.498 (rather than the 0.75 target) is that power-of-two
+rounding: 200.5 M accounts need 66,834,657 buckets, which rounds up to
+3 × 2^25 = 100,663,296. Account growth is therefore **free up to 301,989,888
+accounts** — the same geometry, the same 35.43 GB, at which point load reaches
+exactly the 0.75 target — and the step after that doubles the DB to 70.9 GB.
+Budget the machine for the step, not for today's count.
 
 ## 3. Pointing a wallet at it
 
@@ -496,21 +553,29 @@ answers *plaintext account queries* by design, so exposing it publicly
 hands every visitor's queried address to the network (ADR-0012's warning,
 one layer up).
 
-**Cost hygiene:** `gcloud compute instances stop risepir` when idle (only the
-disk's ~$4/mo keeps billing against credit); `…delete` to zero it;
+**Cost hygiene:** this matters far more since the box became an `e2-highmem-8`
+for the complete set — it burns **~$8.60/day** running, against ~$10/mo for the
+250 GB disk when stopped. `gcloud compute instances stop risepir` when idle
+(always `Ctrl-C` the server first and wait for `state saved; exiting`, so the
+restart is a file load rather than a re-bootstrap); `…delete` to zero it;
 `gcloud billing projects describe risepir-poc` / the console's Billing page shows
-credit burn-down. After the credit: switch the same VM to Spot
-(~$18–30/mo for 16 GB) or move to Oracle's free tier.
+credit burn-down. After the credit: switch the same VM to Spot (~$95–130/mo at
+64 GB) — Oracle's free tier is no longer an option at this size.
 
 ### Which cloud, if the goal is spending nothing
 
-| option | complete-set (16–24 GB) cost | notes |
+Re-costed 2026-07-26 against the real working set (~38 GB, §2.3). **The complete
+set no longer has a $0 option** — every free tier tops out at 24 GB, below the
+floor. The rows below are what it actually costs:
+
+| option | complete-set (48–64 GB) cost | notes |
 |---|---|---|
-| AWS on-demand (`r7g.large`) | ≈ $77/mo + $2.4 EBS | most convenient for you (aws-cli ready); no free tier at this RAM |
-| AWS spot (`r7g.large`) | ≈ $23–35/mo | interruptions are cheap here (state file + catch-up) |
-| GCP (`e2-highmem-2`) + new-account $300 credit | ≈ $0 for ~3–4 months | you need a GCP account for the BigQuery export anyway; same-region GCS→VM snapshot copy is free |
-| Oracle Cloud Always Free (4 OCPU/24 GB Ampere) | $0 indefinitely | genuinely free; signup/capacity availability is famously flaky |
-| this MacBook (16 GB) | $0 | complete set fits only marginally (~13–16 GB working set) — fine for partial, risky for complete |
+| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment runs on**; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
+| GCP `e2-highmem-8`, stopped when idle | ~$10/mo disk only | the honest way to run a demo box: start it for a session, `Ctrl-C` to save state, stop it |
+| AWS on-demand (`r7g.2xlarge`, 64 GB) | ≈ $0.43/h ≈ $310/mo | no free tier remotely near this RAM |
+| AWS spot (`r7g.2xlarge`) | ≈ $95–130/mo | interruptions are cheap here (state file + catch-up replay) |
+| Oracle Cloud Always Free (4 OCPU/**24 GB**) | $0 | **no longer sufficient** — 24 GB cannot hold a 35.43 GB DB |
+| this MacBook (16 GB) | $0 | partial mode only; the complete set is 2.4× its total RAM |
 
 The partial demo runs on anything ≥2 GB, including AWS free-tier-class instances.
 
@@ -692,12 +757,81 @@ gates re-run against the public origin (13/13 and 20/20), the CLI client driven
 over the public URL, and the harness race that only a non-loopback origin
 exposed.
 
+### 5.3 The COMPLETE mainnet set, live (2026-07-26)
+
+**Stage 1.d, done.** The deployment at `https://private-eth-getbalance.duckdns.org`
+serves the complete nonzero-balance set — every one of mainnet's 200,503,969
+funded accounts — not the partial demo. `GET /mode` returns `1`.
+
+Machine: GCP `e2-highmem-8` (8 vCPU / 62 GB usable, 250 GB pd-balanced),
+upgraded in place from the `e2-medium` that ran the partial demo.
+
+**Bootstrap, end to end (~33 min of CPU):**
+
+| step | measured |
+|---|---|
+| gate query | 200,503,969 nonzero accounts; snapshot block 25,613,233; dataset head `2026-07-25 23:59:59` |
+| export | 321 shards, 5.64 GiB gzipped; GCS→VM in **13 s at 669 MiB/s** |
+| geometry (printed before allocating) | `100663296 buckets, server DB 35.43 GB, load 0.498` |
+| snapshot ingest | **734 s** — 200,503,969 rows, 200,503,969 nonzero, **0 zero skipped**, max balance 88,453,361,538,334,634,086,007,430 wei |
+| PIR setup (one-time) | **1236.5 s** at block 25,613,233 — all 8 cores busy (load avg 7.99), RSS 32.5 GB |
+| state file | **36,264,209,243 B (36.26 GB)** |
+| peak RSS | **~37 GB** of 62 GB |
+| restart from state | **135.8 s** — "block 25613849, 200510802 accounts, complete set" |
+
+**Correctness, against an independent provider.** `rpc.flashbots.net` — neither
+the feed (dRPC/merkle) nor the in-loop reconciler (publicnode), and the only
+surveyed keyless endpoint serving *archive* `eth_getBalance`, which is what a
+still-catching-up server needs to be checked against:
+
+- **11/11 private `eth_getBalance` byte-exact**, each at an explicit height,
+  through a `risepir-rpc client` doing the real PIR path (query → answer →
+  rewind → joint-mask scan).
+- Two of those were accounts **absent** from the set, answering exactly `0x0`
+  and matching the provider's `0x0` — and a never-funded address likewise
+  `0x0`. This is the complete-set semantic the partial deployment is forbidden
+  to offer (ADR-0015/0017), demonstrated live.
+
+**Both browser gates green against the public origin** (Node ≥ 22 required, §1.5):
+
+- `e2e.mjs`: **0 failing checks**, reporting `mode=COMPLETE pinned=25613989
+  arity=3 setup=830.73 MB` — the computed §4c figure, confirmed on the wire.
+- `browser.mjs`: **11/11**, including "an absent address in a complete set
+  shows 0 and explains that absence means zero", no CSP violations and no
+  uncaught page errors. The page boots in **153 s** over the public internet at
+  this scale (vs seconds at 49 MB), and holds ~1.66 GB — it works, and it is
+  emphatically the point at which the CLI client is the better tool.
+
+**Two things that went wrong, both now fixed in code:**
+
+1. **The follow loop wedged permanently at block 25,613,828** — dRPC's free
+   plan refuses that block deterministically (`HTTP 408`), and since a block
+   may never be skipped the loop retried it 55 times and stopped advancing.
+   Fixed by ordered feed fallbacks (ADR-0024, PRs #7/#8). The first cut of that
+   fix then aborted startup on a transient fallback `403`, on a server holding
+   the 36 GB state file — hence the by-position strictness now documented in
+   the ADR.
+2. **The co-located `:8545` front end stalled during catch-up** with
+   `server is resyncing (the client fell behind the server's retained delta
+   window)`. Fast replay outruns the delta ring, and the bootstrapped-at-startup
+   client never recovers. It fails loudly rather than answering wrongly — the
+   contract holds — but **a long catch-up leaves the co-located front end
+   unusable until restarted**. A freshly started client (CLI or a browser
+   reload) is unaffected, which is how the verification above was run.
+
+**Also worth knowing:** in-loop reconciliation is *silently unavailable*
+throughout a catch-up from an old snapshot — publicnode's keyless tier refuses
+archive depths, so every checkpoint logs a fetch failure rather than a
+comparison (685 of them in the first hour). No mismatch was ever reported, but
+"no mismatch" means "not checked" here, not "checked and agreed". The
+independent verification above exists precisely because that backstop was down.
+
 ## 6. Who does what, explicitly
 
 | step | who | needs |
 |---|---|---|
 | build (`cargo build --release`) | either of us | access to the pinned `bao-ninh-orochi/IKPIR` repo |
 | §1 partial demo, end to end | either of us (already done, §5) | nothing |
-| §2.1 gate query + export | **you** (Google account; I have no GCP access from this environment) | BigQuery sandbox; billing (or $300 credit) for the export step only |
-| §2.2 complete-mainnet run | either of us, on the 16–24 GB box | the shards + the two gate numbers |
+| §2.1 gate query + export | ~~**you**~~ — **done 2026-07-26**, driven from this environment after `gcloud services enable bigquery.googleapis.com` (the project already had billing, so no separate Google-account step was needed after all) | BigQuery + a GCS bucket on the same project |
+| §2.2 complete-mainnet run | **done 2026-07-26** — live on the 64 GB box (§5.3) | the shards + the two gate numbers |
 | wallet demo | either of us | §1 or §2 running |

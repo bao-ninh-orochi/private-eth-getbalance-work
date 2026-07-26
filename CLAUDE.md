@@ -97,9 +97,12 @@ client compiled to wasm **in the page**, so the address never leaves the
 browser. Same origin as the PIR transport on purpose (no CORS, no mixed
 content, `connect-src 'self'` CSP). Assets are read once at startup — restart
 after editing `web/*`. First load is the whole product constraint: 49 MB at
-`--partial-capacity 1000000`, 588 MB at the complete mainnet set (which is
-where the CLI `client` takes over). Its residual trust — you trust whoever
-serves the page — is stated on the page itself, not just in the ADR.
+`--partial-capacity 1000000`, but **830.73 MB at the real complete mainnet set**
+(200,503,969 accounts, measured 2026-07-26 — the "588 MB" once quoted here was
+computed against an assumed ~130 M). A complete-set client also holds **1.66 GB**
+resident once `A` is expanded. That is where the CLI `client` takes over. Its
+residual trust — you trust whoever serves the page — is stated on the page
+itself, not just in the ADR.
 
 Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
 operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
@@ -108,33 +111,45 @@ operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
 
 ## The live GCP deployment
 
-Project **`risepir-poc`**, VM **`risepir`** (`e2-medium`, Debian 12,
-`us-central1-a`); repo at `~/private-ETH-getBalance`, server runs in tmux
-session `risepir` with `--state ~/risepir-state.bin`, logs at `~/server.log`.
-The Mac's `gcloud` + `gh` are authenticated; the VM is drivable
-non-interactively:
+Project **`risepir-poc`**, VM **`risepir`** (**`e2-highmem-8`, 8 vCPU / 64 GB,
+250 GB disk**, Debian 12, `us-central1-a`); repo at `~/private-ETH-getBalance`,
+server runs in tmux session `risepir` with `--state ~/risepir-state.bin`, logs
+at `~/server-complete.log`. The Mac's `gcloud` + `gh` are authenticated; the VM
+is drivable non-interactively.
+
+Since **2026-07-26 it serves the COMPLETE mainnet set** — all 200,503,969
+nonzero accounts, `GET /mode` = 1 — not the partial demo. That is what the
+64 GB machine is for: the server DB alone is 35.43 GB (ADR-0023). It costs
+**~$8.60/day running**, so stop it when idle.
 
 It is **public** at <https://private-eth-getbalance.duckdns.org> (Caddy + Let's
 Encrypt in front of a loopback-only `:8645`; deploy.md §3.7). Only 80/443 are
-open — `:8545` and `:8645` are never reachable from outside.
+open — `:8545` and `:8645` are never reachable from outside (re-verified
+2026-07-26).
 
 ```bash
 gcloud --quiet compute ssh risepir --command='...'
 # resume after a stop — the DNS refresh comes first, the IP just changed:
 gcloud compute instances start risepir
 gcloud --quiet compute ssh risepir --command='~/duckdns-update.sh'
+# normal restart: the 36 GB state file is loaded, then missed blocks replay
 gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
-  "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet --partial \
-   --partial-capacity 1000000 --web web --state ~/risepir-state.bin >> ~/server.log 2>&1"'
+  "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet \
+   --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
 ```
 
 The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
 signalling it never involves a wrapper shell. `--web web` is what serves the
-browser front end at all, and `--partial-capacity 1000000` is what keeps its
-first load at 49 MB rather than 99 MB. With a state file present the server
-loads it and replays the missed blocks — which after a long stop is thousands
-of `debug_traceBlockByNumber` calls against a keyless endpoint, so for a demo
-today prefer moving the stale file aside and re-bootstrapping empty (loss-free).
+browser front end at all.
+
+**A state file present means `--snapshot` is silently ignored** (`mainnet.rs`
+prints a note and loads the file). That is the trap to know: leaving the old
+*partial* state file in place would have brought the server back up in PARTIAL
+mode while every flag on the command line said complete. Re-bootstrapping from
+the snapshot means moving the state file aside first — and at the complete set
+that costs a full **~33 min** (12 min ingest + 21 min PIR setup), so prefer the
+state file. `~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.
+
 (The external IP changes across stop/start — hence `duckdns-update.sh`, whose
 empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel
 doesn't care either: `gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
@@ -143,16 +158,18 @@ Stopping the meter — in this order:
 
 ```bash
 gcloud --quiet compute ssh risepir \
-  --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 20 && tail -1 ~/server.log'
-#   → wait for "state saved; exiting"
+  --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 90 && tail -1 ~/server-complete.log'
+#   → wait for "state saved; exiting" — at the complete set this writes 36 GB,
+#     so allow well over the 20 s that sufficed in partial mode
 gcloud compute instances stop risepir
 ```
 
 The **anchored** pattern matters: a broad `pkill -f risepir-rpc` also kills the
 tmux wrapper shell, tmux then SIGHUPs the pane group, and the server dies
 mid-save with a 0-byte `.tmp` (this happened on 2026-07-19; harmless in partial
-mode, but a complete-set deployment would lose a multi-hour bootstrap's fast
-restart). When checking from `gcloud … --command`, bracket the pattern
-(`pgrep -f "risepir-rp[c]"`) or the probe matches its own ssh wrapper. VM SSH
-key and the GitHub account key `risepir-gcp-vm` are already set up; the VM
-burns ~$0.80/day of trial credit while running, ~$4/mo stopped (disk only).
+mode, but **now genuinely expensive** — a complete-set re-bootstrap is ~33 min
+of CPU plus the catch-up replay). When checking from `gcloud … --command`,
+bracket the pattern (`pgrep -f "risepir-rp[c]"`) or the probe matches its own
+ssh wrapper. VM SSH key and the GitHub account key `risepir-gcp-vm` are already
+set up; at `e2-highmem-8` the VM burns **~$8.60/day** while running (up from
+~$0.80/day as an `e2-medium`), ~$10/mo stopped (250 GB disk only).

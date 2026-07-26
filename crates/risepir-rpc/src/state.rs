@@ -164,7 +164,10 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
         w.write_all(&(setup_bytes.len() as u64).to_le_bytes()).map_err(io_err)?;
         w.write_all(&setup_bytes).map_err(io_err)?;
 
-        let cells = server.snapshot_cells();
+        // Borrowed, never `snapshot_cells()`: at the complete mainnet set
+        // the cell array is ~35 GB, so copying it here would double peak
+        // RSS at exactly the moment the process is already at its largest.
+        let cells = server.cells();
         w.write_all(&(cells.len() as u64).to_le_bytes()).map_err(io_err)?;
         let mut chunk = Vec::with_capacity(CHUNK_CELLS * 4);
         for block in cells.chunks(CHUNK_CELLS) {

@@ -238,8 +238,29 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// [`Self::setup`], [`Self::num_items`], and the value codec, exactly
     /// what a state file must persist for [`Self::from_parts`] to
     /// reassemble this server.
+    ///
+    /// At the complete mainnet set this array is ~35 GB, so a caller that
+    /// only *reads* the cells (state serialization, above all) must use
+    /// [`Self::cells`] instead — see that method.
     pub fn snapshot_cells(&self) -> Vec<u32> {
         self.store.snapshot_cells()
+    }
+
+    /// The store's flat cell array, borrowed — the read-only twin of
+    /// [`Self::snapshot_cells`], with identical contents.
+    ///
+    /// # Why this exists
+    ///
+    /// The cell array is the whole PIR database: `num_buckets *
+    /// bucket_size * cells_per_slot` `u32`s, which at the complete
+    /// mainnet set (200.5 M accounts, 100 663 296 buckets) is **35.4 GB**.
+    /// `snapshot_cells` allocates a second one, so any caller that copies
+    /// merely to read — as state serialization did — doubles the
+    /// process's peak RSS to ~73 GB and decides what machine the
+    /// deployment needs. Streaming from this borrow keeps a state save
+    /// allocation-free.
+    pub fn cells(&self) -> &[u32] {
+        self.store.as_cells()
     }
 
     /// Number of `(address, balance)` entries currently stored.

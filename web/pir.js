@@ -17,14 +17,21 @@
 // decoded and scanned. So:
 //
 //   1. GET  /head                 where is the server now?
-//   2. GET  /sync?from&to         fold the public delta in
-//   3. POST /answer               LWE query out, LWE response in
+//   2. GET  /sync?from&to&epoch   fold the public delta in
+//   3. POST /answer?epoch         LWE query out, LWE response in
 //   4. (sync again if the server moved during 3) then finish
 //
 // Step 4's second sync is not paranoia: a block can land between the /head
 // read and the /answer, and the wasm module refuses to finish against a
 // span it cannot prove (it returns an error naming the block, and this
 // file syncs and retries once). Nothing here guesses.
+//
+// `epoch` is the hint-lineage token (ADR-0033), read off the /setup
+// response at load() and echoed on every /sync and /answer: a server that
+// was re-bootstrapped onto a different hint since this page's /setup
+// answers 409 (surfaced as StaleSetupError → "reload the page") instead
+// of feeding this client deltas that would decode to garbage against its
+// hint — garbage a complete-mode client could surface as a wrong 0x0.
 
 /// Status codes returned by `risepir_finish` — see crates/risepir-wasm.
 export const STATUS = Object.freeze({
@@ -139,7 +146,7 @@ export class PirSession {
 
   // ── HTTP ─────────────────────────────────────────────────────────────
 
-  async #get(path, { onProgress, intoWasm } = {}) {
+  async #get(path, { onProgress, intoWasm, onResponse } = {}) {
     const resp = await this.#fetch(`${this.#base}${path}`);
     if (resp.status === 409) {
       throw new StaleSetupError(await resp.text());
@@ -147,6 +154,10 @@ export class PirSession {
     if (!resp.ok) {
       throw new PirError(`GET ${path}: ${resp.status} ${await resp.text()}`);
     }
+    // After the status checks, before any body byte: the one caller that
+    // uses this (load()) reads response *headers* whose meaning is
+    // defined only for a 200.
+    if (onResponse) onResponse(resp);
     if (!intoWasm) {
       return new Uint8Array(await resp.arrayBuffer());
     }
@@ -188,6 +199,11 @@ export class PirSession {
       headers: { "content-type": "application/octet-stream" },
       body,
     });
+    if (resp.status === 409) {
+      // /answer's lineage gate (ADR-0033) — same recovery as a stale
+      // /sync: only a fresh /setup is sound.
+      throw new StaleSetupError(await resp.text());
+    }
     if (!resp.ok) {
       throw new PirError(`POST ${path}: ${resp.status} ${await resp.text()}`);
     }
@@ -196,17 +212,50 @@ export class PirSession {
 
   // ── lifecycle ────────────────────────────────────────────────────────
 
-  /// GET /mode then GET /setup, in that order — the completeness flag is
-  /// loaded before the client exists, and the wasm module refuses to
-  /// initialise without it, so "absent means zero" can never be a
-  /// browser-side default (ADR-0015/0017).
+  /// One GET /setup: the completeness flag is read from that response's
+  /// own `x-risepir-mode` header (ADR-0033) — mode and bundle from one
+  /// atomic response, so the pair cannot straddle a server restart — and
+  /// the wasm module still refuses to initialise without the flag, so
+  /// "absent means zero" can never be a browser-side default
+  /// (ADR-0015/0017). A server predating the header gets the old
+  /// two-request sequence as a fallback (`GET /mode`), which reopens
+  /// exactly the pre-ADR-0033 race and nothing more.
   async load({ onProgress } = {}) {
-    const mode = await this.#get("/mode");
-    if (this.exports.risepir_set_mode(this.#writeIn(mode)) !== 0) {
-      throw new PirError(`GET /mode: ${this.#lastError()}`);
+    let modeSet = false;
+    const streamed = await this.#get("/setup", {
+      onProgress,
+      intoWasm: true,
+      onResponse: (resp) => {
+        const m = resp.headers.get("x-risepir-mode");
+        if (m === "0" || m === "1") {
+          // Buffer-free setter on purpose: this fires while the same
+          // response's body is about to stream into the wasm input
+          // buffer, which risepir_set_mode would clobber.
+          if (this.exports.risepir_set_mode_byte(m === "1" ? 1 : 0) !== 0) {
+            throw new PirError(`x-risepir-mode: ${this.#lastError()}`);
+          }
+          modeSet = true;
+        } else if (m !== null) {
+          // A garbled flag is fatal, never defaulted: it decides whether
+          // absence means 0x0.
+          throw new PirError(`x-risepir-mode header was ${JSON.stringify(m)} (expected "0" or "1")`);
+        }
+      },
+    });
+    if (!modeSet) {
+      // Legacy server. Deliberately after the /setup download: /mode is
+      // fetched without touching the wasm input buffer (plain
+      // arrayBuffer path) and set via the buffer-free setter, so the
+      // setup bytes already streamed in stay intact.
+      const mode = await this.#get("/mode");
+      if (!(mode.length === 1 && (mode[0] === 0 || mode[0] === 1))) {
+        throw new PirError(`GET /mode returned ${mode.length} bytes; expected exactly one byte, 0 or 1`);
+      }
+      if (this.exports.risepir_set_mode_byte(mode[0]) !== 0) {
+        throw new PirError(`GET /mode: ${this.#lastError()}`);
+      }
     }
 
-    const streamed = await this.#get("/setup", { onProgress, intoWasm: true });
     let len;
     if (streamed instanceof Uint8Array) {
       len = this.#writeIn(streamed);
@@ -219,6 +268,15 @@ export class PirSession {
     }
     // The setup bundle is the biggest thing this page ever holds twice.
     this.exports.risepir_in_release();
+
+    // The lineage token every /sync and /answer must echo (ADR-0033) —
+    // derived by the wasm from the bundle's own seeds, so it cannot
+    // disagree with what was just initialised.
+    const elen = this.exports.risepir_epoch();
+    if (elen < 0n) {
+      throw new PirError(`epoch: ${this.#lastError()}`);
+    }
+    this.epoch = new TextDecoder().decode(this.#readOut());
     return this;
   }
 
@@ -256,11 +314,13 @@ export class PirSession {
     return out;
   }
 
-  /// Fold the public delta over (pendingHead, to] into the client.
+  /// Fold the public delta over (pendingHead, to] into the client. The
+  /// epoch param is the lineage gate (ADR-0033): the server 409s rather
+  /// than feed this client another bootstrap's deltas.
   async #syncTo(to) {
     const from = this.pendingHead;
     if (to <= from) return;
-    const bytes = await this.#get(`/sync?from=${from}&to=${to}`);
+    const bytes = await this.#get(`/sync?from=${from}&to=${to}&epoch=${this.epoch}`);
     this.traffic.deltaBytes += bytes.length;
     const head = this.exports.risepir_ingest(this.#writeIn(bytes));
     if (head < 0n) {
@@ -288,7 +348,7 @@ export class PirSession {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    const response = await this.#post("/answer", query);
+    const response = await this.#post(`/answer?epoch=${this.epoch}`, query);
     this.traffic.responseBytes = response.length;
     const atBlock = e.risepir_answer(this.#writeIn(response));
     if (atBlock < 0n) throw new PirError(this.#lastError());

@@ -92,18 +92,26 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
     let codec = crate::mainnet::value_codec();
     let pir_client = PirHttpClient::new(cfg.pir_url.clone());
 
-    let complete = match pir_client.mode().await {
-        Ok(m) => m,
-        Err(e) => die(format!("GET /mode from {}: {e}", cfg.pir_url)),
-    };
     eprintln!(
         "risepir-rpc client: downloading setup bundle from {} (A + hints; ~100 MB per 1M accounts) ...",
         cfg.pir_url
     );
     let started = std::time::Instant::now();
-    let setup_bundle = match pir_client.setup().await {
-        Ok(b) => b,
+    // Mode and bundle from one atomic `/setup` response where the server
+    // provides `x-risepir-mode` (ADR-0033); a separate `GET /mode` only as
+    // the fallback for servers predating the header. See
+    // `PirHttpClient::setup_with_mode` for why the pair must not straddle
+    // two requests.
+    let (setup_bundle, header_mode) = match pir_client.setup_with_mode().await {
+        Ok(pair) => pair,
         Err(e) => die(format!("GET /setup from {}: {e}", cfg.pir_url)),
+    };
+    let complete = match header_mode {
+        Some(m) => m,
+        None => match pir_client.mode().await {
+            Ok(m) => m,
+            Err(e) => die(format!("GET /mode from {}: {e}", cfg.pir_url)),
+        },
     };
     let pinned_block = setup_bundle.block;
     eprintln!(

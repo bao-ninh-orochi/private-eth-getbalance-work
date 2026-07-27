@@ -1008,26 +1008,40 @@ so these numbers are never mistaken for a production measurement:
   amortizing the encode over roughly half the ring instead of every block.
   [`DeltaRing`] gained a `pub const fn capacity(&self)` accessor so this
   arithmetic never has to duplicate the constructor's argument.
-- **`ETag` / `304`, honestly caveated.** `GET /setup` sets
-  `ETag: "setup-<block>"` and `Cache-Control: no-cache` (always revalidate,
-  never "don't store"); a matching `If-None-Match` gets `304 Not Modified`
-  with no body. Checked against the same freshness decision that already
-  gates the `200` path rather than a second, separately-maintained check, a
-  `304` is therefore only ever returned for a bundle the ring can still
-  bridge forward — correct by construction, not by a second proof. Browsers
-  cap how large a single disk-cache entry they will store, so an 831 MB
-  response may simply never be cached client-side at the complete-mainnet
-  scale, and the `304` path may only pay off for smaller deployments. It
-  costs nothing either way, so it stays.
+- **`ETag` / `304`, honestly caveated.** `GET /setup` sets an `ETag` and
+  `Cache-Control: no-cache` (always revalidate, never "don't store"); a
+  matching `If-None-Match` gets `304 Not Modified` with no body. Checked
+  against the same freshness decision that already gates the `200` path
+  rather than a second, separately-maintained check, a `304` is therefore
+  only ever returned for a bundle the ring can still bridge forward —
+  correct by construction, not by a second proof. **[REVISED by ADR-0033]**
+  As shipped here the validator was `"setup-<block>"`, and the by-construction
+  argument only holds within one process lifetime: block numbers repeat
+  across re-bootstraps, so a block-only validator could `304`-revalidate
+  *another lineage's* bundle whenever the heights coincided. ADR-0033 folds
+  the lineage epoch into the validator (`"setup-<epoch>-<block>"`), which
+  closes that across restarts too. Browsers cap how large a single
+  disk-cache entry they will store, so an 831 MB response may simply never
+  be cached client-side at the complete-mainnet scale, and the `304` path
+  may only pay off for smaller deployments. It costs nothing either way, so
+  it stays.
 - **`wire::encode_setup` now pre-sizes its buffer.** At ~277 MB per segment,
   the doubling-growth reallocations `Vec::new()` + repeated
   `extend_from_slice` used to pay would copy hundreds of MB and transiently
   hold two buffers alive at once. The exact final length is now computed up
-  front from `bundle.backend_params` alone (never `bundle.hints`, never a
-  hardcoded constant), with a `debug_assert_eq!` against the length actually
-  written — which doubles as an invariant check that every hint's real
-  length still matches `lwe_dim * reshape_row_width`. This is paid at most
-  once per cache regeneration now, rather than once per request.
+  front by walking the bundle itself (never a hardcoded constant), with a
+  `debug_assert_eq!` against the length actually written. The per-segment
+  hint contribution is **measured from `hint.data.len()`, deliberately not
+  derived from `lwe_dim × reshape_row_width`**: deriving it would quietly
+  make the *encoder* a validity check on its input, and it is not one —
+  this crate's own decoder tests legitimately encode hand-built bundles
+  whose hints do not match their geometry, precisely so the *decoder* can
+  be seen to reject them (`setup_encoded_len`'s doc comment records this).
+  An earlier revision of this entry claimed the opposite ("from
+  `backend_params` alone, never `bundle.hints`"), describing an
+  intermediate design that did not survive review — corrected here rather
+  than left to contradict the code. This is paid at most once per cache
+  regeneration now, rather than once per request.
 
 Bandwidth exhaustion from many legitimate-*looking* `/setup` fetches is still
 a real concern for a public deployment; that defense belongs entirely to the
@@ -1069,7 +1083,13 @@ matter.** If a deployment were restarted from complete to partial, a client that
 kept `strict_not_found = false` would answer `0x0` for an account that is merely
 untracked — a silently wrong balance, which this project calls total failure
 (ADR-0015/0017). Re-reading `/mode` costs one small request on a path that is
-already downloading the hint.
+already downloading the hint. **[REVISED by ADR-0033]** As two separate
+requests, the re-fetched pair could itself straddle a server restart
+(mode from one deployment, bundle from the other — a milliseconds-wide
+edge, but the same mixed state in miniature); the mode now rides the
+`/setup` response itself (`x-risepir-mode`), so both come from one
+response, and the separate `GET /mode` request survives only as a
+fallback against servers predating the header.
 
 **One retry, never a loop.** Against a server replaying faster than a client can
 bootstrap, a loop would spin forever while re-downloading the hint each time —
@@ -1364,3 +1384,81 @@ essentially any device's budget (even a 2 GB phone's 1 GB, at
 `USABLE_MEMORY_FRACTION`) — so `web/test/browser.mjs`, which only ever
 runs against `mock`, exercises the same `boot()` path it always has, with
 one cheap `HEAD` round trip ahead of it.
+
+### ADR-0033 — Every delta and answer is gated on a hint-lineage epoch; mode rides the setup response **[NEW]**
+
+**Chosen:** derive a 16-hex **lineage epoch** from the setup bundle's
+per-segment LWE seeds and reshape dimensions
+(`risepir_http::wire::lineage_epoch`, first 8 bytes of keccak256 — computed
+identically by the server at `NodeState::new` and by every client from the
+bundle it decoded). `GET /sync` and `POST /answer` require the client to echo
+it (`?epoch=`) and answer **409** on a missing or mismatched value;
+`GET /delta/{block}` requires it in the URL and answers **404** otherwise
+(that endpoint is `Cache-Control: immutable`, so its identity has to live in
+the URL — `(epoch, block)` never collides across lineages the way bare
+`block` does). `GET /setup`'s validator becomes `"setup-<epoch>-<block>"`,
+and the response carries `x-risepir-epoch` plus `x-risepir-mode`, so a
+client takes the completeness flag and the bundle from **one** response;
+`GET /head` carries `x-risepir-epoch` as a cheap change signal. The CLI
+(`PrivateEth`) treats an `/answer` 409 exactly like a stalled sync — one
+re-bootstrap, then an honest error (ADR-0029); the browser maps any 409 to
+`StaleSetupError` ("reload the page").
+
+**Rejected:** a per-process random nonce persisted in the state file (a new
+`RPST` field for something the persisted seeds already encode); an epoch
+inside the wire bundle body (a format break for every existing client, where
+headers and query params are purely additive); trusting the delta-ring
+window alone (below); and grandfathering in epoch-less requests (a
+"compatibility" hole that would never close — the deployed clients all ship
+from this repo, and an old browser tab heals itself with one reload).
+
+**Why the ring window is not enough.** ADR-0019 deferred client-side hint
+caching on the argument that "a re-bootstrapped server starts an empty ring,
+so a stale-lineage hint gets a 409 rather than a wrong answer". That is true
+at the moment of restart and false shortly after: the new process replays
+from its snapshot/state toward the head, and once its ring has grown back
+over the old client's pinned block `P` (`floor ≤ P ≤ head`, a window that
+lasts for the entire time the replay head is within 600 blocks of `P` —
+tens of minutes at complete-set replay speed), `GET /sync?from=P&to=head`
+is served normally. The layouts of two bootstraps genuinely differ —
+`segmented_cuckoo` picks start positions, slots, and eviction victims via
+`rand::rng()` (nondeterministic per process), and `server_setup` samples
+fresh LWE seeds — so those deltas are meaningless against the old client's
+hint: cells shift, the fingerprint scan misses, `Lookup::NotFound` comes
+back, and a **complete**-mode client maps that to `0x0`. A silently wrong
+balance, reachable by an open browser tab across an operator
+re-bootstrap. The same coincidence-of-heights hole existed in ADR-0028's
+block-only `ETag` (a `304` blessing another lineage's cached bundle) and in
+`POST /answer` (a response decoded against the wrong hint when
+`pending_head` happens to equal the answering head). One token closes all
+three.
+
+**Why the LWE seeds are the right token.** They are already: random per
+bootstrap (`server_setup` samples fresh seeds; there is no injection path —
+`docs/verification.md`), persisted in the state file (so a restart from
+state — the *same* lineage, whose deltas genuinely are compatible — keeps
+its epoch), stable across `full_rebuild` (which re-derives hints for the
+same lineage), and present in the wire bundle (clients re-expand `A` from
+them). Nothing new is minted, persisted, or trusted: the epoch is a pure
+function both sides compute from bytes they already hold, and the reshape
+dimensions are folded in so any future geometry re-derivation without
+re-seeding still changes it.
+
+**Compatibility.** Purely additive on the wire (headers + query params), no
+state-file or bundle-format change; the deployed VM's state file loads
+unchanged. On the first redeploy, clients from before this ADR (open browser
+tabs; older CLI builds) get one 409 — the browser shows the existing
+"reload the page" guidance, the CLI re-bootstraps once and then reports
+honestly. That one-time interruption is the entire migration cost, and it
+is honest-by-construction: those clients *cannot prove* their lineage, so
+refusing them is the correct posture, not a courtesy outage.
+
+**What this unblocks.** Client-side persistent hint caching (ADR-0019's
+deferral; `docs/HANDOFF.md`'s top open item) is now sound unconditionally:
+a cached bundle revalidates against a lineage-qualified validator, and even
+a stale cache that skipped revalidation is caught at its first `/sync` or
+`/answer`. Pinned by `crates/risepir-http/tests/epoch.rs` (notably:
+a ring-covered range requested with the other lineage's epoch is refused;
+a block-only validator never revalidates) and
+`crates/risepir-rpc/tests/rebootstrap.rs` (the 409 → re-bootstrap → correct
+answer path).

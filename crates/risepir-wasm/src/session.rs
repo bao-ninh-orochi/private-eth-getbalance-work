@@ -164,6 +164,14 @@ pub struct Session {
     plaintext_bits: u32,
     /// Server-declared: does it hold the complete nonzero-balance set?
     complete: bool,
+    /// The lineage token of the bundle this session bootstrapped from
+    /// ([`wire::lineage_epoch`], ADR-0033) — 16 lowercase-hex chars the
+    /// host must attach as `?epoch=` to every `/sync` and `/answer`
+    /// request, so the server refuses (409) to feed this session another
+    /// bootstrap's deltas or answers (which would decode to garbage
+    /// against this hint, and garbage can surface as a silent `0x0` in
+    /// complete mode).
+    epoch: String,
     /// The block the client's accumulated `ΔD` currently reaches. Tracked
     /// here for the same reason `PrivateEth` tracks its own copy:
     /// `RisePirClient` keeps it as accumulator-internal bookkeeping and
@@ -196,6 +204,7 @@ impl Session {
         let plaintext_bits = bundle.params.plaintext_bits;
         let reshape_row_width_per_seg: Vec<u32> =
             bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+        let epoch = wire::lineage_epoch(&bundle.backend_params);
         let pinned_block = bundle.block;
 
         let client = RisePirClient::from_setup(bundle, value_codec());
@@ -206,6 +215,7 @@ impl Session {
             arity,
             plaintext_bits,
             complete,
+            epoch,
             pending_head: pinned_block,
             pinned_block,
             in_flight: None,
@@ -215,6 +225,11 @@ impl Session {
     /// Whether the deployment declared a complete nonzero-balance set.
     pub const fn complete(&self) -> bool {
         self.complete
+    }
+    /// The bundle's lineage token (16 lowercase-hex chars) — see the
+    /// field's docs; the host attaches this to `/sync` and `/answer`.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
     }
     /// The block the hint is pinned at.
     pub const fn pinned_block(&self) -> u64 {

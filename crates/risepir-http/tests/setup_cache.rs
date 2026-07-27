@@ -140,7 +140,11 @@ async fn setup_is_encoded_once_and_served_byte_identically() {
     assert_eq!(b2, b3);
     assert_eq!(e1, e2);
     assert_eq!(e2, e3);
-    assert_eq!(e1.as_deref(), Some("\"setup-0\""), "ETag names the pinned block");
+    assert_eq!(
+        e1.as_deref(),
+        Some(format!("\"setup-{}-0\"", state.epoch()).as_str()),
+        "ETag names the lineage epoch and the pinned block (ADR-0033)"
+    );
 
     assert_eq!(
         state.setup_generation(),
@@ -198,7 +202,7 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
     apply_blocks(&state, &mut feed, 1).await;
     let head = head_block(&app).await;
     assert!(head > second_block);
-    let (status, _) = get(&app, &format!("/sync?from={second_block}&to={head}")).await;
+    let (status, _) = get(&app, &format!("/sync?from={second_block}&to={head}&epoch={}", state.epoch())).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -207,7 +211,7 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
 
     // And the stale one genuinely is not bridgeable any more — which is
     // exactly why it had to be regenerated.
-    let (status, _) = get(&app, &format!("/sync?from={first_block}&to={head}")).await;
+    let (status, _) = get(&app, &format!("/sync?from={first_block}&to={head}&epoch={}", state.epoch())).await;
     assert_eq!(
         status,
         StatusCode::CONFLICT,
@@ -242,7 +246,7 @@ async fn a_client_bootstrapped_from_a_cached_bundle_still_answers_exactly() {
 
     // Sync the client from the cached bundle's block up to the head.
     let head = head_block(&app).await;
-    let (status, body) = get(&app, &format!("/sync?from=0&to={head}")).await;
+    let (status, body) = get(&app, &format!("/sync?from=0&to={head}&epoch={}", state.epoch())).await;
     assert_eq!(status, StatusCode::OK);
     let delta =
         risepir_proto::codec::decode_block_delta(&body, params.plaintext_bits, arity as u32).expect("decode_block_delta");
@@ -261,7 +265,7 @@ async fn a_client_bootstrapped_from_a_cached_bundle_still_answers_exactly() {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/answer")
+                        .uri(format!("/answer?epoch={}", state.epoch()))
                         .body(Body::from(wire::encode_query_bundle(&queries)))
                         .unwrap(),
                 )

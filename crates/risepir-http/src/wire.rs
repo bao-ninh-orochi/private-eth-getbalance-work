@@ -211,6 +211,53 @@ fn mul_u32_saturating_usize(a: u32, b: u32) -> usize {
     usize::try_from(u64::from(a) * u64::from(b)).unwrap_or(usize::MAX)
 }
 
+// ─── Lineage epoch ───────────────────────────────────────────────────────
+
+/// Sixteen lowercase-hex characters identifying the *hint lineage* these
+/// [`SimpleServerParams`] belong to (ADR-0033): the first 8 bytes of
+/// `keccak256` over every segment's LWE seed and reshape dimensions, in
+/// segment order.
+///
+/// # Why this is a lineage identity
+///
+/// `SimplePirBackend::server_setup` samples a fresh random 16-byte seed
+/// per segment on every bootstrap (there is no way to inject one —
+/// `docs/verification.md`), and the seeds are persisted in the state file
+/// and survive both restarts and `RisePirServer::full_rebuild`. So two
+/// server processes share all their seeds exactly when they descend from
+/// the same bootstrap — which is also exactly when their SCF cell layouts
+/// agree (the layout is nondeterministic per bootstrap: `segmented_cuckoo`
+/// picks slots and eviction victims via `rand::rng()`) and their deltas
+/// are therefore interchangeable. The reshape dimensions are folded in so
+/// that any future change that re-derives geometry without re-seeding
+/// still changes the epoch.
+///
+/// # Who calls this
+///
+/// Both sides, from the same bytes: the server once at
+/// `NodeState::new` (from the params it will serve in `GET /setup`), and
+/// every client from the params it decoded out of that same bundle. The
+/// two can only agree, or the client's copy of the bundle is not the one
+/// this server serves — which is precisely what `/sync` and `/answer` use
+/// the epoch to detect (ADR-0033).
+pub fn lineage_epoch(params: &[SimpleServerParams]) -> String {
+    let mut material = Vec::with_capacity(params.len() * (16 + 4 * 4));
+    for sp in params {
+        material.extend_from_slice(&sp.params.seed);
+        material.extend_from_slice(&sp.n_rows.to_le_bytes());
+        material.extend_from_slice(&sp.row_width.to_le_bytes());
+        material.extend_from_slice(&sp.reshape_rows.to_le_bytes());
+        material.extend_from_slice(&sp.reshape_row_width.to_le_bytes());
+    }
+    let digest = risepir_proto::keccak256_bytes(&material);
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        use std::fmt::Write;
+        write!(out, "{byte:02x}").expect("writing hex to a String cannot fail");
+    }
+    out
+}
+
 // ─── SetupBundle ─────────────────────────────────────────────────────────
 
 /// Encodes a full [`SetupBundle<SimplePirBackend>`] — everything a fresh
@@ -238,7 +285,7 @@ pub fn encode_setup(bundle: &SetupBundle<SimplePirBackend>) -> Vec<u8> {
         "encode_setup: arity {arity} does not fit the u8 scheme byte"
     );
 
-    // Pre-size from the bundle's own geometry (see `setup_encoded_len`'s
+    // Pre-size by measuring the bundle (see `setup_encoded_len`'s
     // docs) instead of growing `out` by repeated `extend_from_slice`: at
     // the deployed complete-mainnet scale a single segment's hint is
     // ~277 MB, and `Vec`'s doubling growth would otherwise copy hundreds

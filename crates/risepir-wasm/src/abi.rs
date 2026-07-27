@@ -194,6 +194,25 @@ pub extern "C" fn risepir_set_mode(len: usize) -> i32 {
     0
 }
 
+/// [`risepir_set_mode`] without the input-buffer round trip: sets the
+/// completeness flag directly from `value` (`0` partial / `1` complete;
+/// anything else is [`STATUS_ERROR`]). Exists for the `x-risepir-mode`
+/// header path (ADR-0033), where the host learns the mode from the
+/// `/setup` response's *headers* while that same response's *body* is
+/// being streamed into the input buffer — going through
+/// [`risepir_set_mode`] there would clobber the body bytes mid-stream.
+#[unsafe(no_mangle)]
+pub extern "C" fn risepir_set_mode_byte(value: u32) -> i32 {
+    clear_err();
+    if value > 1 {
+        return set_err(format!(
+            "mode must be 0 (partial) or 1 (complete), got {value} — the completeness flag is never guessed"
+        ));
+    }
+    MODE.with(|m| *m.borrow_mut() = Some(vec![value as u8]));
+    0
+}
+
 /// Ingest `GET /setup`'s body and build the client. Returns `0`, or
 /// [`STATUS_ERROR`] (including when [`risepir_set_mode`] has not run —
 /// the completeness flag is required, never assumed).
@@ -228,6 +247,23 @@ pub extern "C" fn risepir_complete() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn risepir_pinned_block() -> u64 {
     with_session(|s| Ok(s.pinned_block())).unwrap_or(u64::MAX)
+}
+
+/// Write the session's lineage token (ADR-0033; 16 lowercase-hex ASCII
+/// bytes) to the output buffer, returning its length — the host attaches
+/// it as `?epoch=` to every `/sync` and `/answer` request. On an
+/// uninitialised session, [`STATUS_ERROR`] as an `i64`.
+#[unsafe(no_mangle)]
+pub extern "C" fn risepir_epoch() -> i64 {
+    clear_err();
+    match with_session(|s| Ok(s.epoch().as_bytes().to_vec())) {
+        Ok(bytes) => {
+            let n = bytes.len() as i64;
+            put_out(bytes);
+            n
+        }
+        Err(e) => i64::from(set_err(e)),
+    }
 }
 
 /// The block the accumulated delta reaches — the `from` for the next

@@ -496,3 +496,45 @@ fn a_corrupted_response_never_becomes_a_wrong_balance() {
     }
     assert!(caught > 0, "wholesale corruption was never caught; the integrity checks went unexercised");
 }
+
+// ── lineage epoch (ADR-0033) ───────────────────────────────────────────
+
+/// `risepir_epoch` must hand the host exactly the token
+/// `wire::lineage_epoch` derives from the served bundle — the value the
+/// server's `/sync`/`/answer` gate compares against, so any disagreement
+/// here would wedge every browser lookup behind spurious 409s.
+#[test]
+fn epoch_matches_the_wire_derivation_and_needs_a_session() {
+    // Before init: an error, not a made-up token.
+    assert_eq!(risepir_epoch(), i64::from(STATUS_ERROR), "no session ⇒ no epoch");
+
+    let server = build_server();
+    init(&server, true);
+
+    let n = risepir_epoch();
+    assert!(n > 0, "epoch: {}", last_error());
+    let epoch = String::from_utf8(output()).expect("epoch is ASCII hex");
+    assert_eq!(epoch.len(), 16, "16 lowercase-hex chars");
+    assert!(epoch.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert_eq!(
+        epoch,
+        wire::lineage_epoch(&server.setup().backend_params),
+        "host-visible epoch must equal the derivation from the same bundle"
+    );
+}
+
+/// `risepir_set_mode_byte` (the buffer-free header path, ADR-0033):
+/// accepts exactly 0/1 — never defaults a garbled flag — and satisfies
+/// `risepir_init`'s mode requirement just like `risepir_set_mode`.
+#[test]
+fn set_mode_byte_validates_and_initialises() {
+    assert_eq!(risepir_set_mode_byte(2), STATUS_ERROR, "2 is not a mode");
+    assert_eq!(risepir_set_mode_byte(u32::MAX), STATUS_ERROR);
+
+    let server = build_server();
+    assert_eq!(risepir_set_mode_byte(0), 0, "set_mode_byte(0): {}", last_error());
+    let setup = setup_bytes(&server);
+    let n = put_input(&setup);
+    assert_eq!(risepir_init(n), 0, "init after set_mode_byte: {}", last_error());
+    assert_eq!(risepir_complete(), 0, "mode 0 = partial must stick");
+}

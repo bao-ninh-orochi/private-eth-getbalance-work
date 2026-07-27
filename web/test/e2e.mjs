@@ -156,6 +156,11 @@ console.log(
 
 check("entropy shim was called during setup or is ready", session.entropy.calls >= 0);
 check("pinned block is a real block", session.pinnedBlock >= 0n);
+check(
+  "the lineage epoch is exposed for /sync and /answer (ADR-0033)",
+  /^[0-9a-f]{16}$/.test(session.epoch),
+  `epoch=${JSON.stringify(session.epoch)}`,
+);
 
 // ── 4. a real lookup ──────────────────────────────────────────────────
 

@@ -63,6 +63,13 @@ pub(crate) struct Session {
     /// answer, so `NotFound` becomes [`RpcError::NotInTrackedSet`]
     /// instead. Erroring is fine; a silently wrong `0x0` is not.
     strict_not_found: bool,
+    /// The lineage token of the bundle this session bootstrapped from
+    /// ([`risepir_http::wire::lineage_epoch`], ADR-0033), echoed to
+    /// `/sync` and `/answer` so the server refuses (409) to serve this
+    /// session anything from a *different* bootstrap's lineage — deltas
+    /// or answers that would decode to garbage against this hint, which
+    /// complete mode could surface as a silent `0x0`.
+    epoch: String,
 }
 
 impl Session {
@@ -80,6 +87,7 @@ impl Session {
         let plaintext_bits = bundle.params.plaintext_bits;
         let reshape_row_width_per_seg: Vec<u32> =
             bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+        let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
         let pending_head = bundle.block;
         let client = RisePirClient::from_setup(bundle, value_codec);
         Self {
@@ -89,6 +97,7 @@ impl Session {
             plaintext_bits,
             reshape_row_width_per_seg,
             strict_not_found: !complete,
+            epoch,
         }
     }
 }
@@ -291,7 +300,23 @@ impl PrivateEth {
         self.sync_to(session, server_head).await?;
 
         let (queries, ctx) = session.client.build_query(key);
-        let (responses, at_block) = self.pir.answer(&queries, &session.reshape_row_width_per_seg, session.arity).await?;
+        let (responses, at_block) = match self
+            .pir
+            .answer(&queries, &session.epoch, &session.reshape_row_width_per_seg, session.arity)
+            .await
+        {
+            Ok(ok) => ok,
+            // A 409 from `/answer` is the server's lineage gate
+            // (ADR-0033): this session's epoch is no longer the one being
+            // served — the same "only a fresh /setup is sound" condition
+            // a stalled `/sync` reports, reachable here when the server
+            // re-bootstraps *between* this call's sync and its answer. Map
+            // it to the same variant so `get_balance`'s single
+            // rebootstrap-and-retry covers it; any other status stays a
+            // plain transport error.
+            Err(risepir_http::ClientError::Status { status: 409, .. }) => return Err(RpcError::Stalled),
+            Err(e) => return Err(e.into()),
+        };
 
         // See `Self::get_balance`'s docs' "second, load-bearing sync"
         // reasoning (`docs/plan.md` ADR-0006): bring the session's
@@ -348,9 +373,12 @@ impl PrivateEth {
     /// for an account the now-partial deployment simply has not tracked
     /// yet, which is a silently wrong balance: exactly what `docs/plan.md`'s
     /// "never return a wrong answer" invariant forbids (ADR-0015/0017).
-    /// So `complete` is always re-derived from a fresh `GET /mode` here,
-    /// in the same breath as the new hint, never carried over from the
-    /// session being replaced.
+    /// So `complete` is always re-derived here, never carried over from
+    /// the session being replaced — and since ADR-0033 it is read from
+    /// the *same* `/setup` response as the hint (`x-risepir-mode`), so
+    /// the pair cannot even straddle a server restart; a separate
+    /// `GET /mode` is only ever a fallback against servers predating the
+    /// header.
     ///
     /// # Errors
     ///
@@ -360,8 +388,18 @@ impl PrivateEth {
     /// error.
     async fn rebootstrap(&self, session: &mut Session) -> Result<(), RpcError> {
         let old_pinned = session.pending_head;
-        let complete = self.pir.mode().await?;
-        let bundle = self.pir.setup().await?;
+        // Mode and bundle from ONE response (`x-risepir-mode`, ADR-0033)
+        // whenever the server provides it — a separate `GET /mode` can
+        // race a server restart and pair one deployment's completeness
+        // policy with another's data. The fallback second request exists
+        // only for servers predating the header, which cannot be
+        // distinguished from-the-wire from "no header"; the race window
+        // it reopens is the pre-ADR-0033 status quo, not a regression.
+        let (bundle, header_mode) = self.pir.setup_with_mode().await?;
+        let complete = match header_mode {
+            Some(m) => m,
+            None => self.pir.mode().await?,
+        };
         let new_session = Session::from_bundle(bundle, self.value_codec, complete);
         let new_pinned = new_session.pending_head;
         *session = new_session;
@@ -391,7 +429,11 @@ impl PrivateEth {
         if target <= session.pending_head {
             return Ok(());
         }
-        match self.pir.sync(session.pending_head, target, session.plaintext_bits, session.arity as u32).await? {
+        match self
+            .pir
+            .sync(session.pending_head, target, &session.epoch, session.plaintext_bits, session.arity as u32)
+            .await?
+        {
             Some(delta) => {
                 let new_head = delta.block;
                 session.client.ingest_delta(&delta)?;

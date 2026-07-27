@@ -85,6 +85,7 @@ async fn setup_head_and_answer_round_trip_over_real_http() {
     assert_eq!(bundle.block, 0);
     let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
     let arity = bundle.params.arity();
+    let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
 
     assert_eq!(pir.head().await.expect("GET /head"), 0, "no blocks applied yet");
 
@@ -92,7 +93,7 @@ async fn setup_head_and_answer_round_trip_over_real_http() {
     let addr = MockFeed::address_for(0); // a real genesis address
     let (queries, ctx) = client.build_query(&addr);
 
-    let (responses, at_block) = pir.answer(&queries, &reshape_row_width_per_seg, arity).await.expect("POST /answer");
+    let (responses, at_block) = pir.answer(&queries, &epoch, &reshape_row_width_per_seg, arity).await.expect("POST /answer");
     assert_eq!(at_block, 0);
     let result = client.finish(&addr, &ctx, responses, at_block).expect("finish");
     assert_eq!(result, Lookup::Found(feed.balance_of(&addr)));
@@ -153,6 +154,7 @@ async fn sync_pulls_a_real_delta_over_http() {
     let plaintext_bits = bundle.params.plaintext_bits;
     let arity = bundle.params.arity();
     let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
 
     for _ in 0..10 {
@@ -163,7 +165,7 @@ async fn sync_pulls_a_real_delta_over_http() {
     assert_eq!(head, 10);
 
     let delta = pir
-        .sync(0, head, plaintext_bits, arity as u32)
+        .sync(0, head, &epoch, plaintext_bits, arity as u32)
         .await
         .expect("GET /sync")
         .expect("sync must be Some: within the retention window");
@@ -173,7 +175,10 @@ async fn sync_pulls_a_real_delta_over_http() {
     // with the mock's exact ground truth.
     let live_addr = *feed.live_keys().first().expect("at least one live key");
     let (queries, ctx) = client.build_query(&live_addr);
-    let (responses, at_block) = pir.answer(&queries, &reshape_row_width_per_seg, arity).await.expect("POST /answer");
+    let (responses, at_block) = pir
+        .answer(&queries, &epoch, &reshape_row_width_per_seg, arity)
+        .await
+        .expect("POST /answer");
     let result = client.finish(&live_addr, &ctx, responses, at_block).expect("finish");
     assert_eq!(result, Lookup::Found(feed.balance_of(&live_addr)));
 
@@ -183,25 +188,53 @@ async fn sync_pulls_a_real_delta_over_http() {
     // ring here has capacity 300 and only 10 blocks have ever been
     // pushed, so `to=200` (beyond the current head) exercises the
     // "requested range outside the retained window" 409 path.
-    let out_of_window = pir.sync(0, 200, plaintext_bits, arity as u32).await.expect("GET /sync (out of window)");
+    let out_of_window = pir
+        .sync(0, 200, &epoch, plaintext_bits, arity as u32)
+        .await
+        .expect("GET /sync (out of window)");
     assert_eq!(out_of_window, None, "409 must map to Ok(None), never Err or a fabricated delta");
+
+    // A wrong lineage token is the *other* 409 (ADR-0033): same
+    // `Ok(None)` mapping — the caller's recovery (a fresh /setup) is
+    // identical, and a fabricated delta would be exactly the
+    // cross-lineage wrong-answer channel the gate exists to close.
+    let wrong_epoch = pir
+        .sync(0, head, "0000000000000000", plaintext_bits, arity as u32)
+        .await
+        .expect("GET /sync (wrong epoch)");
+    assert_eq!(wrong_epoch, None, "an epoch mismatch must map to Ok(None), never a delta");
 }
 
 /// `PirHttpClient::head`/`setup`/`answer` against a server that returns a
 /// non-2xx status (a malformed `/answer` body triggers the server's own
 /// `400 Bad Request`) must surface as `ClientError::Status`, never a panic
-/// and never silently treated as success.
+/// and never silently treated as success. The epoch must be the real one:
+/// the lineage gate runs *before* body validation, so a wrong token would
+/// exercise the 409 path instead of the 400 this test pins.
 #[tokio::test]
 async fn non_200_status_surfaces_as_client_error() {
     let (base, _feed) = spawn_node().await;
     let pir = PirHttpClient::new(&base);
+    let bundle = pir.setup().await.expect("GET /setup");
+    let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
 
     let err = pir
-        .answer(&[], &[], 0)
+        .answer(&[], &epoch, &[], 0)
         .await
         .expect_err("an empty query bundle mismatches this deployment's arity and must 400");
     match err {
         risepir_http::ClientError::Status { status, .. } => assert_eq!(status, 400),
         other => panic!("expected ClientError::Status, got {other:?}"),
+    }
+
+    // With a stale-lineage token the same call is refused at the gate —
+    // `409`, before any body validation (ADR-0033).
+    let err = pir
+        .answer(&[], "0000000000000000", &[], 0)
+        .await
+        .expect_err("a wrong epoch must 409 at the lineage gate");
+    match err {
+        risepir_http::ClientError::Status { status, .. } => assert_eq!(status, 409),
+        other => panic!("expected ClientError::Status(409), got {other:?}"),
     }
 }

@@ -63,6 +63,20 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// end in a partial deployment, not a chain index.
 pub const RECENT_CAPACITY: usize = 128;
 
+/// Response header carrying [`NodeState::epoch`] (the hint-lineage token,
+/// [`wire::lineage_epoch`], ADR-0033) on `GET /setup` and `GET /head`.
+/// Clients echo the value back as the `?epoch=` query param on `/sync`,
+/// `/answer`, and `/delta/{block}`.
+pub const HEADER_EPOCH: &str = "x-risepir-epoch";
+
+/// Response header carrying the deployment mode (`"0"` partial / `"1"`
+/// complete) on `GET /setup` — the same flag `GET /mode` serves as a body
+/// byte, duplicated onto the setup response so a client can read the
+/// mode and the bundle from one atomic response instead of racing two
+/// requests against a server restart (ADR-0033; the race is the mixed
+/// `strict_not_found`/hint pair ADR-0029's notes accept).
+pub const HEADER_MODE: &str = "x-risepir-mode";
+
 /// Point-in-time snapshot of the cross-provider reconciliation check's own
 /// health — what `GET /healthz` reports (see that handler's doc comment for
 /// the wire format) and what the follow loop in `risepir-rpc` updates after
@@ -245,6 +259,26 @@ pub struct NodeState {
     /// instrumentation (see [`Self::setup_generation`]); nothing in this
     /// crate's own request handling reads it.
     setup_generation: AtomicUsize,
+
+    /// This deployment's hint-lineage identity
+    /// ([`wire::lineage_epoch`], ADR-0033), fixed at construction: a pure
+    /// function of the per-segment LWE seeds (random per bootstrap,
+    /// persisted in the state file), so it is stable across restarts of
+    /// the *same* lineage and differs across re-bootstraps.
+    ///
+    /// `GET /sync`, `POST /answer`, and `GET /delta/{block}` all require
+    /// the caller to present this value and refuse to serve across a
+    /// mismatch. Without that check, a client holding a hint from a
+    /// *previous* bootstrap could catch a `200` from `/sync` whenever
+    /// this process's replay head passes within ring range of the
+    /// client's pinned block — and mismatched-lineage deltas applied to
+    /// that hint make the fingerprint scan miss, which a complete-mode
+    /// client maps to `0x0`: a silently wrong balance, the one absolutely
+    /// forbidden failure. Layouts genuinely differ per bootstrap
+    /// (`segmented_cuckoo` picks slots and eviction victims via
+    /// `rand::rng()`), so this is a real, reachable path, not
+    /// belt-and-braces.
+    epoch: String,
 }
 
 impl NodeState {
@@ -261,6 +295,7 @@ impl NodeState {
     ) -> Self {
         // One-time cost, paid once at startup — see the field's docs.
         let backend_params = server.setup().backend_params;
+        let epoch = wire::lineage_epoch(&backend_params);
         Self {
             inner: RwLock::new(Inner {
                 server,
@@ -273,7 +308,14 @@ impl NodeState {
             reconcile: Mutex::new(ReconcileHealth::default()),
             setup_cache: AsyncMutex::new(None),
             setup_generation: AtomicUsize::new(0),
+            epoch,
         }
+    }
+
+    /// This deployment's hint-lineage epoch — see the field's docs and
+    /// ADR-0033. Fixed for the process lifetime.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
     }
 
     /// Record addresses this deployment now tracks, for `GET /recent` —
@@ -639,9 +681,21 @@ impl NodeState {
 // query-processing errors both map to a clean `400 Bad Request` with the
 // error's `Display` text, never a 500 or a panic.
 
-/// `POST /answer`: decode the query bundle, answer at the server's current
-/// head, encode the response bundle. Read lock only.
-async fn answer(State(state): State<Arc<NodeState>>, body: Bytes) -> Response {
+/// `POST /answer?epoch=<lineage>`: decode the query bundle, answer at the
+/// server's current head, encode the response bundle. Read lock only.
+///
+/// The epoch gate ([`epoch_gate`], ADR-0033) runs before any decode: a
+/// response computed by this lineage but decoded against another
+/// lineage's hint is garbage, and if the client's `pending_head` happens
+/// to already equal this server's head (reachable while a re-bootstrapped
+/// server replays past the client's pinned block), nothing later in the
+/// client's pipeline forces the `/sync` that would catch the mismatch —
+/// the garbage decodes straight to a fingerprint miss, which complete
+/// mode maps to `0x0`.
+async fn answer(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery, body: Bytes) -> Response {
+    if let Some(refusal) = epoch_gate(&state, raw.as_deref()) {
+        return refusal;
+    }
     let inner = state.inner.read().await;
     let params = inner.server.params();
     let expected_len_per_seg: Vec<u32> = state.backend_params.iter().map(|sp| sp.reshape_rows).collect();
@@ -660,10 +714,30 @@ async fn answer(State(state): State<Arc<NodeState>>, body: Bytes) -> Response {
     octet_response(StatusCode::OK, wire::encode_response_bundle(&responses, head))
 }
 
-/// `GET /delta/{block}`: the immutable per-block delta, cacheable forever
-/// (ADR-0006), or `404` if this block has aged out of (or never entered)
-/// the retention window. Read lock only.
-async fn delta_by_block(State(state): State<Arc<NodeState>>, Path(block): Path<u64>) -> Response {
+/// `GET /delta/{block}?epoch=<lineage>`: the immutable per-block delta,
+/// cacheable forever (ADR-0006), or `404` if this block has aged out of
+/// (or never entered) the retention window — or if the presented `epoch`
+/// is not this deployment's lineage (missing counts as not matching).
+///
+/// The epoch lives in the *URL* here, deliberately, and the refusal is a
+/// `404` rather than `/sync`-style `409`: this endpoint's contract is
+/// `Cache-Control: immutable`, which is only sound if a given URL can
+/// never serve two different byte strings. Block numbers repeat across
+/// re-bootstraps with different deltas; `(epoch, block)` does not. An
+/// old-lineage URL is thus permanently "no such delta" — exactly what an
+/// immutable cache may remember forever (ADR-0033). Read lock only.
+async fn delta_by_block(
+    State(state): State<Arc<NodeState>>,
+    Path(block): Path<u64>,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    if parse_epoch_param(raw.as_deref()) != Some(state.epoch.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            "no delta at that (epoch, block); re-derive URLs from a fresh /setup's x-risepir-epoch",
+        )
+            .into_response();
+    }
     let inner = state.inner.read().await;
     let plaintext_bits = inner.server.params().plaintext_bits;
     let Some(delta) = inner.per_block.get(&block).cloned() else {
@@ -679,12 +753,19 @@ async fn delta_by_block(State(state): State<Arc<NodeState>>, Path(block): Path<u
     resp
 }
 
-/// `GET /sync?from=<u64>&to=<u64>`: the coalesced delta for `(from, to]`,
-/// or `409 Conflict` if any part of that range has aged out of the
-/// retention window (the client must resync from `/setup`). Unparseable
-/// query params are rejected with `400`, never treated as `0`/silently
-/// ignored. Read lock only.
+/// `GET /sync?from=<u64>&to=<u64>&epoch=<lineage>`: the coalesced delta
+/// for `(from, to]`, or `409 Conflict` if any part of that range has aged
+/// out of the retention window **or** the presented `epoch` is not this
+/// deployment's lineage (missing counts as not-this-lineage; see
+/// [`epoch_gate`], ADR-0033 — a delta from one bootstrap applied to
+/// another bootstrap's hint decodes to garbage, and in complete mode
+/// garbage can surface as a silent `0x0`). Either way the client must
+/// resync from `/setup`. Unparseable query params are rejected with
+/// `400`, never treated as `0`/silently ignored. Read lock only.
 async fn sync(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery) -> Response {
+    if let Some(refusal) = epoch_gate(&state, raw.as_deref()) {
+        return refusal;
+    }
     let Some((from, to)) = raw.as_deref().and_then(parse_sync_query) else {
         return (StatusCode::BAD_REQUEST, "expected query params ?from=<u64>&to=<u64>").into_response();
     };
@@ -709,25 +790,42 @@ async fn sync(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery) -> R
 /// re-cloned and re-encoded per request (ADR-0028; see
 /// [`NodeState::setup_bytes`] for the cache/freshness mechanics).
 ///
-/// Sets `ETag: "setup-<block>"` and `Cache-Control: no-cache` (always
-/// revalidate, *not* "never store") on every response. An `If-None-Match`
-/// that names the bundle currently being served gets `304 Not Modified`
-/// with no body instead. The `304` path is correct *by construction*: it is
-/// checked against the exact block [`NodeState::setup_bytes`] just decided
-/// is still safe to serve, which is exactly a block the ring can still
-/// bridge forward — there is no second, separately-maintained "is this
-/// still valid" check to drift out of sync with the one that already gates
-/// the `200` path.
+/// Sets `ETag: "setup-<epoch>-<block>"` and `Cache-Control: no-cache`
+/// (always revalidate, *not* "never store") on every response. An
+/// `If-None-Match` that names the bundle currently being served gets `304
+/// Not Modified` with no body instead. The `304` path is correct *by
+/// construction*: it is checked against the exact block
+/// [`NodeState::setup_bytes`] just decided is still safe to serve, which
+/// is exactly a block the ring can still bridge forward — there is no
+/// second, separately-maintained "is this still valid" check to drift out
+/// of sync with the one that already gates the `200` path. The lineage
+/// epoch in the validator is what makes that argument hold across a
+/// server *restart* too: block numbers repeat across re-bootstraps, so a
+/// block-only validator could `304`-revalidate another lineage's bundle
+/// whenever the heights coincided (ADR-0033); `(epoch, block)` cannot
+/// collide across lineages.
+///
+/// Also sets `x-risepir-epoch` (the lineage token clients echo back to
+/// `/sync` and `/answer` — though a client can equally re-derive it from
+/// the bundle itself, [`wire::lineage_epoch`]) and `x-risepir-mode` (`"0"`
+/// partial / `"1"` complete). Serving the mode *on* the setup response
+/// means a client can take both from one atomic response instead of
+/// racing a separate `GET /mode` against a server restart — the
+/// mixed-pair window ADR-0029 accepted is closed by reading the header
+/// (ADR-0033).
 ///
 /// `If-None-Match` is attacker-controlled request input: parsed defensively
 /// by [`if_none_match_hits`], never indexed blindly and never a panic on
 /// malformed bytes.
 async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Response {
     let (bytes, block) = state.setup_bytes().await;
-    let etag = format!("\"setup-{block}\"");
-    // `block` is formatted as plain ASCII decimal digits, so this can
-    // never actually contain a byte a `HeaderValue` would reject.
-    let etag_header = HeaderValue::from_str(&etag).expect("etag: ascii digits and hyphens only, always a valid header value");
+    let etag = format!("\"setup-{}-{block}\"", state.epoch);
+    // Epoch is 16 lowercase-hex chars and `block` plain ASCII decimal
+    // digits, so this can never contain a byte a `HeaderValue` rejects.
+    let etag_header = HeaderValue::from_str(&etag).expect("etag: ascii hex, digits and hyphens only, always a valid header value");
+    let epoch_header =
+        HeaderValue::from_str(&state.epoch).expect("epoch: ascii hex only, always a valid header value");
+    let mode_header = HeaderValue::from_static(if state.complete { "1" } else { "0" });
 
     if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
         if if_none_match_hits(inm, &etag) {
@@ -735,6 +833,8 @@ async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Respo
             let h = resp.headers_mut();
             h.insert(header::ETAG, etag_header);
             h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            h.insert(HEADER_EPOCH, epoch_header);
+            h.insert(HEADER_MODE, mode_header);
             return resp;
         }
     }
@@ -743,16 +843,26 @@ async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Respo
     let h = resp.headers_mut();
     h.insert(header::ETAG, etag_header);
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    h.insert(HEADER_EPOCH, epoch_header);
+    h.insert(HEADER_MODE, mode_header);
     resp
 }
 
 /// `GET /head`: the server's current block, as an 8-byte little-endian
-/// `u64` body. Read lock only.
+/// `u64` body, plus an `x-risepir-epoch` header — a cheap way for a
+/// long-lived client to notice a lineage change on its next poll instead
+/// of on its next `/sync` `409` (informational; `/sync`/`/answer` remain
+/// the enforcement points, ADR-0033). Read lock only.
 async fn head(State(state): State<Arc<NodeState>>) -> Response {
     let inner = state.inner.read().await;
     let h = inner.server.block();
     drop(inner);
-    octet_response(StatusCode::OK, h.to_le_bytes().to_vec())
+    let mut resp = octet_response(StatusCode::OK, h.to_le_bytes().to_vec());
+    resp.headers_mut().insert(
+        HEADER_EPOCH,
+        HeaderValue::from_str(state.epoch()).expect("epoch: ascii hex only, always a valid header value"),
+    );
+    resp
 }
 
 /// `GET /mode`: one byte — `1` if this deployment serves the *complete*
@@ -896,6 +1006,51 @@ fn bad_request(err: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_REQUEST, err.to_string()).into_response()
 }
 
+/// Extracts `epoch=<value>` out of a raw query string (order-independent,
+/// other params ignored). `None` when the param is absent — the caller
+/// decides what absence means; it is never defaulted.
+fn parse_epoch_param(raw: Option<&str>) -> Option<&str> {
+    raw?.split('&').find_map(|pair| {
+        let (key, val) = pair.split_once('=')?;
+        (key == "epoch").then_some(val)
+    })
+}
+
+/// The lineage gate (ADR-0033) shared by `/sync` and `/answer`: `None`
+/// when the request's `epoch` query param matches this deployment's, or
+/// `Some(409)` with a distinct message for a missing vs a mismatched
+/// value. Both cases mean the same thing to a client — the bundle it
+/// bootstrapped from is not the lineage this server serves (or it never
+/// learned one), and the only sound recovery is a fresh `/setup` — which
+/// is exactly what every client already does on `409` (the CLI
+/// re-bootstraps, ADR-0029; the browser surfaces "reload the page").
+///
+/// The comparison is over attacker-controlled input, but both sides are
+/// plain `str`s and the epoch is not a secret (it is served openly in
+/// `/setup`'s `ETag` and `x-risepir-epoch`) — nothing here needs
+/// constant-time discipline.
+fn epoch_gate(state: &NodeState, raw_query: Option<&str>) -> Option<Response> {
+    match parse_epoch_param(raw_query) {
+        Some(presented) if presented == state.epoch => None,
+        Some(_) => Some(
+            (
+                StatusCode::CONFLICT,
+                "epoch mismatch: this server was re-bootstrapped onto a different hint lineage \
+                 since your /setup; a full resync via /setup is required",
+            )
+                .into_response(),
+        ),
+        None => Some(
+            (
+                StatusCode::CONFLICT,
+                "missing epoch: this endpoint requires the ?epoch= lineage token from /setup \
+                 (x-risepir-epoch); a full resync via /setup is required",
+            )
+                .into_response(),
+        ),
+    }
+}
+
 /// Parses `from=<u64>&to=<u64>` (order-independent, extra/unknown params
 /// ignored) out of a raw query string. `None` for anything that doesn't
 /// cleanly parse both — the caller maps that to `400`, never guessing a
@@ -943,5 +1098,16 @@ mod tests {
         assert_eq!(parse_sync_query("from=abc&to=5"), None);
         assert_eq!(parse_sync_query("from=1&to=-5"), None);
         assert_eq!(parse_sync_query("garbage"), None);
+    }
+
+    #[test]
+    fn parse_epoch_param_extracts_only_the_epoch_key() {
+        assert_eq!(parse_epoch_param(Some("from=1&to=5&epoch=00ff00ff00ff00ff")), Some("00ff00ff00ff00ff"));
+        assert_eq!(parse_epoch_param(Some("epoch=abc&from=1")), Some("abc"));
+        assert_eq!(parse_epoch_param(Some("epoch=")), Some(""), "an empty value is presented, not absent — it will simply mismatch");
+        assert_eq!(parse_epoch_param(Some("from=1&to=5")), None);
+        assert_eq!(parse_epoch_param(Some("EPOCH=abc")), None, "case-sensitive, like every other param here");
+        assert_eq!(parse_epoch_param(Some("garbage")), None);
+        assert_eq!(parse_epoch_param(None), None);
     }
 }

@@ -15,6 +15,17 @@ pub fn keccak256(addr20: &[u8; 20]) -> AddressHash {
     tiny_keccak::keccak256(addr20)
 }
 
+/// [`keccak256`] over arbitrary bytes — same hash, without the
+/// address-shaped `[u8; 20]` narrowing above (that narrowing is
+/// deliberate for the SCF key path; this variant exists for
+/// non-address material, e.g. the hint-lineage epoch
+/// `risepir-http::wire::lineage_epoch` derives from the per-segment LWE
+/// seeds, ADR-0033). Lives here so `tiny-keccak` stays this workspace's
+/// one keccak dependency, in this one crate.
+pub fn keccak256_bytes(data: &[u8]) -> [u8; 32] {
+    tiny_keccak::keccak256(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

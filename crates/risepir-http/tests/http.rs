@@ -87,10 +87,16 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
     (status, body)
 }
 
-async fn post_answer(app: &axum::Router, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
+async fn post_answer(app: &axum::Router, epoch: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
     let resp = app
         .clone()
-        .oneshot(Request::builder().method("POST").uri("/answer").body(Body::from(body)).unwrap())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/answer?epoch={epoch}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = resp.status();
@@ -113,6 +119,7 @@ async fn setup_head_and_answer_round_trip() {
     assert_eq!(bundle.backend_params.len(), ARITY as usize);
     assert_eq!(bundle.hints.len(), ARITY as usize);
     let expected_len_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let epoch = wire::lineage_epoch(&bundle.backend_params);
 
     // GET /head -> parse an 8-byte LE u64
     let (status, body) = get(&app, "/head").await;
@@ -127,7 +134,7 @@ async fn setup_head_and_answer_round_trip() {
     let (queries, _ctx) = client.build_query(&addr);
     let query_bytes = wire::encode_query_bundle(&queries);
 
-    let (status, body) = post_answer(&app, query_bytes).await;
+    let (status, body) = post_answer(&app, &epoch, query_bytes).await;
     assert_eq!(status, StatusCode::OK);
     let (responses, at_block) = wire::decode_response_bundle(&body, &expected_len_per_seg, ARITY as usize).expect("decode_response_bundle");
     assert_eq!(responses.len(), ARITY as usize);
@@ -289,6 +296,10 @@ async fn apply_block_returns_a_populated_patch_duration() {
 #[tokio::test]
 async fn malformed_answer_body_returns_400_never_panics() {
     let (state, _feed) = build_node();
+    // The real epoch, so every malformed body reaches the *decoder* —
+    // the lineage gate runs first, and a wrong token would turn every
+    // case below into the same 409 without exercising decode at all.
+    let epoch = state.epoch().to_string();
     let app = NodeState::router(state);
 
     let mut prng: u64 = 0x1357_9BDF_2468_ACE0;
@@ -301,7 +312,7 @@ async fn malformed_answer_body_returns_400_never_panics() {
 
     for len in [0usize, 1, 2, 3, 7, 16, 63, 128, 500, 4096] {
         let bytes: Vec<u8> = (0..len).map(|_| next_byte()).collect();
-        let (status, _body) = post_answer(&app, bytes).await;
+        let (status, _body) = post_answer(&app, &epoch, bytes).await;
         // If a handler ever panicked mid-request, `oneshot` (no separate
         // task boundary) would propagate that panic straight through this
         // `.await` and fail the test with an obvious "panicked at" message
@@ -332,6 +343,7 @@ async fn end_to_end_matches_ground_truth() {
     let arity = params.arity();
     let reshape_rows_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_rows).collect();
     let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let epoch = wire::lineage_epoch(&bundle.backend_params);
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
 
     // Drive node.apply_block for ~20 mock blocks, tracking every address
@@ -353,7 +365,7 @@ async fn end_to_end_matches_ground_truth() {
     let head = u64::from_le_bytes(body.as_slice().try_into().unwrap());
     assert_eq!(head, 20);
 
-    let (status, body) = get(&app, &format!("/sync?from=0&to={head}")).await;
+    let (status, body) = get(&app, &format!("/sync?from=0&to={head}&epoch={epoch}")).await;
     assert_eq!(status, StatusCode::OK);
     let delta = risepir_proto::codec::decode_block_delta(&body, params.plaintext_bits, arity as u32).expect("decode_block_delta");
     client.ingest_delta(&delta).expect("ingest_delta");
@@ -369,7 +381,7 @@ async fn end_to_end_matches_ground_truth() {
     for (addr, category) in &samples {
         let (queries, ctx) = client.build_query(addr);
         let query_bytes = wire::encode_query_bundle(&queries);
-        let (status, body) = post_answer(&app, query_bytes).await;
+        let (status, body) = post_answer(&app, &epoch, query_bytes).await;
         assert_eq!(status, StatusCode::OK, "addr {addr:?}");
         let (responses, at_block) =
             wire::decode_response_bundle(&body, &reshape_row_width_per_seg, arity).expect("decode_response_bundle");
@@ -425,14 +437,15 @@ async fn seed_history_makes_seeded_blocks_immediately_servable() {
         .collect();
     state.seed_history(deltas.clone()).await;
 
+    let epoch = state.epoch().to_string();
     for d in &deltas {
-        let (status, body) = get(&app, &format!("/delta/{}", d.block)).await;
+        let (status, body) = get(&app, &format!("/delta/{}?epoch={epoch}", d.block)).await;
         assert_eq!(status, StatusCode::OK, "seeded block {} must be servable", d.block);
         let decoded = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY).expect("decode_block_delta");
         assert_eq!(&decoded, d, "seeded block {} must round-trip byte-exact", d.block);
     }
 
-    let (status, body) = get(&app, "/sync?from=0&to=3").await;
+    let (status, body) = get(&app, &format!("/sync?from=0&to=3&epoch={epoch}")).await;
     assert_eq!(status, StatusCode::OK, "a seeded range must be servable via /sync");
     let coalesced = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY).expect("decode_block_delta");
     assert_eq!(coalesced, BlockDelta::coalesce(&deltas).expect("contiguous by construction"));

@@ -772,6 +772,19 @@ threat model §4.2 and §8.
 - **Client fell behind the delta window** (`-32000 "server is resyncing"`): the
   in-process front-end client resyncs from `/setup` on next use; external PIR
   clients do the same.
+- **Lineage epochs (ADR-0033)**: `/sync`, `/answer`, and `/delta/{block}` now
+  require the `?epoch=` token clients read off `/setup` (`x-risepir-epoch`),
+  and refuse (`409`/`404`) across a mismatch — so a client that survived a
+  server re-bootstrap can never be fed the new lineage's deltas against its
+  old hint (which could decode to a silent wrong `0x0` in complete mode).
+  Operationally: the **first redeploy that crosses this change logs one wave
+  of 409s** from pre-existing clients — open browser tabs show their normal
+  "reload the page" guidance, older CLI builds re-bootstrap once and then
+  error honestly; both heal by re-fetching `/setup` with current code. A
+  restart from the *state file* keeps its epoch (the LWE seeds are
+  persisted), so routine restarts do not invalidate anyone; only a genuine
+  re-bootstrap (fresh snapshot ingest) mints a new lineage — which is
+  exactly when old clients *must* be refused.
 
 ## 5. Recorded live evidence (2026-07-19, this repo at 64b8f9f)
 

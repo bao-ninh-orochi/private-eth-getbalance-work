@@ -66,8 +66,8 @@ const MAX_ANSWER_BODY_BYTES: usize = 64 << 20; // 64 MiB
 /// a few MB at mainnet change rates (deltas telescope, ADR-0005).
 const MAX_SYNC_BODY_BYTES: usize = 1 << 30; // 1 GiB
 /// `/setup`: the one legitimately huge response — the full per-segment
-/// hint set is ~588 MB at the complete mainnet set (`docs/numbers.md`),
-/// so the cap only excludes the absurd.
+/// hint set is 830.73 MB at the complete mainnet set (`docs/numbers.md`
+/// §4c, measured 2026-07-26), so the cap only excludes the absurd.
 const MAX_SETUP_BODY_BYTES: usize = 8 << 30; // 8 GiB
 /// Error bodies are diagnostic text; anything longer is noise.
 const MAX_ERROR_BODY_BYTES: usize = 64 << 10; // 64 KiB
@@ -183,9 +183,46 @@ impl PirHttpClient {
     /// other than `200`) / [`ClientError::Wire`] (a malformed body — see
     /// [`wire::decode_setup`]).
     pub async fn setup(&self) -> Result<SetupBundle<SimplePirBackend>, ClientError> {
+        Ok(self.setup_with_mode().await?.0)
+    }
+
+    /// [`Self::setup`], plus the deployment mode read from the *same*
+    /// response's `x-risepir-mode` header (`Some(true)` complete /
+    /// `Some(false)` partial / `None` when the server predates the header,
+    /// ADR-0033).
+    ///
+    /// Taking the mode from the setup response itself is what makes the
+    /// `(bundle, mode)` pair atomic: a separate `GET /mode` can race a
+    /// server restart and pair one deployment's completeness policy with
+    /// another's data — the mixed state that turns `NotFound` into a
+    /// silently wrong `0x0`. Callers should use this header when present
+    /// and fall back to [`Self::mode`] only when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::setup`]. A malformed (non-`0`/`1`) `x-risepir-mode`
+    /// value is [`ClientError::Wire`] — the completeness flag decides the
+    /// `NotFound` policy, so a garbled one must never be defaulted or
+    /// ignored (`docs/plan.md`'s "never guessed" invariant).
+    pub async fn setup_with_mode(&self) -> Result<(SetupBundle<SimplePirBackend>, Option<bool>), ClientError> {
         let resp = self.http.get(format!("{}/setup", self.base)).send().await?;
+        // Captured before `ok_body` consumes the response, but only
+        // *interpreted* after it has vouched for a `200` — a non-`200`
+        // must surface as its status error, not as a header complaint.
+        let raw_mode = resp.headers().get("x-risepir-mode").map(|v| v.as_bytes().to_vec());
         let bytes = ok_body(resp, MAX_SETUP_BODY_BYTES).await?;
-        Ok(wire::decode_setup(&bytes)?)
+        let mode = match raw_mode.as_deref() {
+            None => None,
+            Some(b"0") => Some(false),
+            Some(b"1") => Some(true),
+            Some(other) => {
+                return Err(ClientError::Wire(format!(
+                    "x-risepir-mode header was {:?} (expected \"0\" or \"1\")",
+                    String::from_utf8_lossy(other)
+                )))
+            }
+        };
+        Ok((wire::decode_setup(&bytes)?, mode))
     }
 
     /// `GET /head`: the server's current block.
@@ -230,29 +267,42 @@ impl PirHttpClient {
         }
     }
 
-    /// `GET /sync?from=<from>&to=<to>`: the coalesced delta for
-    /// `(from, to]`, decoded via [`codec::decode_block_delta`].
+    /// `GET /sync?from=<from>&to=<to>&epoch=<epoch>`: the coalesced delta
+    /// for `(from, to]`, decoded via [`codec::decode_block_delta`].
     ///
-    /// `plaintext_bits` / `arity` are this deployment's geometry — needed
-    /// to decode the delta but not carried by `PirHttpClient` itself (see
-    /// the struct docs); a caller (`risepir-rpc`'s `PrivateEth`) already
-    /// has both from the `SetupBundle` it bootstrapped from.
+    /// `plaintext_bits` / `arity` are this deployment's geometry, and
+    /// `epoch` its lineage token ([`wire::lineage_epoch`] over the same
+    /// bundle, ADR-0033) — all needed per call but not carried by
+    /// `PirHttpClient` itself (see the struct docs); a caller
+    /// (`risepir-rpc`'s `PrivateEth`) already has every one of them from
+    /// the `SetupBundle` it bootstrapped from.
     ///
     /// # Returns
     ///
     /// `Ok(Some(delta))` on `200 OK`. `Ok(None)` on `409 Conflict` — the
     /// server's documented "requested range is outside the retained
-    /// window" response ([`crate::node`]'s `sync` handler docs); the
-    /// caller must fall back to a full resync via [`Self::setup`], never
-    /// treat this as "no change".
+    /// window / not this lineage" responses ([`crate::node`]'s `sync`
+    /// handler docs); the caller must fall back to a full resync via
+    /// [`Self::setup`], never treat this as "no change".
     ///
     /// # Errors
     ///
     /// [`ClientError::Network`] / [`ClientError::Status`] (any status
     /// other than `200`/`409`) / [`ClientError::Wire`] (a malformed
     /// `200`-body).
-    pub async fn sync(&self, from: u64, to: u64, plaintext_bits: u32, arity: u32) -> Result<Option<BlockDelta>, ClientError> {
-        let resp = self.http.get(format!("{}/sync?from={from}&to={to}", self.base)).send().await?;
+    pub async fn sync(
+        &self,
+        from: u64,
+        to: u64,
+        epoch: &str,
+        plaintext_bits: u32,
+        arity: u32,
+    ) -> Result<Option<BlockDelta>, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/sync?from={from}&to={to}&epoch={epoch}", self.base))
+            .send()
+            .await?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             return Ok(None);
         }
@@ -261,28 +311,36 @@ impl PirHttpClient {
         Ok(Some(delta))
     }
 
-    /// `POST /answer`: send a per-segment query bundle (encoded via
-    /// [`wire::encode_query_bundle`]) and decode the response bundle
-    /// (via [`wire::decode_response_bundle`]).
+    /// `POST /answer?epoch=<epoch>`: send a per-segment query bundle
+    /// (encoded via [`wire::encode_query_bundle`]) and decode the response
+    /// bundle (via [`wire::decode_response_bundle`]).
     ///
     /// `reshape_row_width_per_seg` / `arity` are this deployment's
-    /// geometry, needed only to decode the response — see [`Self::sync`]'s
-    /// docs for why `PirHttpClient` takes these as arguments rather than
-    /// storing them.
+    /// geometry, needed only to decode the response, and `epoch` its
+    /// lineage token (ADR-0033) — see [`Self::sync`]'s docs for why
+    /// `PirHttpClient` takes these as arguments rather than storing them.
     ///
     /// # Errors
     ///
     /// [`ClientError::Network`] / [`ClientError::Status`] (any status
     /// other than `200` — in particular, the server's `400 Bad Request`
-    /// for a malformed query surfaces here) / [`ClientError::Wire`].
+    /// for a malformed query, and its `409 Conflict` for a stale-lineage
+    /// `epoch`, both surface here; a caller that can re-bootstrap treats
+    /// the `409` like a stalled sync) / [`ClientError::Wire`].
     pub async fn answer(
         &self,
         queries: &[SimpleQuery],
+        epoch: &str,
         reshape_row_width_per_seg: &[u32],
         arity: usize,
     ) -> Result<(Vec<SimpleResponse>, u64), ClientError> {
         let body = wire::encode_query_bundle(queries);
-        let resp = self.http.post(format!("{}/answer", self.base)).body(body).send().await?;
+        let resp = self
+            .http
+            .post(format!("{}/answer?epoch={epoch}", self.base))
+            .body(body)
+            .send()
+            .await?;
         let bytes = ok_body(resp, MAX_ANSWER_BODY_BYTES).await?;
         Ok(wire::decode_response_bundle(&bytes, reshape_row_width_per_seg, arity)?)
     }

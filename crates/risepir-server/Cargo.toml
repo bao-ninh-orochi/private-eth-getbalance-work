@@ -32,3 +32,10 @@ ikpir-common = { workspace = true, default-features = false }
 # produces the identical sparse delta transcript upstream's own private
 # implementation would. Never a runtime dependency of this crate.
 ikpir-server = { workspace = true }
+# Dev-only: `tests/full_rebuild_alloc.rs`'s `#[global_allocator]`. Its own
+# `unsafe impl GlobalAlloc` cannot live in this crate — `unsafe_code =
+# "forbid"` above applies to every target in this package, integration
+# tests included, and a command-line forbid cannot be locally overridden
+# (see that crate's lib.rs docs) — so the impl is quarantined there
+# instead, and this crate only ever names the resulting safe `static`.
+alloc-tracker = { path = "../alloc-tracker" }

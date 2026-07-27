@@ -617,6 +617,23 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// alone) — `full_rebuild` only ever re-derives hints for the
     /// **existing** geometry.
     ///
+    /// # Memory
+    ///
+    /// Allocates one new `ServerParams`/`HintMaterial`/`Hint` set per
+    /// segment — accumulated in local vectors — while the *previous* set
+    /// stays live in `self.backend_params` / `self.material` /
+    /// `self.hints` until every segment has been rebuilt and the three
+    /// fields are overwritten in one shot at the end. So peak usage is
+    /// roughly **two** hint+material sets at once — hundreds of MB at
+    /// deployment scale — never the ~35 GB cell array itself:
+    /// `self.store.as_cells()` is borrowed below, exactly as [`Self::new`]
+    /// and [`Self::answer`] already do, never copied. Building the new
+    /// set before swapping is deliberate, not an oversight: it is what
+    /// keeps the old, still-answerable state intact for every segment
+    /// right up until this method has proven it can replace all of them,
+    /// rather than leaving `self` holding a half-old-half-new `hints`
+    /// array if something below were to panic partway through arity.
+    ///
     /// # Complexity
     ///
     /// Same as [`Self::new`]: `O(arity × n_rows × lwe_dim × row_width)`.
@@ -626,9 +643,20 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         let row_width = self.params.bucket_size * self.params.cells_per_slot();
         let pb = self.params.plaintext_bits;
         let seg_cells = segment_size as usize * row_width as usize;
-        // Snapshot to avoid a borrow conflict with the writes to
-        // `self.backend_params` / `self.material` / `self.hints` below.
-        let cells: Vec<u32> = self.store.as_cells().to_vec();
+        // Borrowed, not copied: `self.store` is only *read* below, and the
+        // writes further down target the disjoint fields
+        // `self.backend_params` / `self.material` / `self.hints` — the
+        // borrow checker already permits disjoint field borrows of the
+        // same `self`, so there was never a real conflict here to
+        // snapshot around. A copy is not an option at this crate's
+        // deployment scale either way: `self.store.as_cells()` is the
+        // whole PIR database — 35.4 GB at the complete mainnet set (see
+        // [`Self::cells`]) — so a `.to_vec()` here would hold the
+        // original and the copy live simultaneously, taking peak RSS from
+        // ~38 GB to ~73 GB and turning this method's own documented
+        // repair path for a failed [`Self::apply_block`] into the very
+        // OOM it exists to recover from.
+        let cells: &[u32] = self.store.as_cells();
 
         let mut backend_params = Vec::with_capacity(arity);
         let mut material = Vec::with_capacity(arity);

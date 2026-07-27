@@ -100,7 +100,10 @@ type Client = RisePirClient<SimplePirBackend>;
 
 /// This deployment's [`ValueCodec`] — ADR-0009's `key_tag(32) ‖
 /// balance(96) ‖ checksum(16)` = 144-bit value.
-fn value_codec() -> ValueCodec {
+///
+/// `pub(crate)` so `crate::geometry` (ADR-0030) shares this exact codec
+/// rather than redefining a second copy of the same three literals.
+pub(crate) fn value_codec() -> ValueCodec {
     ValueCodec {
         key_tag_bits: KEY_TAG_BITS,
         balance_bits: BALANCE_BITS,

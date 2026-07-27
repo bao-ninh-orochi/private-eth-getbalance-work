@@ -71,7 +71,10 @@ quotes the old figures is stale.
   (`docs/data-acquisition.md` path 3) would bulk-replay the snapshot→head gap if
   the join gets long.
 - Upstream PR candidates (offer, don't block on): batch-mutation API; seed
-  injection in `server_setup` (`docs/verification.md`).
+  injection in `server_setup` (`docs/verification.md`); non-power-of-two
+  `segmented-cuckoo` segment sizes, which is what caps `bucket_size` at 4
+  today (ADR-0030) — `xtask geometry [--fill-check]` is the tool for this
+  question if it comes up again.
 - Optional polish: MetaMask walkthrough screenshots. (~~A public deployment on
   the Oracle free-tier box~~ — public deployment shipped in PR #5 on GCP; the
   Oracle 24 GB free tier can no longer hold the 35.43 GB complete set at all.)

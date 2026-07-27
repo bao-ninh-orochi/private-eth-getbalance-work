@@ -4,6 +4,8 @@
 //! xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]
 //! xtask bench [--write]
 //! xtask web
+//! xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] [--fingerprint-bits <u32>]
+//!                 [--fill-check] [--fill-accounts <u64>]
 //! ```
 //!
 //! `conformance` runs the Stage 0.5 conformance harness (`docs/plan.md`
@@ -17,6 +19,13 @@
 //! reference measured against the pinned IKPIR perf/optimized rev — only overwrite
 //! from that build). Always run with `--release` (see `xtask::bench`'s module
 //! docs for why).
+//!
+//! `geometry` sweeps `risepir_proto::geometry::Geometry` across `arity x
+//! bucket_size` (ADR-0030) — see `xtask::geometry`'s module docs for why
+//! this question keeps coming up. `--fill-check` additionally builds real
+//! `segmented_cuckoo` stores and inserts into them for a small candidate
+//! set (slow; opt-in only, never part of `cargo test`). `<list>` accepts
+//! comma-separated values and/or inclusive ranges, e.g. `2,3,4` or `1-16`.
 
 use xtask::conformance::{self, ConformanceConfig};
 
@@ -25,6 +34,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("conformance") => run_conformance(&args[2..]),
         Some("bench") => run_bench(&args[2..]),
+        Some("geometry") => run_geometry(&args[2..]),
         Some("web") => {
             xtask::web::run();
         }
@@ -45,10 +55,10 @@ fn run_conformance(rest: &[String]) {
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
-            "--blocks" => cfg.blocks = parse_value(rest, &mut i, "--blocks"),
-            "--addresses" => cfg.min_addresses = parse_value(rest, &mut i, "--addresses"),
-            "--seed" => cfg.seed = parse_value(rest, &mut i, "--seed"),
-            "--lwe-dim" => cfg.lwe_dim = parse_value(rest, &mut i, "--lwe-dim"),
+            "--blocks" => cfg.blocks = parse_value("xtask conformance", rest, &mut i, "--blocks"),
+            "--addresses" => cfg.min_addresses = parse_value("xtask conformance", rest, &mut i, "--addresses"),
+            "--seed" => cfg.seed = parse_value("xtask conformance", rest, &mut i, "--seed"),
+            "--lwe-dim" => cfg.lwe_dim = parse_value("xtask conformance", rest, &mut i, "--lwe-dim"),
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -94,24 +104,63 @@ fn run_conformance(rest: &[String]) {
 /// Parses the value following flag `name`, advancing `*i` past both the
 /// flag and its value — mirrors `risepir-rpc`'s own hand-rolled flag
 /// parsing (no `clap` dependency for a handful of optional numeric
-/// flags).
-fn parse_value<T: std::str::FromStr>(args: &[String], i: &mut usize, name: &str) -> T {
+/// flags). `cmd` is only used to name the caller in an error message
+/// (e.g. `"xtask conformance"`, `"xtask geometry"`).
+fn parse_value<T: std::str::FromStr>(cmd: &str, args: &[String], i: &mut usize, name: &str) -> T {
     let Some(raw) = args.get(*i + 1) else {
-        eprintln!("xtask conformance: {name} requires a value");
+        eprintln!("{cmd}: {name} requires a value");
         std::process::exit(2);
     };
     let value = raw.parse().unwrap_or_else(|_| {
-        eprintln!("xtask conformance: {name} got an invalid value: {raw:?}");
+        eprintln!("{cmd}: {name} got an invalid value: {raw:?}");
         std::process::exit(2);
     });
     *i += 2;
     value
 }
 
+/// Parses the value following flag `name` as a comma-separated list of
+/// `u32`s, where each comma-separated token is either a bare integer
+/// (`4`) or an inclusive range (`1-16`, expanded in full) — so
+/// `--bucket-size 1-16` and `--bucket-size 1,2,3,...,16` mean the same
+/// thing. Advances `*i` past both the flag and its value, exactly like
+/// [`parse_value`].
+fn parse_u32_list(cmd: &str, args: &[String], i: &mut usize, name: &str) -> Vec<u32> {
+    let Some(raw) = args.get(*i + 1) else {
+        eprintln!("{cmd}: {name} requires a value");
+        std::process::exit(2);
+    };
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        match token.split_once('-') {
+            Some((lo, hi)) => match (lo.parse::<u32>(), hi.parse::<u32>()) {
+                (Ok(lo), Ok(hi)) if lo <= hi => out.extend(lo..=hi),
+                _ => {
+                    eprintln!("{cmd}: {name}: invalid range {token:?} (expected LO-HI with LO <= HI)");
+                    std::process::exit(2);
+                }
+            },
+            None => match token.parse::<u32>() {
+                Ok(v) => out.push(v),
+                Err(_) => {
+                    eprintln!("{cmd}: {name}: invalid value {token:?}");
+                    std::process::exit(2);
+                }
+            },
+        }
+    }
+    *i += 2;
+    out
+}
+
 fn print_usage() {
     eprintln!("usage: xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]");
     eprintln!("       xtask bench [--write]");
     eprintln!("       xtask web                 (build the browser client's wasm into web/client.wasm)");
+    eprintln!(
+        "       xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] \
+         [--fingerprint-bits <u32>] [--fill-check] [--fill-accounts <u64>]"
+    );
 }
 
 /// Runs the Stage 3 measured numbers table
@@ -162,6 +211,73 @@ fn run_bench(rest: &[String]) {
         println!("Wrote {} — ensure this build was against the pinned IKPIR rev (root Cargo.toml).", out_path.display());
     } else {
         println!("(printed only; pass `--write` to overwrite docs/numbers.md — only from a build against the pinned IKPIR rev)");
+    }
+}
+
+/// Runs the `xtask::geometry` arithmetic sweep (`xtask::geometry::SweepConfig::default()`
+/// unless overridden) and prints it; with `--fill-check`, additionally
+/// runs the slow, real-store fill-check (`xtask::geometry::DEFAULT_FILL_CANDIDATES`)
+/// and prints that too. See `xtask::geometry`'s module docs (ADR-0030) for
+/// why this question keeps coming up and what each half of this command
+/// actually measures vs. computes.
+fn run_geometry(rest: &[String]) {
+    const CMD: &str = "xtask geometry";
+    let mut cfg = xtask::geometry::SweepConfig::default();
+    let mut do_fill_check = false;
+    let mut fill_accounts = xtask::geometry::DEFAULT_FILL_ACCOUNTS;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--accounts" => cfg.accounts = parse_value(CMD, rest, &mut i, "--accounts"),
+            "--arity" => cfg.arities = parse_u32_list(CMD, rest, &mut i, "--arity"),
+            "--bucket-size" => cfg.bucket_sizes = parse_u32_list(CMD, rest, &mut i, "--bucket-size"),
+            "--fingerprint-bits" => cfg.fingerprint_bits = parse_value(CMD, rest, &mut i, "--fingerprint-bits"),
+            "--fill-accounts" => fill_accounts = parse_value(CMD, rest, &mut i, "--fill-accounts"),
+            "--fill-check" => {
+                do_fill_check = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("{CMD}: unknown argument: {other}");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    println!(
+        "Running geometry sweep: {} accounts, arity {:?}, bucket_size {:?}..={:?}, fingerprint_bits {} \
+         (docs/deploy.md §5.3, ADR-0030)",
+        cfg.accounts,
+        cfg.arities,
+        cfg.bucket_sizes.first(),
+        cfg.bucket_sizes.last(),
+        cfg.fingerprint_bits,
+    );
+    let accounts = cfg.accounts;
+    match xtask::geometry::sweep(&cfg) {
+        Ok(rows) => print!("{}", xtask::geometry::render_sweep_table(&rows, accounts)),
+        Err(e) => {
+            eprintln!("{CMD}: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    if do_fill_check {
+        println!();
+        println!(
+            "Running fill-check: {} accounts x {} candidates — real segmented_cuckoo::CuckooKVStore, real \
+             inserts (this is slow; the machine may be busy with other work).",
+            fill_accounts,
+            xtask::geometry::DEFAULT_FILL_CANDIDATES.len()
+        );
+        let results = xtask::geometry::fill_check(&xtask::geometry::DEFAULT_FILL_CANDIDATES, fill_accounts, cfg.fingerprint_bits);
+        print!("{}", xtask::geometry::render_fill_check(&results));
     }
 }
 

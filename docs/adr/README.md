@@ -1084,3 +1084,134 @@ a re-bootstrap; it is exactly the new bundle's block, never a guess.
 page to fetch a fresh hint") and re-bootstraps by reload. Doing the same
 automatically in the page would mean re-downloading the hint inside a tab, and is
 left for whoever revisits `web/`.
+
+### ADR-0030 — Geometry quantization: arity is not the lever, `bucket_size` is — capped at 4 today **[NEW]**
+
+**Chosen:** keep the deployed `arity 3, bucket_size 4` unchanged, and add `xtask
+geometry` (`cargo run -p xtask --release -- geometry [--fill-check]`) — an
+`arity x bucket_size` sweep over `risepir_proto::geometry::Geometry`, plus an
+opt-in fill-check that builds the real `segmented_cuckoo` store — so this
+question has a command to answer it, not a one-off spreadsheet.
+**Rejected:** switching the deployed geometry to `arity 4, bucket_size 4`, which
+a task brief proposed to shrink the 35.43 GB database to 23.62 GB (~12 GB
+saved). The arithmetic behind that number is correct — `xtask geometry`'s own
+`4/4` row reproduces it exactly, 23,622,320,128 B DB and 784,502,400 B hint —
+but the conclusion, that arity is the reason, is not.
+
+**Why — two corrections:**
+1. **The database size is a function of load factor, not arity.**
+   `Sizes::server_db = num_buckets * bucket_size * cells_per_slot * 4` — `arity`
+   is not a term in it. `Geometry::for_accounts`'s own `num_buckets` rule for
+   arity 2 and arity 4 is bit-identical (`buckets_needed.max(arity).next_power_of_two()`;
+   the `.max(arity)` floor only bites at toy scales), so at 200,503,969 accounts
+   every swept `bucket_size` (1–16) gives arity-2 and arity-4 configurations with
+   the same `num_buckets`, the same load factor, and the same server DB —
+   confirmed twice: arithmetically (`xtask geometry`'s table, any `bs` column)
+   and with a real store (`--fill-check`'s `(2,4)` and `(4,4)` rows both land on
+   `load 0.5625` at 9,437,184 accounts, zero `TableFull`). `bucket_size` alone
+   reaches every load factor a higher arity would have bought: `(3,3)` and
+   `(3,6)` both land at 26.58 GB / load 0.6639 with no arity change at all.
+2. **Arity moves the hint the wrong way.** `hint_total = arity * lwe_dim * C *
+   4`, `C ~ sqrt(db_cells/arity)`, so `hint_total ~ 4 * lwe_dim *
+   sqrt(arity * db_cells)` — proportional to `sqrt(arity)`. At the identical
+   301,989,888-slot database (both 26.58 GB), `(3,6)` and `(4,9)` give hints of
+   721.00 MB and 832.08 MB — arity 4's hint is *larger*
+   (`xtask::geometry::tests::sqrt_arity_hint_law` pins the ratio to `sqrt(4/3)`
+   within 1%), working directly against the separate effort to shrink the
+   browser client's 831 MB first download.
+
+**`bucket_size` is the real lever — a one-line change (`const BUCKET_SIZE` in
+`mainnet.rs`) against arity's own `Segmented3aryScheme`/`Segmented3aryCuckooKVStore`
+types, threaded through 18 files — but only within `1..=4` today.**
+`segmented_cuckoo::SUPPORTED_BUCKET_SIZES` is `1..=4`, hard-enforced by every
+arity's store constructor (`validate_common_params`), so the sweep's own
+`bucket_size` 5–16 rows are arithmetic-only. `--fill-check` demonstrates the
+boundary directly, at 9,437,184 accounts (fits 16 GB), rather than asserting it:
+
+| candidate | requested | inserted | failed | load | elapsed |
+|---|---:|---:|---:|---:|---:|
+| (3,4) — deployed | 9,437,184 | 9,437,184 | 0 | 0.7500 | 10.2 s |
+| (3,6) | 9,437,184 | — | — | — | **construction failed**: `invalid parameters: bucket_size must be in 1..=4, got 6` |
+| (3,3) | 9,437,184 | 9,437,184 | 0 | 0.5000 | 10.6 s |
+| (2,4) | 9,437,184 | 9,437,184 | 0 | 0.5625 | 15.7 s |
+| (4,4) | 9,437,184 | 9,437,184 | 0 | 0.5625 | 17.7 s |
+
+`(3,6)` fails at *construction*, not `TableFull` — it was never an option with
+the pinned IKPIR rev, upstream change or not. Every candidate that *did*
+construct filled with **zero insert failures**, `(3,4)` landing on exactly
+`load 0.7500` — the arithmetic sizing is not just plausible, it is what real
+cuckoo eviction achieves.
+
+**The cliff.** Any 23.62 GB configuration (`(2,4)`, `(4,4)`, …) sits at load
+0.7469: 201,326,592 accounts fit; the live set is 200,503,969, i.e.
+**822,623 accounts of headroom (0.41%)**. One more account forces the next
+doubling, to **47.24 GB** — 33% *worse* than today's 35.43 GB. Mainnet's
+nonzero-balance set grows continuously; 0.41% is weeks, not years.
+
+**Recommendation — an operator trade, not a change this PR performs:** today's
+`(3,4)` buys 50.6% growth headroom at 35.43 GB. `(3,3)` — real and buildable
+today, unlike the brief's own `(3,6)` suggestion — buys 13.0% headroom at
+26.58 GB / 719.99 MB hint (marginally cheaper than `(3,6)`'s arithmetic-only
+721.00 MB, for no upstream dependency). **This PR deliberately does not change
+`BUCKET_SIZE`**: the deployed geometry only changes via a full re-bootstrap
+(~33 min at the complete set, `docs/deploy.md`), so the trade is the
+operator's call — the tool exists to make it an informed one, not to make it
+for them.
+
+**The sweep flags what cannot be built, in two different senses.** A row can
+fail for two unrelated reasons and the table distinguishes them. `†` is a
+`bucket_size` outside `SUPPORTED_BUCKET_SIZES` — arithmetic-only, no store
+constructor accepts it. `‡` is a sizing that lands *above* what a real cuckoo
+table at that `(arity, bucket_size)` holds: the geometry is well-formed and the
+store would construct, but the fill ends in `TableFull` partway through. Each
+row now carries its own `maxload` ceiling
+(`segmented_cuckoo::MAX_LOAD_FACTOR`) next to the load it was sized to, so the
+margin is visible rather than implied.
+
+At the live account count exactly one configuration earns `‡` — `arity 2,
+bucket_size 1`, sized to 0.7469 against a 0.48 ceiling. That is not a quirk of
+the tool but a defect in `Geometry::for_accounts`, which sizes every
+configuration against one flat 0.75 target regardless of arity or bucket size;
+measured against a real store it dies after 70.1% of its inserts. The sizing
+itself is fixed separately (see the load-factor ADR); this table exists so the
+question is visible when someone reads a candidate off it.
+
+**Filling at the load factor that actually matters.** The 9,437,184-account
+run above proves each candidate *constructs and fills*, but rounds each one to
+its own load — `(3,3)` lands at 0.5000 there, not the 0.6639 the
+recommendation turns on. Choosing the account count so the quantization lands
+where it does at 200 M fixes that: at **6,265,000 accounts** every candidate
+reproduces its complete-set load factor to four decimal places, in miniature,
+on this laptop:
+
+| candidate | load here | load at 200,503,969 | inserted | failed | elapsed |
+|---|---:|---:|---:|---:|---:|
+| (3,4) — deployed | 0.4979 | 0.4980 | 6,265,000 | **0** | 5.5 s |
+| (3,3) — recommended | **0.6639** | **0.6639** | 6,265,000 | **0** | 5.4 s |
+| (2,4) — cliff edge | 0.7468 | 0.7469 | 6,265,000 | **0** | 5.5 s |
+| (4,4) — cliff edge | 0.7468 | 0.7469 | 6,265,000 | **0** | 5.7 s |
+| (3,6) | — | 0.6639 | — | — | **construction failed** (`bucket_size must be in 1..=4, got 6`) |
+
+So the operating point `(3,3)` is proposed at is not an extrapolation: real
+cuckoo eviction fills that exact load with zero insertion failures. Upstream's
+own measured tolerance agrees with a wide margin — `segmented_cuckoo`'s
+`MAX_LOAD_FACTOR` table gives **0.94** for `arity 3, bucket_size 3` (and 0.94
+for `(3,4)`), against the 0.6639 proposed here and the 0.75 target this repo
+sizes to. Load factor is not what constrains this geometry; the factor-of-two
+quantization of `num_buckets` is.
+
+**Measured vs. computed.** The sweep table is exact, closed-form arithmetic
+from the repo's own `Geometry` — `cargo test -p xtask` pins five of its
+rows/invariants against the figures above. The fill-check is real (a real
+`segmented_cuckoo::CuckooKVStore`, real inserts) but at 9,437,184 and
+6,265,000 accounts; the live 200,503,969-account scale needs the 64 GB
+production box and was not attempted here. What transfers from those runs to
+200 M is the *load factor*, which is reproduced exactly, not the wall-clock,
+which is not. Nothing above is stated as measured unless it was.
+
+**Follow-up:** expose `--bucket-size` as a flag on the mainnet bootstrap path
+(today changing it means a recompile); upstream in IKPIR, non-power-of-two
+`segmented-cuckoo` segment sizes — the masking-based hash in that crate is
+both why `num_buckets` quantizes by factors of 2 and why
+`SUPPORTED_BUCKET_SIZES` hard-caps `bucket_size` at 4. `docs/HANDOFF.md`'s
+upstream-candidates bullet now points here.

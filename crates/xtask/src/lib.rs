@@ -12,7 +12,13 @@
 //! so both the CLI and the `tests/` integration tests drive the exact same
 //! harness code — the binary is not a reimplementation of the tests, and
 //! the tests are not a reimplementation of the binary.
+//!
+//! Also: the `geometry` subcommand ([`geometry`], ADR-0030) — an
+//! `arity x bucket_size` sweep over `risepir_proto::geometry::Geometry`,
+//! plus an opt-in real-store fill-check, for the recurring "should we
+//! change the deployed SCF geometry" question.
 
 pub mod bench;
 pub mod conformance;
+pub mod geometry;
 pub mod web;

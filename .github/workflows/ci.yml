@@ -41,6 +41,33 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+  # `.cargo/config.toml` sets `-C target-cpu=native`, which is right on a
+  # developer's machine and on the deployment VM (it is what gives the LWE
+  # matvec its AVX2 codegen — see that file's comment) and *wrong* here.
+  # GitHub's `ubuntu-latest` pool is not one CPU model: a job that compiles
+  # the dependency tree on a runner with AVX-512 and stores it via
+  # `Swatinem/rust-cache` hands those artifacts to a later job that landed
+  # on a runner without it, which then dies with SIGILL — exit 132,
+  # "Illegal instruction (core dumped)", a fraction of a second into a
+  # binary whose own crates just recompiled cleanly. That is not a
+  # hypothetical: it took down the conformance gate on PR #15 while the
+  # identical tree had passed it minutes earlier.
+  #
+  # `CARGO_BUILD_RUSTFLAGS` is the right lever rather than `RUSTFLAGS`:
+  # cargo resolves `target.<triple>.rustflags` ahead of `build.rustflags`,
+  # so this replaces the `native` baseline for the host build while leaving
+  # `[target.wasm32-unknown-unknown]`'s mandatory
+  # `getrandom_backend="custom"` untouched. `RUSTFLAGS` would clobber that
+  # too and take the browser client's entropy shim with it.
+  #
+  # `x86-64-v3` rather than a lowest-common-denominator baseline: it is
+  # AVX2, which every current GitHub-hosted Linux runner supports and which
+  # is precisely the codegen the kernels under test are meant to use — so
+  # the gates still exercise the SIMD paths production runs, just pinned to
+  # one ISA the whole fleet agrees on instead of whatever each runner
+  # happened to report.
+  CARGO_BUILD_RUSTFLAGS: -C target-cpu=x86-64-v3
+
 jobs:
   test:
     name: clippy + tests

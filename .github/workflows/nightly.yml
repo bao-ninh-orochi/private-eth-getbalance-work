@@ -22,6 +22,15 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+  # Same reason as `ci.yml`'s, which carries the full explanation: these
+  # jobs share `Swatinem/rust-cache` artifacts across a heterogeneous
+  # `ubuntu-latest` pool, and `.cargo/config.toml`'s `target-cpu=native`
+  # makes those artifacts runner-specific — SIGILL on the next runner that
+  # lacks an instruction the last one had. The fuzz job is the one that
+  # would suffer most from the silent version of this: a target that dies
+  # on an illegal instruction looks a lot like a target that found a crash.
+  CARGO_BUILD_RUSTFLAGS: -C target-cpu=x86-64-v3
+
 jobs:
   live-feed-gate:
     name: live feed gate (real mainnet, independent provider)

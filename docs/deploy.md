@@ -1129,6 +1129,45 @@ that the system's self-healing turns that from a permanent error into a
 transient one for every account that keeps transacting. `docs/HANDOFF.md` carries
 the remedy.
 
+#### Caught up, and the backstop came back
+
+The snapshot→head replay closed the whole **13,004-block** gap — 25,613,233 →
+**25,626,237** — in **4 h 20 min** at a steady **0.83 blocks/s**, serving the
+whole time, labelled with the block it was as of. The same ten-account check
+was re-run as each of the three wrong accounts was touched, and the score moved
+exactly as the healing model predicts:
+
+| server head | byte-exact | what had just healed |
+|---:|---|---|
+| 25,614,119 | 7 / 10 | — (the three snapshot errors, all still wrong) |
+| 25,616,790 | 8 / 10 | `0xd8dA…6045` |
+| 25,619,061 | 9 / 10 | `0x0000…dEaD` |
+| 25,623,043 | 10 / 10 | `0x742d…f44e` |
+| **25,626,237 (head)** | **10 / 10** | — |
+
+The final run is at the single explicit height **25,626,237**, against both
+independent providers: six funded accounts byte-exact, and four absent ones
+answering exactly `0x0` — the complete-set semantic a partial deployment is
+forbidden to offer, demonstrated live again on the new geometry.
+
+**The in-loop backstop returned the moment it could**:
+`reconcile at block 25626210: 8 account(s) exact vs independent provider`. It
+had been dark for **432 consecutive checkpoints**, and ADR-0027 escalated that
+from `WARNING` to **21 `CRITICAL` lines** on the way — which is the point of
+that ADR: §5.3's run produced 685 silent fetch failures and read as clean.
+Across the entire run: **zero balance mismatches, zero halts.** Every one of
+those 21 `CRITICAL`s is about the *checker* being unavailable, never about an
+answer being wrong.
+
+`e2e.mjs` was re-run against the public origin once caught up and passes there
+too (**0 failing checks** at block 25,626,269), so the gates cover both ends of
+the replay, not just the bootstrap.
+
+Housekeeping: the superseded 36.26 GB `(3,4)` state file is kept on the box as
+`~/risepir-state.bin.arity3-20260727` (disk is at 70 G of 246 G) — it is the
+rollback if `(2,4)` ever needs reverting, and nothing else can regenerate it
+without another ~33 min bootstrap.
+
 ## 6. Who does what, explicitly
 
 | step | who | needs |

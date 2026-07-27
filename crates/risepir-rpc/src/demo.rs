@@ -24,12 +24,10 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ikpir_common::{SimpleConfig, SimplePirBackend};
-use risepir_client::RisePirClient;
 use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_http::{NodeState, PirHttpClient};
 use risepir_proto::{Backend, Geometry, ValueCodec};
@@ -256,25 +254,15 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     // clients — connecting to the unspecified address is unreliable.
     let pir_client = PirHttpClient::new(crate::front::local_url(cfg.bind, pir_addr.port()));
     let setup_bundle = pir_client.setup().await.expect("GET /setup against the freshly-started PIR server");
-    let arity = setup_bundle.params.arity();
-    let plaintext_bits = setup_bundle.params.plaintext_bits;
-    let reshape_row_width_per_seg: Vec<u32> = setup_bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
-    let pinned_block = setup_bundle.block;
 
-    let rise_client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(setup_bundle, value_codec);
-
-    let private_eth = Arc::new(PrivateEth {
-        client: tokio::sync::Mutex::new(rise_client),
-        pending_head: AtomicU64::new(pinned_block),
-        pir: pir_client,
-        reshape_row_width_per_seg,
-        arity,
-        plaintext_bits,
-        chain_id: cfg.chain_id,
-        strict_not_found: false, // the mock's account universe is complete by construction
-        proxy_upstream: cfg.proxy_upstream,
-        proxy_http: reqwest::Client::new(),
-    });
+    let private_eth = Arc::new(PrivateEth::from_setup(
+        pir_client,
+        setup_bundle,
+        value_codec,
+        true, // the mock's account universe is complete by construction
+        cfg.chain_id,
+        cfg.proxy_upstream,
+    ));
 
     let rpc_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.rpc_port))
         .await

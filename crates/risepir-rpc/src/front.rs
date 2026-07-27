@@ -32,11 +32,8 @@
 //! bug, so there is no CLI override for it.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use ikpir_common::SimplePirBackend;
-use risepir_client::RisePirClient;
 use risepir_http::PirHttpClient;
 
 use crate::private_eth::PrivateEth;
@@ -114,24 +111,14 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
         started.elapsed().as_secs_f64()
     );
 
-    let arity = setup_bundle.params.arity();
-    let plaintext_bits = setup_bundle.params.plaintext_bits;
-    let reshape_row_width_per_seg: Vec<u32> =
-        setup_bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
-    let rise_client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(setup_bundle, codec);
-
-    let private_eth = Arc::new(PrivateEth {
-        client: tokio::sync::Mutex::new(rise_client),
-        pending_head: AtomicU64::new(pinned_block),
-        pir: pir_client,
-        reshape_row_width_per_seg,
-        arity,
-        plaintext_bits,
-        chain_id: cfg.chain_id,
-        strict_not_found: !complete,
-        proxy_upstream: cfg.proxy_upstream.clone(),
-        proxy_http: reqwest::Client::new(),
-    });
+    let private_eth = Arc::new(PrivateEth::from_setup(
+        pir_client,
+        setup_bundle,
+        codec,
+        complete,
+        cfg.chain_id,
+        cfg.proxy_upstream.clone(),
+    ));
 
     let rpc_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.rpc_port))
         .await

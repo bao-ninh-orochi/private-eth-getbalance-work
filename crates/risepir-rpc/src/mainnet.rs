@@ -53,12 +53,10 @@
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ikpir_common::{SimpleConfig, SimplePirBackend};
-use risepir_client::RisePirClient;
+use ikpir_common::SimpleConfig;
 use risepir_feed::rpc::{FetchedBlock, RpcClient, RpcFeed};
 use risepir_feed::snapshot;
 use risepir_http::{NodeState, PirHttpClient};
@@ -710,25 +708,15 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         .setup()
         .await
         .unwrap_or_else(|e| die(format!("GET /setup from our own PIR transport: {e}")));
-    let arity = setup_bundle.params.arity();
-    let plaintext_bits = setup_bundle.params.plaintext_bits;
-    let reshape_row_width_per_seg: Vec<u32> =
-        setup_bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
-    let pinned_block = setup_bundle.block;
-    let rise_client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(setup_bundle, codec);
 
-    let private_eth = Arc::new(PrivateEth {
-        client: tokio::sync::Mutex::new(rise_client),
-        pending_head: AtomicU64::new(pinned_block),
-        pir: pir_client,
-        reshape_row_width_per_seg,
-        arity,
-        plaintext_bits,
-        chain_id: 1,
-        strict_not_found: !complete,
-        proxy_upstream: cfg.proxy_upstream.clone(),
-        proxy_http: reqwest::Client::new(),
-    });
+    let private_eth = Arc::new(PrivateEth::from_setup(
+        pir_client,
+        setup_bundle,
+        codec,
+        complete,
+        1,
+        cfg.proxy_upstream.clone(),
+    ));
 
     let rpc_listener = tokio::net::TcpListener::bind((cfg.bind, cfg.rpc_port))
         .await

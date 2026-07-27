@@ -111,7 +111,9 @@ impl From<RpcError> for JsonRpcError {
             ),
             RpcError::Stalled => Self::new(
                 -32000,
-                "server is resyncing (the client fell behind the server's retained delta window); try again",
+                "client fell out of the server's retained delta window; an automatic re-bootstrap \
+                 was attempted and did not resolve it either (the server is advancing faster than \
+                 a fresh bootstrap can catch up); restarting this client is required",
             ),
             RpcError::NotInTrackedSet => Self::new(
                 -32000,

@@ -36,9 +36,17 @@ pub enum RpcError {
     /// at) because that range had already aged out of the server's delta
     /// retention window (`GET /sync` returned `409`). Per `docs/plan.md`
     /// §3.6: "client behind / server stalled → label the block; report
-    /// stalled; resync outside the ring window; never guess" — so this is
-    /// surfaced as an error rather than silently querying against a stale
-    /// or mismatched epoch.
+    /// stalled; resync outside the ring window; never guess".
+    ///
+    /// This does **not** mean simply retrying the same call will help.
+    /// [`crate::PrivateEth::get_balance`] already attempts exactly one
+    /// automatic re-bootstrap-and-retry the first time this occurs (a
+    /// fresh `GET /mode` + `GET /setup`, pinned at the then-current
+    /// head) — see that method's docs. This variant reaching a caller
+    /// means that recovery attempt was made and hit this same condition
+    /// again: the server is advancing faster than a fresh bootstrap can
+    /// catch up. Only restarting the client process (or the server
+    /// settling down) can resolve it — never a bare retry.
     Stalled,
 }
 
@@ -51,7 +59,10 @@ impl fmt::Display for RpcError {
             Self::NotInTrackedSet => {
                 write!(f, "account is not in this partial deployment's tracked set")
             }
-            Self::Stalled => write!(f, "client fell behind the server's delta retention window"),
+            Self::Stalled => write!(
+                f,
+                "client fell out of the server's delta retention window; an automatic re-bootstrap-and-retry did not resolve it either; restart the client"
+            ),
         }
     }
 }

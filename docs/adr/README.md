@@ -1035,3 +1035,52 @@ reverse proxy already in front of this server (Caddy, `docs/deploy.md` §3.7)
 or a CDN (roadmap C3/C5) — layers that can meter bytes actually on the wire,
 which is the one thing an in-process concurrency limiter on a
 fully-materialized-body handler could never do.
+### ADR-0029 — A stalled rewind client re-bootstraps itself, exactly once **[NEW]**
+
+**Chosen:** when `GET /sync` reports the client's `pending_head` has aged out of
+the server's delta ring, `PrivateEth::get_balance` re-fetches `GET /mode` **and**
+`GET /setup`, replaces the whole session, and retries the lookup **once**. A
+second `Stalled` is returned to the caller, with a message that says restarting
+is what helps.
+**Rejected:** leaving the wedge in place and only fixing the wording; and
+retrying in a loop.
+
+**Why:** `sync_to` mapped an aged-out range to `Stalled` without touching
+`pending_head`, so every subsequent call re-requested the same dead range — the
+process was wedged permanently, and the JSON-RPC message said `try again`, which
+was the one thing that could never work. The contract held (it failed loudly
+rather than answering against a mismatched epoch), but this is a liveness gap
+with actively misleading guidance. It is not an idle-client curiosity either: a
+server replaying a catch-up backlog advances ~50 blocks/min against ~5 in steady
+state and simply outruns the ring, so a freshly started client hits it too — as
+the co-located `:8545` front end did on 2026-07-26 (`docs/deploy.md` §5.3).
+
+A re-bootstrap introduces no new trust or correctness surface: it is byte-for-byte
+what a freshly started process does. What makes it *safe* is that it is
+all-or-nothing. Everything derived from the deployment now lives in one
+`Session` behind the existing mutex — the `RisePirClient`, `pending_head`, the
+geometry (`arity`, `plaintext_bits`, `reshape_row_width_per_seg`) and
+`strict_not_found` — and `rebootstrap` replaces the struct in a single
+assignment. A partially-updated session is unrepresentable, so an old hint can
+never be paired with new deltas.
+
+**`GET /mode` is re-fetched, not carried over, and that is a binding-rule
+matter.** If a deployment were restarted from complete to partial, a client that
+kept `strict_not_found = false` would answer `0x0` for an account that is merely
+untracked — a silently wrong balance, which this project calls total failure
+(ADR-0015/0017). Re-reading `/mode` costs one small request on a path that is
+already downloading the hint.
+
+**One retry, never a loop.** Against a server replaying faster than a client can
+bootstrap, a loop would spin forever while re-downloading the hint each time —
+830.73 MB on the live deployment. Bounded retry turns a permanent wedge into a
+self-healing common case and an honest error in the pathological one.
+
+**Cost:** the re-bootstrap pays a full `/setup` download, so the first query
+after a stall is as slow as a cold start. `pending_head` is never carried across
+a re-bootstrap; it is exactly the new bundle's block, never a guess.
+
+**Not covered:** the browser front end, which already told the truth ("Reload the
+page to fetch a fresh hint") and re-bootstraps by reload. Doing the same
+automatically in the page would mean re-downloading the hint inside a tab, and is
+left for whoever revisits `web/`.

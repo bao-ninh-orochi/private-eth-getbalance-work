@@ -261,6 +261,29 @@ async fn setup_concurrency_cap_is_invisible_to_sequential_clients() {
     }
 }
 
+// ── (a2) apply_block duration instrumentation (docs/numbers.md §7) ─────
+
+#[tokio::test]
+async fn apply_block_returns_a_populated_patch_duration() {
+    let (state, mut feed) = build_node();
+
+    let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+    let (delta, duration) = state.apply_block(&upd).await.expect("apply_block");
+
+    // `docs/numbers.md` §7's missing complete-set patch-time row depends
+    // on this being a real, taken measurement of the inner
+    // `RisePirServer::apply_block` call (see that method's own docs) —
+    // never a placeholder default — so a block that does real store/hint
+    // work must report back a nonzero duration.
+    assert!(duration.as_nanos() > 0, "apply_block must return a populated (nonzero) duration");
+
+    // The other half of the same return value, pinned here so the two
+    // cannot drift apart: the delta handed back is this block's own, which
+    // is what the follow loop appends to the state journal (ADR-0026)
+    // instead of re-deriving it.
+    assert_eq!(delta.block, upd.block, "apply_block must return the delta for the block it applied");
+}
+
 // ── (b) malformed body -> 400, never a panic ────────────────────────────
 
 #[tokio::test]

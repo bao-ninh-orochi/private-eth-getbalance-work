@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
@@ -391,21 +391,46 @@ impl NodeState {
     ///
     /// # Returns
     ///
-    /// The [`BlockDelta`] this block produced (one extra clone of the
-    /// small delta beyond what the ring/`per_block` bookkeeping already
-    /// needed) — the caller (`risepir-rpc`'s mainnet follow loop) hands it
-    /// straight to the state-journal appender (`docs/adr/README.md`
-    /// ADR-0026) without having to re-derive it.
+    /// `(delta, patch_time)` — both of this method's two callers-worth of
+    /// information, because the follow loop needs each for a different
+    /// reason and neither can cheaply re-derive the other.
+    ///
+    /// `delta` is the [`BlockDelta`] this block produced (one extra clone
+    /// of the small delta beyond what the ring/`per_block` bookkeeping
+    /// already needed) — the caller (`risepir-rpc`'s mainnet follow loop)
+    /// hands it straight to the state-journal appender
+    /// (`docs/adr/README.md` ADR-0026) without having to re-derive it.
+    ///
+    /// `patch_time` is the wall-clock time of the inner
+    /// `RisePirServer::apply_block` call *and nothing else* — timing
+    /// starts after the write lock on `self.inner` is already held, so
+    /// lock-*wait* time (queueing behind whatever held the lock before
+    /// this call got it) is deliberately excluded. This distinction is the
+    /// whole point of the measurement: at the complete mainnet set a slow
+    /// concurrent `/answer` can hold the *read* lock long enough to
+    /// dominate a naive "time this whole method from entry" measurement,
+    /// which would then be reporting queueing delay under someone else's
+    /// name rather than the hint-patch cost itself. The ring-push and
+    /// `per_block`-index bookkeeping after the timed call are cheap by
+    /// comparison and deliberately excluded too. This is the per-block
+    /// patch time `docs/numbers.md` §2/§6/§7 discusses, measured here on
+    /// the real deployment rather than a bench harness.
     ///
     /// # Errors
     ///
-    /// Whatever [`RisePirServer::apply_block`] returns — see
+    /// Whatever `RisePirServer::apply_block` returns — see
     /// [`ServerError`]. On `Err`, nothing is pushed to the ring or
     /// `per_block` (matching that method's own "no partial delta leaks"
-    /// guarantee).
-    pub async fn apply_block(&self, update: &BlockUpdate) -> Result<BlockDelta, ServerError> {
+    /// guarantee), and neither a delta nor a duration is returned — there
+    /// was no patch to journal and nothing meaningful to time.
+    pub async fn apply_block(
+        &self,
+        update: &BlockUpdate,
+    ) -> Result<(BlockDelta, Duration), ServerError> {
         let mut inner = self.inner.write().await;
+        let t0 = Instant::now();
         let delta = inner.server.apply_block(update)?;
+        let patch_time = t0.elapsed();
         inner.ring.push(delta.clone());
         inner.per_block.insert(delta.block, delta.clone());
         if let Some(oldest) = inner.ring.oldest() {
@@ -414,7 +439,7 @@ impl NodeState {
                 inner.per_block.remove(&b);
             }
         }
-        Ok(delta)
+        Ok((delta, patch_time))
     }
 
     /// Seeds the ring / per-block delta index from a journal-restore

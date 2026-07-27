@@ -98,6 +98,15 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// happens instead of the operator finding out afterward from the log.
 const DARK_ESCALATION_THRESHOLD: u64 = 20;
 
+/// How often the follow loop logs a patch-time summary, in blocks — never
+/// per block, which at this deployment's ~12 s block time would be a log
+/// line every 12 s forever. 300 blocks is roughly one hour at that
+/// cadence: coarse enough that `~/server-complete.log` does not fill up
+/// over a multi-day run, fine enough to see within-day drift in the one
+/// number `docs/numbers.md` §7 says nobody has measured yet — per-block
+/// patch time at the complete mainnet set.
+const PATCH_STATS_LOG_INTERVAL_BLOCKS: u64 = 300;
+
 pub(crate) fn value_codec() -> ValueCodec {
     ValueCodec {
         key_tag_bits: 32,
@@ -751,6 +760,74 @@ struct FollowConfig {
     saver: Option<Arc<StateSaver>>,
 }
 
+/// Pure aggregation of [`NodeState::apply_block`]'s measured hint-patch
+/// duration — see that method's docs for exactly what it measures (lock-
+/// *wait* time is deliberately excluded) — plus the same block's mutation
+/// count, over a window of blocks. Free of `RpcFeed`/any network type, so
+/// the follow loop's summary-logging arithmetic is unit-testable without a
+/// live feed.
+#[derive(Clone, Copy, Debug, Default)]
+struct PatchStats {
+    count: u64,
+    total: Duration,
+    min: Option<Duration>,
+    max: Option<Duration>,
+    /// Sum of `K` (mutations/block — `update.changes.len() +
+    /// update.credits.len()`, the same "mutations/block" quantity
+    /// `crates/xtask/src/bench.rs` sweeps over) across every block folded
+    /// in. Carried alongside the duration because patch time is a
+    /// function of `K` (`docs/numbers.md` §2) — a mean patch time without
+    /// it is uninterpretable.
+    total_k: u64,
+}
+
+impl PatchStats {
+    /// Folds in one block's measured patch duration and mutation count.
+    fn record(&mut self, duration: Duration, k: usize) {
+        self.count += 1;
+        self.total += duration;
+        self.min = Some(self.min.map_or(duration, |m| m.min(duration)));
+        self.max = Some(self.max.map_or(duration, |m| m.max(duration)));
+        self.total_k += k as u64;
+    }
+
+    /// Mean patch time, in milliseconds, over every block folded in so far
+    /// — `0.0` on an empty window (the follow loop never logs one; kept
+    /// total rather than partial regardless, so it stays meaningful on
+    /// its own in a test).
+    fn mean_ms(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.total.as_secs_f64() * 1000.0 / self.count as f64
+        }
+    }
+
+    /// Mean mutations/block (`K`) over the same window.
+    fn mean_k(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.total_k as f64 / self.count as f64
+        }
+    }
+}
+
+/// Logs one patch-time summary line, in this crate's `eprintln!` style —
+/// see [`PATCH_STATS_LOG_INTERVAL_BLOCKS`] for the cadence. The caller
+/// resets the accumulator immediately after.
+fn log_patch_stats(through_block: u64, stats: &PatchStats) {
+    eprintln!(
+        "risepir-rpc mainnet: patch stats over last {count} block(s) (through block {through_block}): \
+         mean {mean:.4} ms, min {min:.4} ms, max {max:.4} ms, mean K {mean_k:.1} mutations/block",
+        count = stats.count,
+        mean = stats.mean_ms(),
+        min = stats.min.unwrap_or_default().as_secs_f64() * 1000.0,
+        max = stats.max.unwrap_or_default().as_secs_f64() * 1000.0,
+        mean_k = stats.mean_k(),
+    );
+}
+
 /// The forever loop: poll `finalized`, apply each new block exactly once,
 /// reconcile on cadence. See the module docs for the failure posture.
 ///
@@ -766,6 +843,7 @@ struct FollowConfig {
 /// one being persisted (the loop exits before the next trigger).
 async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cfg: FollowConfig) {
     let mut last = cfg.start_at;
+    let mut patch_stats = PatchStats::default();
     loop {
         if let Some(saver) = &cfg.saver {
             // Outcome/error ignored on purpose: the saver logs, and a
@@ -824,7 +902,7 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 update.credits = kept;
             }
 
-            let delta = match node.apply_block(&update).await {
+            let (delta, patch_duration) = match node.apply_block(&update).await {
                 Ok(d) => d,
                 Err(e) => {
                     critical(&format!(
@@ -840,6 +918,23 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             if let Some(saver) = &cfg.saver {
                 let n_items = node.with_server(|s| s.num_items()).await;
                 saver.append_delta(&delta, n_items).await;
+            }
+
+            // Per-block patch-time instrumentation (docs/numbers.md §7):
+            // `K` mirrors the bench harness's own "mutations/block" —
+            // every absolute change plus every (already-filtered, above)
+            // withdrawal credit actually applied to the store. Accumulate
+            // rather than log every block — see
+            // `PATCH_STATS_LOG_INTERVAL_BLOCKS`.
+            //
+            // Deliberately *after* the journal append and outside its
+            // `if let`: the measurement is of the hint patch, which
+            // happened either way, so it must not become conditional on a
+            // journal being configured.
+            patch_stats.record(patch_duration, update.changes.len() + update.credits.len());
+            if n.is_multiple_of(PATCH_STATS_LOG_INTERVAL_BLOCKS) {
+                log_patch_stats(n, &patch_stats);
+                patch_stats = PatchStats::default();
             }
 
             // Feed `GET /recent` (ADR-0019). Only *after* a successful
@@ -1193,5 +1288,60 @@ mod tests {
                 DARK_ESCALATION_THRESHOLD + offset
             );
         }
+    }
+
+    // `PatchStats` is deliberately free of `RpcFeed`/any network type (see
+    // its own docs), so every test here is pure arithmetic — no live feed,
+    // no network, no tokio runtime required.
+
+    #[test]
+    fn patch_stats_default_is_an_empty_window() {
+        let stats = PatchStats::default();
+        assert_eq!(stats.count, 0);
+        assert_eq!(stats.min, None);
+        assert_eq!(stats.max, None);
+        assert_eq!(stats.mean_ms(), 0.0);
+        assert_eq!(stats.mean_k(), 0.0);
+    }
+
+    #[test]
+    fn patch_stats_aggregates_count_mean_min_max_and_k() {
+        let mut stats = PatchStats::default();
+        stats.record(Duration::from_millis(10), 100);
+        stats.record(Duration::from_millis(30), 200);
+        stats.record(Duration::from_millis(20), 300);
+
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.min, Some(Duration::from_millis(10)));
+        assert_eq!(stats.max, Some(Duration::from_millis(30)));
+        // mean = (10 + 30 + 20) / 3 = 20 ms
+        assert!((stats.mean_ms() - 20.0).abs() < 1e-9, "mean_ms = {}", stats.mean_ms());
+        // mean K = (100 + 200 + 300) / 3 = 200
+        assert!((stats.mean_k() - 200.0).abs() < 1e-9, "mean_k = {}", stats.mean_k());
+    }
+
+    #[test]
+    fn patch_stats_single_sample_has_matching_min_max_and_mean() {
+        let mut stats = PatchStats::default();
+        stats.record(Duration::from_micros(500), 42);
+
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.min, Some(Duration::from_micros(500)));
+        assert_eq!(stats.max, Some(Duration::from_micros(500)));
+        assert!((stats.mean_ms() - 0.5).abs() < 1e-9);
+        assert!((stats.mean_k() - 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn log_patch_stats_does_not_panic_on_a_populated_or_empty_window() {
+        // Nothing here inspects the printed line itself (the arithmetic it
+        // prints is exactly what the aggregation tests above already
+        // check); this just proves the formatting call is safe to make,
+        // including on the `count == 0` case the follow loop never
+        // actually reaches but this function should not choke on either.
+        let mut stats = PatchStats::default();
+        log_patch_stats(0, &stats);
+        stats.record(Duration::from_millis(7), 12);
+        log_patch_stats(300, &stats);
     }
 }

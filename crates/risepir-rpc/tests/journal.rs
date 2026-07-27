@@ -93,7 +93,7 @@ async fn journal_replay_matches_live_apply() {
     let journal_path = journal_path_for(&base_path);
     let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=N {
-        let delta = node.apply_block(&update_for(b)).await.unwrap();
+        let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
         writer.append(&delta, n_items).unwrap();
     }
@@ -145,7 +145,7 @@ async fn torn_tail_restores_to_last_good_height_then_recovers() {
 
     let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=5u64 {
-        let delta = node.apply_block(&update_for(b)).await.unwrap();
+        let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
         writer.append(&delta, n_items).unwrap();
     }
@@ -193,7 +193,7 @@ async fn mid_file_corruption_stops_replay_there() {
 
     let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=6u64 {
-        let delta = node.apply_block(&update_for(b)).await.unwrap();
+        let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
         writer.append(&delta, n_items).unwrap();
     }
@@ -254,13 +254,13 @@ async fn gap_is_refused_at_append_time_and_replay_stops_at_the_prefix() {
     let journal_path = journal_path_for(&base_path);
 
     let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
-    let d1 = node.apply_block(&update_for(1)).await.unwrap();
+    let (d1, _) = node.apply_block(&update_for(1)).await.unwrap();
     let n1 = node.with_server(|s| s.num_items()).await;
     writer.append(&d1, n1).unwrap();
 
     // Skip block 2 entirely; attempt to jump straight to block 3's delta.
-    let _d2 = node.apply_block(&update_for(2)).await.unwrap();
-    let d3 = node.apply_block(&update_for(3)).await.unwrap();
+    let (_d2, _) = node.apply_block(&update_for(2)).await.unwrap();
+    let (d3, _) = node.apply_block(&update_for(3)).await.unwrap();
     let n3 = node.with_server(|s| s.num_items()).await;
     match writer.append(&d3, n3) {
         Err(JournalError::Gap { expected: 2, found: 3 }) => {}
@@ -294,7 +294,7 @@ async fn restore_caps_and_orders_the_tail_deltas() {
 
     let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=10u64 {
-        let delta = node.apply_block(&update_for(b)).await.unwrap();
+        let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
         writer.append(&delta, n_items).unwrap();
     }

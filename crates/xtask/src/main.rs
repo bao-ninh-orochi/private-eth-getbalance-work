@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]
-//! xtask bench [--write]
+//! xtask bench [--write] [--scales <n,n,...>] [--mid-scale <u64>]
 //! xtask web
 //! xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] [--fingerprint-bits <u32>]
 //!                 [--fill-check] [--fill-accounts <u64>]
@@ -153,9 +153,35 @@ fn parse_u32_list(cmd: &str, args: &[String], i: &mut usize, name: &str) -> Vec<
     out
 }
 
+/// Parses the comma-separated `u64` list following `--scales`, advancing
+/// `*i` past both the flag and its value. Rejects an empty list rather than
+/// letting it reach `bench::run`'s own assertion, so the error names the
+/// flag the caller actually typed.
+fn parse_scale_list(args: &[String], i: &mut usize) -> Vec<u64> {
+    let Some(raw) = args.get(*i + 1) else {
+        eprintln!("xtask bench: --scales requires a comma-separated list of account counts");
+        std::process::exit(2);
+    };
+    let scales: Vec<u64> = raw
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<u64>().unwrap_or_else(|_| {
+                eprintln!("xtask bench: --scales got an invalid account count: {s:?}");
+                std::process::exit(2);
+            })
+        })
+        .collect();
+    if scales.is_empty() || scales.contains(&0) {
+        eprintln!("xtask bench: --scales must list at least one nonzero account count");
+        std::process::exit(2);
+    }
+    *i += 2;
+    scales
+}
+
 fn print_usage() {
     eprintln!("usage: xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]");
-    eprintln!("       xtask bench [--write]");
+    eprintln!("       xtask bench [--write] [--scales <n,n,...>] [--mid-scale <u64>]");
     eprintln!("       xtask web                 (build the browser client's wasm into web/client.wasm)");
     eprintln!(
         "       xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] \
@@ -169,11 +195,28 @@ fn print_usage() {
 /// the report carries for why the write is opt-in). The harness is
 /// deterministic (fixed mock seed) by design so re-runs are comparable, per
 /// the brief.
+///
+/// `--scales` overrides the account scales the sweep runs at. It exists for
+/// one specific question: the headline rebuild ÷ patch ratio (§6) is
+/// published only up to 9,437,184 accounts, and extending the *trend* to
+/// larger scales is what makes an extrapolation to the deployed 200 M set
+/// defensible rather than invented. The top scale still passes through the
+/// harness's own RAM safety fallback, so asking for more than this machine
+/// can hold degrades to the largest scale that fits and says so, rather
+/// than swapping (which would silently corrupt every timing in the run).
 fn run_bench(rest: &[String]) {
     let mut write = false;
-    for arg in rest {
-        match arg.as_str() {
-            "--write" => write = true,
+    let mut scales: Option<Vec<u64>> = None;
+    let mut mid_scale: Option<u64> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--write" => {
+                write = true;
+                i += 1;
+            }
+            "--scales" => scales = Some(parse_scale_list(rest, &mut i)),
+            "--mid-scale" => mid_scale = Some(parse_value("xtask bench", rest, &mut i, "--mid-scale")),
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -186,7 +229,32 @@ fn run_bench(rest: &[String]) {
         }
     }
 
-    let cfg = xtask::bench::BenchConfig::default();
+    let mut cfg = xtask::bench::BenchConfig::default();
+    if let Some(scales) = scales {
+        cfg.scales = scales;
+        // The patch curve / delta-bytes / answer-latency sections run at
+        // `mid_scale`, which `bench::run` asserts is one of `scales`. An
+        // explicit `--mid-scale` wins; otherwise keep the default if the
+        // caller's list still contains it, and fall back to the smallest
+        // requested scale if it does not — never leave the two
+        // inconsistent, which would abort the run inside the harness.
+        cfg.mid_scale = mid_scale.unwrap_or_else(|| {
+            if cfg.scales.contains(&cfg.mid_scale) {
+                cfg.mid_scale
+            } else {
+                *cfg.scales.iter().min().expect("--scales rejects an empty list")
+            }
+        });
+    } else if let Some(mid) = mid_scale {
+        cfg.mid_scale = mid;
+    }
+    if !cfg.scales.contains(&cfg.mid_scale) {
+        eprintln!(
+            "xtask bench: --mid-scale {} is not one of --scales {:?}",
+            cfg.mid_scale, cfg.scales
+        );
+        std::process::exit(2);
+    }
     println!(
         "Running bench: scales {:?}, mid_scale {}, K values {:?} (docs/plan.md §7, docs/verification.md §7)",
         cfg.scales, cfg.mid_scale, cfg.k_values

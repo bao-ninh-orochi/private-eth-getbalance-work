@@ -95,6 +95,99 @@ const SAFETY_FACTOR: f64 = 5.0;
 /// structure the bench harness itself allocates around the store.
 const MAX_PROJECTED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+// ─── §7: the complete mainnet set — fixed historical citations ───────────
+//
+// `docs/numbers.md` §1–§6 (rendered from a fresh `run()` sweep, see
+// `BenchReport::to_markdown`) stop at 9,437,184 accounts, measured on this
+// laptop. The live deployment serves 200,503,969 — 21x larger — and has
+// itself measured exactly one of §1's quantities (full-rebuild time) at
+// that scale, on a different machine. §7 (`complete_set_markdown`, below)
+// states that plainly, alongside a separate, explicitly-dated laptop run
+// that extended this harness's own scales far enough to fit a defensible
+// extrapolation of the §6 headline ratio. None of the figures below are
+// `Geometry`-derivable or reproduced by `BenchConfig::default()` — they
+// are one-off historical measurements, so they are pinned here as named
+// constants (never re-derived at render time) precisely so §7 cannot
+// silently drift from its citations. If a future commit changes what
+// §1–§6 measure (a new `--write` against a faster/slower machine, or a
+// new IKPIR pin), update the "published" constants below in the same
+// commit — the discipline this module's own IKPIR-pin note already asks
+// of `docs/numbers.md` itself.
+
+/// The complete mainnet nonzero-balance account count the live deployment
+/// serves (`GET /mode` = 1) — `docs/deploy.md` §5.3 ("gate query"),
+/// measured 2026-07-26.
+const DEPLOYMENT_ACCOUNTS: u64 = 200_503_969;
+
+/// The complete mainnet set's one-time full PIR-setup rebuild time, in
+/// seconds — `docs/deploy.md` §5.3 ("PIR setup (one-time)"), measured
+/// 2026-07-26 on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB
+/// usable), **not** this module's own benchmark machine. This is §1's
+/// exact quantity (full-rebuild time) at deployment scale — see
+/// `complete_set_markdown` for why it cannot be compared to §1's other
+/// rows without saying so.
+const DEPLOYMENT_FULL_REBUILD_SECS: f64 = 1236.5;
+
+/// The largest scale `docs/numbers.md` §1–§6 currently publish — must
+/// equal `BenchConfig::default().scales`'s last (largest) entry. Kept as
+/// its own constant, rather than read off a live `BenchReport`, because
+/// §7's text is fixed historical fact describing the *committed*
+/// `docs/numbers.md`, independent of whatever scales a future run's `cfg`
+/// happens to use.
+const PUBLISHED_TOP_SCALE_ACCOUNTS: u64 = 9_437_184;
+
+/// The currently-published (2026-07-22) full-rebuild time at
+/// `PUBLISHED_TOP_SCALE_ACCOUNTS` (§1) — quoted for §7's reproducibility
+/// note, not recomputed.
+const PUBLISHED_REBUILD_SECS_AT_TOP_SCALE: f64 = 6.677;
+
+/// The currently-published (2026-07-22) headline ratio (§6) at
+/// `PUBLISHED_TOP_SCALE_ACCOUNTS` — quoted for §7's honest-summary
+/// sentence, not recomputed.
+const PUBLISHED_HEADLINE_RATIO_AT_TOP_SCALE: u64 = 1_346;
+
+/// The currently-published (2026-07-22) answer latency, in milliseconds,
+/// at `BenchConfig::default().mid_scale` (1,000,000 accounts, §5) —
+/// quoted for §7's reproducibility note, not recomputed.
+const PUBLISHED_ANSWER_LATENCY_MS_AT_MID_SCALE: f64 = 2.6845;
+
+/// This laptop's own re-measurement of
+/// `PUBLISHED_ANSWER_LATENCY_MS_AT_MID_SCALE`, from the same uncontaminated
+/// 2026-07-27 run as `RUN_B_LARGEST_SCALES` ("Run B") — 1,000,000 accounts
+/// is not one of that table's three *largest* scales, so it is not part of
+/// it, but is quoted alongside for the same reproducibility note.
+const RUN_B_ANSWER_LATENCY_MS_AT_MID_SCALE: f64 = 5.5713;
+
+/// Run B — this laptop, 2026-07-27, nothing of this project's own
+/// competing for CPU (contrast Run A, contaminated by competing cargo
+/// builds and not quoted here) — full-rebuild time, headline-`K`(≈300)
+/// patch time, and their ratio, at the three largest scales this
+/// worktree's own `--scales`/`--mid-scale` `xtask bench` flags reached.
+/// `(accounts, full_rebuild_secs, headline_patch_ms, ratio)`. A one-off
+/// historical measurement, not reproduced by `BenchConfig::default()`.
+const RUN_B_LARGEST_SCALES: [(u64, f64, f64, u64); 3] = [
+    (9_437_184, 10.559, 6.7172, 1_572),
+    (18_874_368, 23.503, 7.2875, 3_225),
+    (37_748_736, 72.410, 14.6611, 4_939),
+];
+
+/// EXTRAPOLATION, not a measurement: the empirical exponent of Run B's
+/// ratio-vs-`N` growth between `RUN_B_LARGEST_SCALES`'s smallest and
+/// largest entries — ratio grows `1572 -> 4939` as `N` grows `9,437,184 ->
+/// 37,748,736` (exactly 4x), i.e. `log(4939 / 1572) / log(4) ~ 0.83`:
+/// ratio grows roughly as `N^0.83`. Used only to extend the *ratio* (§6's
+/// headline) to deployment scale — never applied to either raw time
+/// alone, since only the ratio is (to first order) machine-independent;
+/// see `complete_set_markdown`.
+const RUN_B_RATIO_GROWTH_EXPONENT: f64 = 0.83;
+
+/// EXTRAPOLATION, not a measurement: `RUN_B_RATIO_GROWTH_EXPONENT`
+/// extended from Run B's largest scale (37,748,736) to `DEPLOYMENT_ACCOUNTS`
+/// (a further 5.31x in `N`) — `4939 * 5.31^0.83 ~ 1.9e4`. On the order of
+/// 10^4; not a precise figure — see `complete_set_markdown`'s honest
+/// summary text, and its own cross-check against `DEPLOYMENT_FULL_REBUILD_SECS`.
+const EXTRAPOLATED_COMPLETE_SET_RATIO: f64 = 2.0e4;
+
 type Server = RisePirServer<Segmented3aryScheme, SimplePirBackend>;
 type Client = RisePirClient<SimplePirBackend>;
 
@@ -652,6 +745,192 @@ fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
+// ─── §7: the complete mainnet set ─────────────────────────────────────────
+
+/// Renders `docs/numbers.md` §7, "The complete mainnet set". Deliberately
+/// independent of any `BenchReport`/fresh `run()`: every figure here is
+/// either a fixed historical measurement (this laptop's Run B sweep past
+/// the published top scale, or the live deployment's own number,
+/// `docs/deploy.md` §5.3) or an explicitly labelled extrapolation from
+/// those — never a fresh timing this function takes itself. That is the
+/// point: unlike §1–§6, which change every time `to_markdown` is called
+/// against a new sweep, §7 must render *identically* across runs
+/// (including a future `--write` on a different machine) until a human
+/// deliberately updates one of the constants above it with a new
+/// citation. See those constants' own docs for where each figure comes
+/// from.
+fn complete_set_markdown() -> String {
+    let mut out = String::new();
+
+    writeln!(out, "## 7. The complete mainnet set ({} accounts)", fmt_num(DEPLOYMENT_ACCOUNTS)).unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "The live deployment (`docs/deploy.md` §5.3) serves the complete nonzero-balance mainnet set \
+         — {:.0}x larger than this file's largest bench scale ({} accounts, §1–§6). This section \
+         states plainly what is and is not measured at that scale, and what a defensible \
+         extrapolation of the §6 headline ratio looks like. §1–§6 above are left exactly as measured \
+         2026-07-22 — see the reproducibility note below for why.",
+        DEPLOYMENT_ACCOUNTS as f64 / PUBLISHED_TOP_SCALE_ACCOUNTS as f64,
+        fmt_num(PUBLISHED_TOP_SCALE_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**What is measured, and where.** The complete set's one-time full PIR-setup rebuild took \
+         **{DEPLOYMENT_FULL_REBUILD_SECS:.1} s** at {accounts} accounts — `docs/deploy.md` §5.3, \"PIR \
+         setup (one-time)\", on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB), **not** this \
+         benchmark machine. That is exactly §1's quantity (full-rebuild time) at deployment scale, but \
+         measured on a different machine from every other row in §1 and §6 — a fact that must travel \
+         with the number wherever it is quoted.",
+        accounts = fmt_num(DEPLOYMENT_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**What is not measured, plainly.** Per-block patch time has never been measured at the \
+         complete set. This laptop cannot hold that set — the geometry alone is a 35.43 GB server DB \
+         (§4b) — and the deployment box is a production server, not a benchmark rig, so it has never \
+         run the bench harness's warm-up/measured-block protocol either. §6 therefore has no \
+         {accounts}-account row, and deliberately does not get one: a patch time nobody measured has no \
+         business next to five that were.",
+        accounts = fmt_num(DEPLOYMENT_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**What the trend shows.** A separate run on 2026-07-27 — \"Run B\" below, uncontaminated by \
+         competing builds, *not* the run behind §1–§6 — extended this harness past {top} accounts with \
+         this worktree's own `xtask bench --scales <n,n,...> --mid-scale <n>` flags. Its three largest \
+         points:",
+        top = fmt_num(PUBLISHED_TOP_SCALE_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "| accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) |").unwrap();
+    writeln!(out, "|---:|---:|---:|---:|").unwrap();
+    for &(accounts, rebuild_secs, patch_ms, ratio) in &RUN_B_LARGEST_SCALES {
+        writeln!(out, "| {} | {rebuild_secs:.3} s | {patch_ms:.4} ms | {ratio}× |", fmt_num(accounts)).unwrap();
+    }
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Per-block patch time is *not* holding flat here — it grows from single-digit to ~15 ms across \
+         this range, the cache-plateau effect `docs/verification.md` Correction 4 already names, still \
+         climbing at these scales. §6's implicit hope that patch time stays near ~5 ms all the way to \
+         {} accounts is not supported by this trend.",
+        fmt_num(DEPLOYMENT_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    let (n0, _, _, r0) = RUN_B_LARGEST_SCALES[0];
+    let (n2, _, _, r2) = RUN_B_LARGEST_SCALES[2];
+    let n_growth = n2 as f64 / n0 as f64;
+    let ratio_growth = r2 as f64 / r0 as f64;
+    let n_extension = DEPLOYMENT_ACCOUNTS as f64 / n2 as f64;
+    let cross_check_ms = DEPLOYMENT_FULL_REBUILD_SECS / EXTRAPOLATED_COMPLETE_SET_RATIO * 1000.0;
+
+    writeln!(
+        out,
+        "**The extrapolated ratio — EXTRAPOLATION, not a measurement.** The ratio itself, unlike \
+         either time alone, is to first order machine-independent: numerator and denominator both \
+         scale with this machine's own CPU speed, so a uniform machine slowdown (see the \
+         reproducibility note below) largely cancels out of their quotient. That is what makes \
+         extrapolating the *ratio* from Run B defensible where extrapolating either raw time alone \
+         would not be:"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "- Run B's ratio grows {r0}× → {r2}× from {} to {} accounts — a {n_growth:.0}× increase in N \
+         producing a {ratio_growth:.2}× increase in ratio, i.e. ratio ∝ N^{RUN_B_RATIO_GROWTH_EXPONENT}.",
+        fmt_num(n0),
+        fmt_num(n2),
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Extending that exponent from {} to the deployment's {} (a {n_extension:.2}× further \
+         increase in N) gives ratio ≈ {r2} × {n_extension:.2}^{RUN_B_RATIO_GROWTH_EXPONENT} ≈ \
+         EXTRAPOLATION **2 × 10^4** (on the order of 10^4).",
+        fmt_num(n2),
+        fmt_num(DEPLOYMENT_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Run A (the contaminated run, not tabulated above) fits the same way to a smaller \
+         extrapolated ratio — consistent with treating this as an order-of-magnitude statement, not a \
+         precise one."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Cross-check, itself EXTRAPOLATION: dividing the deployment's own measured \
+         {DEPLOYMENT_FULL_REBUILD_SECS:.1} s full rebuild by the ~2 × 10^4 extrapolated ratio implies \
+         a per-block patch of roughly {cross_check_ms:.0} ms (55–75 ms, allowing for the \
+         extrapolation's own uncertainty) at {} accounts on that host — a figure nobody has measured \
+         (see \"instrumentation now exists\" below).",
+        fmt_num(DEPLOYMENT_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**Honest summary.** The {ratio}× this file publishes for {top} accounts (§6) understates the \
+         argument at deployment scale by more than an order of magnitude; a 10^5 claim (the original \
+         brief's assumption) would overstate it. The defensible statement today is: **on the order of \
+         10^4, and rising with N.**",
+        ratio = PUBLISHED_HEADLINE_RATIO_AT_TOP_SCALE,
+        top = fmt_num(PUBLISHED_TOP_SCALE_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**Reproducibility note.** Two runs on 2026-07-27 (Run A, contaminated by competing cargo \
+         builds; Run B, quoted above) came out uniformly 1.6–2× slower than the 2026-07-22 figures in \
+         §1–§5 across measurements that share no code path with the scale extension — e.g. answer \
+         latency at {mid} accounts ({run_b_lat:.4} ms vs. the published {pub_lat:.4} ms, §5) and \
+         full-rebuild time at {top} accounts ({run_b_rebuild:.3} s vs. the published {pub_rebuild:.3} \
+         s, §1). That is a machine-state difference on this laptop, not a code change, so §1–§6 above \
+         were deliberately left at their measured 2026-07-22 values rather than overwritten with \
+         slower 2026-07-27 numbers — and this section's own figures are comparable to §1–§6 only in \
+         shape (the trend, the ratio), never in absolute terms.",
+        mid = fmt_num(1_000_000),
+        run_b_lat = RUN_B_ANSWER_LATENCY_MS_AT_MID_SCALE,
+        pub_lat = PUBLISHED_ANSWER_LATENCY_MS_AT_MID_SCALE,
+        top = fmt_num(PUBLISHED_TOP_SCALE_ACCOUNTS),
+        run_b_rebuild = RUN_B_LARGEST_SCALES[0].1,
+        pub_rebuild = PUBLISHED_REBUILD_SECS_AT_TOP_SCALE,
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**Instrumentation now exists.** `NodeState::apply_block` (`crates/risepir-http/src/node.rs`) \
+         now returns its own measured hint-patch duration, and the mainnet follow loop \
+         (`crates/risepir-rpc/src/mainnet.rs`) aggregates and periodically logs it with the mean \
+         mutations/block (K) over the same window. The next restart of the live deployment will start \
+         producing the one number this section still lacks — a directly measured complete-set patch \
+         time — with no extrapolation involved."
+    )
+    .unwrap();
+
+    out
+}
+
 impl BenchReport {
     /// Renders every measured/computed number into the markdown this
     /// module's `xtask bench` subcommand prints to stdout and writes to
@@ -909,7 +1188,66 @@ impl BenchReport {
             )
             .unwrap();
         }
+        writeln!(out).unwrap();
+
+        // ── 7. The complete mainnet set — fixed historical citations,
+        // independent of this run's own `self` — see `complete_set_markdown`.
+        out.push_str(&complete_set_markdown());
 
         out
+    }
+}
+
+#[cfg(test)]
+mod complete_set_section_tests {
+    use super::*;
+
+    /// `docs/numbers.md` §7 must be rendered by this module, not
+    /// hand-typed — this locks in the figures a human reading the
+    /// committed file should be able to find, so an edit that silently
+    /// drops or unlabels one is caught here rather than only by
+    /// inspection.
+    #[test]
+    fn complete_set_markdown_contains_key_figures() {
+        let section = complete_set_markdown();
+
+        assert!(
+            section.contains("1236.5"),
+            "must cite the docs/deploy.md §5.3 full-rebuild time verbatim"
+        );
+        assert!(
+            section.contains("200,503,969"),
+            "must cite the docs/deploy.md §5.3 account count, thousands-separated to match this \
+             module's `fmt_num` convention"
+        );
+        assert!(
+            section.contains("EXTRAPOLATION"),
+            "the extrapolated ratio (and its cross-check) must be labelled, never presented as if \
+             it were measured"
+        );
+        assert!(section.starts_with("## 7."), "must render as its own numbered markdown section");
+    }
+
+    /// `to_markdown` must append §7 unconditionally, even for a tiny
+    /// single-scale report — §7's content does not depend on `self`, so
+    /// this also guards against a future refactor accidentally gating it
+    /// on `self.scales` containing some particular scale.
+    #[test]
+    fn to_markdown_always_appends_the_complete_set_section() {
+        let cfg = BenchConfig {
+            seed: 0x5EC7_10CE_5CA1_E000,
+            scales: vec![10_000],
+            mid_scale: 10_000,
+            k_values: vec![50],
+            headline_k: 50,
+            warmup_blocks: 1,
+            measured_blocks: 1,
+            measured_queries: 1,
+            block_time_secs: 12.0,
+        };
+        let report = run(&cfg);
+        let markdown = report.to_markdown("test-machine", "2026-01-01");
+        assert!(markdown.contains("## 7. The complete mainnet set"));
+        assert!(markdown.contains("200,503,969"));
     }
 }

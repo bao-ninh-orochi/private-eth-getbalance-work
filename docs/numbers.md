@@ -90,3 +90,34 @@ Duty cycle assumes a 12 s block (`docs/plan.md` §7's framing — the honest mea
 | 100,000 | 0.044 s | 1.9482 ms | 23× | 0.0162% |
 | 1,000,000 | 0.392 s | 3.5643 ms | 110× | 0.0297% |
 | 9,437,184 | 6.677 s | 4.9594 ms | 1346× | 0.0413% |
+
+## 7. The complete mainnet set (200,503,969 accounts)
+
+The live deployment (`docs/deploy.md` §5.3) serves the complete nonzero-balance mainnet set — 21x larger than this file's largest bench scale (9,437,184 accounts, §1–§6). This section states plainly what is and is not measured at that scale, and what a defensible extrapolation of the §6 headline ratio looks like. §1–§6 above are left exactly as measured 2026-07-22 — see the reproducibility note below for why.
+
+**What is measured, and where.** The complete set's one-time full PIR-setup rebuild took **1236.5 s** at 200,503,969 accounts — `docs/deploy.md` §5.3, "PIR setup (one-time)", on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB), **not** this benchmark machine. That is exactly §1's quantity (full-rebuild time) at deployment scale, but measured on a different machine from every other row in §1 and §6 — a fact that must travel with the number wherever it is quoted.
+
+**What is not measured, plainly.** Per-block patch time has never been measured at the complete set. This laptop cannot hold that set — the geometry alone is a 35.43 GB server DB (§4b) — and the deployment box is a production server, not a benchmark rig, so it has never run the bench harness's warm-up/measured-block protocol either. §6 therefore has no 200,503,969-account row, and deliberately does not get one: a patch time nobody measured has no business next to five that were.
+
+**What the trend shows.** A separate run on 2026-07-27 — "Run B" below, uncontaminated by competing builds, *not* the run behind §1–§6 — extended this harness past 9,437,184 accounts with this worktree's own `xtask bench --scales <n,n,...> --mid-scale <n>` flags. Its three largest points:
+
+| accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) |
+|---:|---:|---:|---:|
+| 9,437,184 | 10.559 s | 6.7172 ms | 1572× |
+| 18,874,368 | 23.503 s | 7.2875 ms | 3225× |
+| 37,748,736 | 72.410 s | 14.6611 ms | 4939× |
+
+Per-block patch time is *not* holding flat here — it grows from single-digit to ~15 ms across this range, the cache-plateau effect `docs/verification.md` Correction 4 already names, still climbing at these scales. §6's implicit hope that patch time stays near ~5 ms all the way to 200,503,969 accounts is not supported by this trend.
+
+**The extrapolated ratio — EXTRAPOLATION, not a measurement.** The ratio itself, unlike either time alone, is to first order machine-independent: numerator and denominator both scale with this machine's own CPU speed, so a uniform machine slowdown (see the reproducibility note below) largely cancels out of their quotient. That is what makes extrapolating the *ratio* from Run B defensible where extrapolating either raw time alone would not be:
+
+- Run B's ratio grows 1572× → 4939× from 9,437,184 to 37,748,736 accounts — a 4× increase in N producing a 3.14× increase in ratio, i.e. ratio ∝ N^0.83.
+- Extending that exponent from 37,748,736 to the deployment's 200,503,969 (a 5.31× further increase in N) gives ratio ≈ 4939 × 5.31^0.83 ≈ EXTRAPOLATION **2 × 10^4** (on the order of 10^4).
+- Run A (the contaminated run, not tabulated above) fits the same way to a smaller extrapolated ratio — consistent with treating this as an order-of-magnitude statement, not a precise one.
+- Cross-check, itself EXTRAPOLATION: dividing the deployment's own measured 1236.5 s full rebuild by the ~2 × 10^4 extrapolated ratio implies a per-block patch of roughly 62 ms (55–75 ms, allowing for the extrapolation's own uncertainty) at 200,503,969 accounts on that host — a figure nobody has measured (see "instrumentation now exists" below).
+
+**Honest summary.** The 1346× this file publishes for 9,437,184 accounts (§6) understates the argument at deployment scale by more than an order of magnitude; a 10^5 claim (the original brief's assumption) would overstate it. The defensible statement today is: **on the order of 10^4, and rising with N.**
+
+**Reproducibility note.** Two runs on 2026-07-27 (Run A, contaminated by competing cargo builds; Run B, quoted above) came out uniformly 1.6–2× slower than the 2026-07-22 figures in §1–§5 across measurements that share no code path with the scale extension — e.g. answer latency at 1,000,000 accounts (5.5713 ms vs. the published 2.6845 ms, §5) and full-rebuild time at 9,437,184 accounts (10.559 s vs. the published 6.677 s, §1). That is a machine-state difference on this laptop, not a code change, so §1–§6 above were deliberately left at their measured 2026-07-22 values rather than overwritten with slower 2026-07-27 numbers — and this section's own figures are comparable to §1–§6 only in shape (the trend, the ratio), never in absolute terms.
+
+**Instrumentation now exists.** `NodeState::apply_block` (`crates/risepir-http/src/node.rs`) now returns its own measured hint-patch duration, and the mainnet follow loop (`crates/risepir-rpc/src/mainnet.rs`) aggregates and periodically logs it with the mean mutations/block (K) over the same window. The next restart of the live deployment will start producing the one number this section still lacks — a directly measured complete-set patch time — with no extrapolation involved.

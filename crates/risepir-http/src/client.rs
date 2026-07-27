@@ -66,8 +66,10 @@ const MAX_ANSWER_BODY_BYTES: usize = 64 << 20; // 64 MiB
 /// a few MB at mainnet change rates (deltas telescope, ADR-0005).
 const MAX_SYNC_BODY_BYTES: usize = 1 << 30; // 1 GiB
 /// `/setup`: the one legitimately huge response — the full per-segment
-/// hint set is 830.73 MB at the complete mainnet set (`docs/numbers.md`
-/// §4c, measured 2026-07-26), so the cap only excludes the absurd.
+/// hint set computes to 553.82 MB at the complete mainnet set's deployed
+/// `(arity 2, bucket_size 4)` geometry (ADR-0034; was 830.73 MB at the
+/// `(arity 3, bucket_size 4)` geometry measured 2026-07-26, `docs/numbers.md`
+/// §4c), so the cap only excludes the absurd.
 const MAX_SETUP_BODY_BYTES: usize = 8 << 30; // 8 GiB
 /// Error bodies are diagnostic text; anything longer is noise.
 const MAX_ERROR_BODY_BYTES: usize = 64 << 10; // 64 KiB

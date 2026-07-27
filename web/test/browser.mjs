@@ -248,20 +248,25 @@ console.log(
 // ── 1. the page boots: wasm instantiated, hint loaded ─────────────────
 
 // The budget is sized for the hint download, not for page rendering, so it
-// has to follow the deployment's scale: 49 MB at --partial-capacity 1000000
-// is seconds on loopback and about a minute across an ocean, but the complete
-// mainnet set ships a **830.73 MB** hint (docs/numbers.md §4c) and takes
-// minutes. A fixed 240 s budget — sized for the partial case — reported the
-// complete-set deployment as a boot failure while the page was in fact
-// booting perfectly, measured at 153 s over the public origin.
+// has to follow the deployment's scale: 46.51 MB at --partial-capacity
+// 1000000 (ADR-0034's deployed geometry; was 49 MB pre-ADR-0034) is seconds
+// on loopback and about a minute across an ocean. The complete mainnet set —
+// still serving the pre-ADR-0034 `(3,4)` geometry until re-bootstrapped —
+// ships a **830.73 MB** hint (docs/numbers.md §4c) and takes minutes; a
+// `(2,4)` re-bootstrap computes to 553.82 MB. A fixed 240 s budget — sized
+// for the partial case — reported the complete-set deployment as a boot
+// failure while the page was in fact booting perfectly, measured at 153 s
+// over the public origin.
 const BOOT_BUDGET_MS = complete ? 900_000 : 240_000;
 
 // Poll in short evaluates from *this* side rather than one long-running one
-// in the page. An 831 MB navigation keeps the main frame in flight long
-// enough that the execution context is replaced underneath a single
-// `Runtime.evaluate`, which then dies with "Execution context was destroyed"
-// — the gate failing for a reason that has nothing to do with the page.
-// Short polls simply re-issue against whatever context is current.
+// in the page. An 831 MB navigation (554 MB once this origin is
+// re-bootstrapped onto ADR-0034's geometry — either is large) keeps the main
+// frame in flight long enough that the execution context is replaced
+// underneath a single `Runtime.evaluate`, which then dies with "Execution
+// context was destroyed" — the gate failing for a reason that has nothing to
+// do with the page. Short polls simply re-issue against whatever context is
+// current.
 async function pollForBoot(deadlineMs) {
   const deadline = Date.now() + deadlineMs;
   let lastHarnessError = "";

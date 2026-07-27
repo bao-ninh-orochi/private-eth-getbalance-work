@@ -19,7 +19,7 @@ use risepir_proto::{keccak256, BlockDelta, BlockUpdate, ValueCodec};
 use risepir_rpc::journal::{journal_path_for, JournalError, JournalWriter, ScanStop};
 use risepir_rpc::state::{self, LoadedState, RestoreError, Server};
 use risepir_server::DeltaRing;
-use segmented_cuckoo::Segmented3aryCuckooKVStore;
+use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
 fn codec() -> ValueCodec {
     ValueCodec {
@@ -31,9 +31,9 @@ fn codec() -> ValueCodec {
 
 fn small_server() -> Server {
     let codec = codec();
-    let num_buckets = 3 * 64;
-    let pb = simple_max_plaintext_bits(num_buckets / 3, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-    let store = Segmented3aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+    let num_buckets = 2 * 64;
+    let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+    let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
     Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
 }
 
@@ -338,7 +338,7 @@ async fn semantically_wrong_record_is_an_apply_failure_not_a_fallback() {
         .append(
             &BlockDelta {
                 block: 1,
-                per_segment: vec![vec![(0, vec![(0, poison)])], vec![], vec![]],
+                per_segment: vec![vec![(0, vec![(0, poison)])], vec![]],
             },
             1,
         )
@@ -407,7 +407,7 @@ async fn matching_digest_but_wrong_base_block_is_refused() {
         .append(
             &BlockDelta {
                 block: 6,
-                per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+                per_segment: vec![vec![(0, vec![(0, 1)])], vec![]],
             },
             1,
         )
@@ -445,7 +445,7 @@ async fn row_straddling_offset_is_an_apply_failure() {
                 // Offset exactly == row_width: one past this row's last
                 // cell, i.e. the *next row's first cell* — in bounds for
                 // the segment slice, out of bounds for the row.
-                per_segment: vec![vec![(0, vec![(row_width as u16, 1)])], vec![], vec![]],
+                per_segment: vec![vec![(0, vec![(row_width as u16, 1)])], vec![]],
             },
             1,
         )

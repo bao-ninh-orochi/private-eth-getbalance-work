@@ -18,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
     // any fixed valid pair exercises the decoder's hostile-input handling
     // just as thoroughly as a real deployment's would.
     const PLAINTEXT_BITS: u32 = 8;
-    const ARITY: u32 = 3;
+    const ARITY: u32 = 2;
 
     let Ok((_header, mut reader)) = JournalReader::open(data, data.len() as u64, PLAINTEXT_BITS, ARITY) else {
         return;

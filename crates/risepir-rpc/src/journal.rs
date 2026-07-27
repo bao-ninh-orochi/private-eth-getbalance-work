@@ -592,12 +592,16 @@ mod tests {
     use std::io::Cursor;
 
     const PB: u32 = 8;
-    const ARITY: u32 = 3;
+    const ARITY: u32 = 2;
 
     fn delta(block: u64, magnitude: i64) -> BlockDelta {
         BlockDelta {
             block,
-            per_segment: vec![vec![(0, vec![(0, magnitude)])], vec![], vec![]],
+            // ARITY (2) segments — `JournalReader::next` decodes each
+            // record's payload against `self.arity` (`ARITY` here), so a
+            // segment count that disagrees is a wire-level ArityMismatch,
+            // not merely an unrealistic fixture.
+            per_segment: vec![vec![(0, vec![(0, magnitude)])], vec![]],
         }
     }
 

@@ -48,7 +48,7 @@ use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend, Simple
 use risepir_http::wire;
 use risepir_proto::{BlockDelta, ValueCodec};
 use risepir_server::{RisePirServer, SetupBundle};
-use segmented_cuckoo::{CuckooParams, Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{CuckooParams, Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
 use crate::journal::{self, JournalReader, ScanStop};
 
@@ -58,7 +58,23 @@ const MAGIC: &[u8; 5] = b"RPST2";
 const CHUNK_CELLS: usize = 64 * 1024;
 
 /// The concrete server type this deployment persists.
-pub type Server = RisePirServer<Segmented3aryScheme, SimplePirBackend>;
+pub type Server = RisePirServer<Segmented2aryScheme, SimplePirBackend>;
+
+/// Arity of the concrete store type [`Server`] is compiled against
+/// (`Segmented2aryScheme` / `Segmented2aryCuckooKVStore`, ADR-0034). There
+/// is no associated const to read this off `Server` itself —
+/// `IndexScheme::arity` is an instance method, and the scheme types carry a
+/// `segment_size` field rather than a compile-time arity — so this is a
+/// hand-kept mirror, pinned against a real instance of the compiled store
+/// type by `store_arity_matches_the_compiled_store_type` in the tests
+/// below. [`parse_raw`] compares a loaded state file's own geometry
+/// against this *by name*, milliseconds after the header decodes, rather
+/// than letting a mismatch surface only after the full cells array (~36 GB
+/// at the complete mainnet set) has already been read and allocated, or
+/// only as [`assemble`]'s `from_cells` rejection deep inside store
+/// reconstruction — both of which are also true, but too late and too easy
+/// to misread as disk corruption rather than a stale binary/state pairing.
+const STORE_ARITY: usize = 2;
 
 /// Everything [`load`] returns: the reassembled server plus the
 /// completeness marker the JSON-RPC front end's `NotFound` policy is
@@ -348,8 +364,10 @@ pub(crate) fn load_raw(path: &Path, codec: &ValueCodec) -> Result<RawState, Stat
 /// header-declared length *before* it sizes an allocation — a corrupt or
 /// hostile file must produce a clean [`StateError`], never an OOM (the
 /// repo's validate-every-length rule applies to state files too, not just
-/// the network). Stops short of store reconstruction — see [`RawState`]
-/// and [`assemble`].
+/// the network). Also rejects a state file of the wrong arity lineage (see
+/// [`STORE_ARITY`]) right after the header decodes, before the cells
+/// section is even read, let alone allocated. Stops short of store
+/// reconstruction — see [`RawState`] and [`assemble`].
 fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<RawState, StateError> {
     let mut r = HashingReader {
         inner: reader,
@@ -409,6 +427,15 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
     r.read_exact(&mut setup_bytes).map_err(io_err)?;
     let setup = wire::decode_setup(&setup_bytes).map_err(|e| StateError::Corrupt(format!("setup section: {e}")))?;
     let params = setup.params;
+    if params.arity() != STORE_ARITY {
+        return Err(StateError::Corrupt(format!(
+            "state file geometry is arity {} but this binary is compiled for arity {STORE_ARITY} \
+             (ADR-0034) — this is not disk corruption, it is an intact state file from a previous \
+             geometry lineage; move the --state file aside and re-bootstrap from a fresh snapshot \
+             (do not restore from backup, the file itself is fine)",
+            params.arity(),
+        )));
+    }
 
     let cells_len = read_u64(&mut r)?;
     let cells_len = usize::try_from(cells_len).map_err(|_| StateError::Corrupt("cells_len overflow".to_string()))?;
@@ -469,13 +496,21 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
 }
 
 /// Assembles a [`LoadedState`] from [`RawState`]'s parts: reconstructs the
-/// store via `Segmented3aryCuckooKVStore::from_cells` and the server via
+/// store via `Segmented2aryCuckooKVStore::from_cells` and the server via
 /// [`Server::from_parts`]. Shared by the plain load path ([`load_from`])
 /// and the journal-restore path ([`load_with_journal_restore`]), which
 /// mutates `cells` / `setup.hints` / `num_items` / `setup.block` in place
 /// before calling this.
+///
+/// `from_cells` itself also rejects a `scheme_kind` that does not match
+/// `Segmented2aryScheme` (`InvalidParams("scheme_kind mismatch: ...")`,
+/// which would surface here as `StateError::Corrupt("store reconstruction:
+/// ...")`) — but by the time either caller reaches this function,
+/// [`parse_raw`]'s [`STORE_ARITY`] check has already refused a mismatched
+/// state file, in milliseconds and before the cells array was even
+/// allocated. This is defense in depth, not the primary guard (ADR-0034).
 pub(crate) fn assemble(raw: RawState, config: ikpir_common::SimpleConfig, codec: ValueCodec) -> Result<LoadedState, StateError> {
-    let store = Segmented3aryCuckooKVStore::from_cells(raw.cells, raw.setup.params, raw.num_items)
+    let store = Segmented2aryCuckooKVStore::from_cells(raw.cells, raw.setup.params, raw.num_items)
         .map_err(|e| StateError::Corrupt(format!("store reconstruction: {e:?}")))?;
     let server = Server::from_parts(store, config, codec, raw.setup.backend_params, raw.setup.hints, raw.setup.block);
     Ok(LoadedState {
@@ -759,9 +794,9 @@ mod tests {
 
     fn small_server() -> Server {
         let codec = codec();
-        let num_buckets = 3 * 64;
-        let pb = simple_max_plaintext_bits(num_buckets / 3, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented3aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+        let num_buckets = 2 * 64;
+        let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
     }
 
@@ -974,5 +1009,118 @@ mod tests {
         let _re = acquire_state_path(&path).expect("a released path can be re-claimed");
 
         std::fs::remove_file(&lock_path).unwrap();
+    }
+
+    /// [`STORE_ARITY`] pinned against the real compiled store type: builds
+    /// an actual `Segmented2aryCuckooKVStore` (the store [`Server`] is
+    /// compiled against) and checks its own reported arity matches the
+    /// hand-kept mirror [`parse_raw`]'s check compares against — so a
+    /// future arity change that updates `Server`'s scheme but forgets to
+    /// update `STORE_ARITY` fails here immediately, not silently.
+    #[test]
+    fn store_arity_matches_the_compiled_store_type() {
+        let codec = codec();
+        let num_buckets = 2 * 64;
+        let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+        assert_eq!(store.params().arity(), STORE_ARITY);
+    }
+
+    /// A state file whose header names `SchemeKind::Segmented3ary` — the
+    /// arity this binary was compiled against *before* ADR-0034 — must be
+    /// rejected, and rejected *by name*: the cells section built below is
+    /// sized exactly to this (otherwise well-formed) 3-ary geometry and the
+    /// trailing checksum is computed correctly over it, so if the arity
+    /// check in `parse_raw` did not exist, this file would load
+    /// successfully (structurally, it is not corrupt at all — it is just
+    /// the previous geometry lineage). Built by hand-assembling a
+    /// `SetupBundle` (mirroring `risepir_http::wire`'s own test fixtures)
+    /// rather than through a real 3-ary `Server`, because this crate's
+    /// `Server` alias is now pinned to `Segmented2aryScheme`.
+    #[test]
+    fn wrong_arity_state_file_rejected_by_name_not_by_shape() {
+        use ikpir_common::backend::simple::{SimpleHint, SimpleServerParams};
+        use segmented_cuckoo::SchemeKind;
+
+        let arity = 3usize;
+        let lwe_dim = 4u32;
+        let reshape_row_width = 6u32;
+        let params = CuckooParams {
+            scheme_kind: SchemeKind::Segmented3ary,
+            num_buckets: 96,
+            bucket_size: 4,
+            fingerprint_bits: 32,
+            value_bits: 96,
+            plaintext_bits: 8,
+        };
+        assert_eq!(params.arity(), arity, "sanity: this fixture must actually be 3-ary");
+
+        let backend_params: Vec<SimpleServerParams> = (0..arity)
+            .map(|i| SimpleServerParams {
+                params: SimpleParams::new(lwe_dim, 8, SimpleParams::DEFAULT_SIGMA, [i as u8; 16]),
+                n_rows: 10,
+                row_width: 3,
+                k: 2,
+                reshape_rows: 5,
+                reshape_row_width,
+            })
+            .collect();
+        let hints: Vec<SimpleHint> = (0..arity)
+            .map(|i| SimpleHint {
+                data: (0..lwe_dim * reshape_row_width).map(|j| (i as u32) * 1_000 + j).collect(),
+            })
+            .collect();
+        let setup_bytes = wire::encode_setup(&SetupBundle { params, backend_params, hints, block: 0 });
+
+        let cells_len = params.num_buckets as usize * params.bucket_size as usize * params.cells_per_slot() as usize;
+        let cells = vec![0u32; cells_len];
+
+        // key_tag(32) + balance(64) + checksum(0) = 96, matching
+        // `params.value_bits` above.
+        let three_ary_codec = ValueCodec { key_tag_bits: 32, balance_bits: 64, checksum_bits: 0 };
+        assert_eq!(three_ary_codec.value_bits(), params.value_bits);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(1); // complete
+        for w in [three_ary_codec.key_tag_bits, three_ary_codec.balance_bits, three_ary_codec.checksum_bits] {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // num_items
+        bytes.extend_from_slice(&(setup_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&setup_bytes);
+        bytes.extend_from_slice(&(cells.len() as u64).to_le_bytes());
+        for c in &cells {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        hasher.update(&bytes);
+        bytes.extend_from_slice(&hasher.digest().to_le_bytes());
+
+        match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &three_ary_codec) {
+            Err(StateError::Corrupt(msg)) => {
+                assert!(msg.contains("arity"), "must name the arity mismatch: {msg}");
+                assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
+                // Must explicitly steer *away* from "restore from backup" —
+                // the advice the checksum-mismatch error above gives, and
+                // the wrong one here: this file is not corrupt.
+                assert!(
+                    msg.contains("do not restore from backup"),
+                    "must say not to restore from backup (the file itself is intact): {msg}"
+                );
+                assert!(
+                    !msg.contains("store reconstruction"),
+                    "must be rejected by the explicit STORE_ARITY check, not upstream's from_cells \
+                     fallback (which would prove the check ran too late): {msg}"
+                );
+            }
+            Err(StateError::Io(msg)) => {
+                panic!("a state file from a different arity lineage must be rejected as Corrupt, not Io: {msg}")
+            }
+            // `LoadedState` has no `Debug` impl (not needed anywhere else),
+            // so the success case is just named directly rather than
+            // formatted.
+            Ok(_) => panic!("a state file from a different arity lineage must not load successfully"),
+        }
     }
 }

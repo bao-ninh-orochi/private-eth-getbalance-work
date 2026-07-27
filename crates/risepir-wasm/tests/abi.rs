@@ -22,9 +22,9 @@ use risepir_proto::{codec, keccak256, Backend, BlockUpdate, Geometry, ValueCodec
 use risepir_server::{RisePirServer, SetupBundle};
 use risepir_wasm::abi::*;
 use risepir_wasm::{STATUS_DECODE_FAILED, STATUS_ERROR, STATUS_FOUND, STATUS_UNTRACKED, STATUS_ZERO};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 /// Small enough to keep the whole suite quick; the geometry, codecs, and
@@ -50,14 +50,14 @@ fn account(i: u64) -> ([u8; 20], u128) {
     (addr, balance)
 }
 
-type Server = RisePirServer<Segmented3aryScheme, SimplePirBackend>;
+type Server = RisePirServer<Segmented2aryScheme, SimplePirBackend>;
 
 /// A server holding [`ACCOUNTS`] deterministic accounts at block 0.
 fn build_server() -> Server {
     let codec = value_codec();
     let geom = Geometry::for_accounts(ACCOUNTS, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
         .expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,

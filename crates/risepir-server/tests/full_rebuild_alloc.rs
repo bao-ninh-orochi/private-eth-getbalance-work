@@ -3,9 +3,13 @@
 //! array. Before this fix, `full_rebuild` snapshotted
 //! `self.store.as_cells().to_vec()` "to avoid a borrow conflict" that
 //! never actually existed (disjoint field borrows are fine) — at the
-//! live deployment's 35.43 GB database that one `.to_vec()` took peak RSS
-//! from ~38 GB to ~73 GB, turning `full_rebuild`'s own documented repair
-//! path for a failed `apply_block` into an OOM. See
+//! live deployment's 35.43 GB database (the `(arity 3, bucket_size 4)`
+//! geometry deployed at the time; ADR-0034 has since retuned this to
+//! 23.62 GB) that one `.to_vec()` took peak RSS from ~38 GB to ~73 GB,
+//! turning `full_rebuild`'s own documented repair path for a failed
+//! `apply_block` into an OOM. The invariant this test pins is
+//! geometry-independent — a same-shaped bug today would double ~24.7 GB
+//! to ~47 GB instead, still exactly the OOM this guards against. See
 //! `crates/risepir-server/src/server.rs`'s `full_rebuild` for the fix and
 //! its new `# Memory` doc section.
 //!
@@ -49,7 +53,7 @@ use ikpir_common::{IndexPirBackend, SimpleConfig, SimplePirBackend};
 use risepir_proto::geometry::Geometry;
 use risepir_proto::{AddressHash, Balance, BlockUpdate, ValueCodec};
 use risepir_server::RisePirServer;
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
 // ── Test geometry — adapted from `risepir_server::server`'s own
 // `#[cfg(test)] mod tests` (`crates/risepir-server/src/server.rs`), with
@@ -58,8 +62,8 @@ use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
 // smaller than the full cell array (measured below, in the test itself)
 // while keeping setup/rebuild cost small. `plaintext_bits` stays derived
 // either way, per this crate's binding rule ─────────────────────────────
-const ARITY: u32 = 3;
-const NUM_BUCKETS: u32 = 3 * 4096;
+const ARITY: u32 = 2;
+const NUM_BUCKETS: u32 = 2 * 4096;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const KEY_TAG_BITS: u32 = 32;
@@ -113,8 +117,8 @@ fn config() -> SimpleConfig {
     }
 }
 
-fn empty_store(geom: &Geometry) -> Segmented3aryCuckooKVStore {
-    Segmented3aryCuckooKVStore::new(
+fn empty_store(geom: &Geometry) -> Segmented2aryCuckooKVStore {
+    Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -124,7 +128,7 @@ fn empty_store(geom: &Geometry) -> Segmented3aryCuckooKVStore {
     .unwrap()
 }
 
-fn server(geom: &Geometry) -> RisePirServer<Segmented3aryScheme, SimplePirBackend> {
+fn server(geom: &Geometry) -> RisePirServer<Segmented2aryScheme, SimplePirBackend> {
     RisePirServer::new(empty_store(geom), config(), value_codec(), 0)
 }
 

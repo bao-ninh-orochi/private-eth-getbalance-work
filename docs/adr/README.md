@@ -1126,7 +1126,7 @@ page to fetch a fresh hint") and re-bootstraps by reload. Doing the same
 automatically in the page would mean re-downloading the hint inside a tab, and is
 left for whoever revisits `web/`.
 
-### ADR-0030 — Geometry quantization: arity is not the lever, `bucket_size` is — capped at 4 today **[NEW]**
+### ADR-0030 — Geometry quantization: arity is not the lever, `bucket_size` is — capped at 4 today **[SUPERSEDED IN PART by ADR-0034 — its `(3,3)` recommendation is dropped; its arity-vs-database-size correction stands, qualified]**
 
 **Chosen:** keep the deployed `arity 3, bucket_size 4` unchanged, and add `xtask
 geometry` (`cargo run -p xtask --release -- geometry [--fill-check]`) — an
@@ -1259,7 +1259,7 @@ which is not. Nothing above is stated as measured unless it was.
 both why `num_buckets` quantizes by factors of 2 and why
 `SUPPORTED_BUCKET_SIZES` hard-caps `bucket_size` at 4. `docs/HANDOFF.md`'s
 upstream-candidates bullet now points here.
-### ADR-0031 — `for_accounts`'s target load is `min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`, not a flat 0.75 **[NEW]**
+### ADR-0031 — `for_accounts`'s target load is `min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`, not a flat 0.75 **[RETUNED by ADR-0034 — the constants are now `min(0.90, 0.95 × MAX_LOAD_FACTOR)`; the rule's shape, its exact-integer arithmetic, and its motivating regression are unchanged]**
 
 **Chosen:** `Geometry::for_accounts` now sizes each `(arity, bucket_size)`
 against `target = min(GLOBAL_TARGET, SAFETY_MARGIN × MAX_LOAD_FACTOR[arity-2]
@@ -1514,3 +1514,229 @@ a ring-covered range requested with the other lineage's epoch is refused;
 a block-only validator never revalidates) and
 `crates/risepir-rpc/tests/rebootstrap.rs` (the 409 → re-bootstrap → correct
 answer path).
+
+### ADR-0034 — Deploy `(arity 2, bucket_size 4)` at target `min(0.90, 0.95 × MAX_LOAD_FACTOR)`: the top fillable rung, and the cheapest hint on it **[NEW — supersedes ADR-0030's `(3,3)` recommendation; retunes ADR-0031's constants]**
+
+**Chosen:** move the mainnet and demo geometry from `(arity 3, bucket_size 4)` to
+**`(arity 2, bucket_size 4)`**, and retune `Geometry::for_accounts`'s target from
+`min(0.75, 0.85 × MAX_LOAD_FACTOR)` to **`min(0.90, 0.95 × MAX_LOAD_FACTOR)`**. At
+the live complete set (200,503,969 accounts) this lands **load 0.7469**, a
+**23.62 GB** server DB, a **553.82 MB** total hint and **1.11 GB** client resident
+memory — against today's 0.4980 / 35.43 GB / 830.73 MB / 1.66 GB. Every headline
+number improves by a third at once. Also add an **explicit arity check on the
+state-file load path**, because this change makes the running deployment's state
+file un-loadable by design and that must fail by name, not by luck.
+
+**Rejected:**
+- **Staying at `(3,4)`.** It runs at load 0.4980 — 53% of what the structure holds —
+  and pays 35.43 GB and an 830.73 MB browser first load for headroom this deployment
+  does not need (§3).
+- **ADR-0030's `(3,3)`** (26.58 GB, load 0.6639, a one-line change). Strictly
+  dominated once the arity change is on the table: `(2,4)` is 2.96 GB smaller,
+  166 MB cheaper on the hint, and runs hotter. `(3,3)` remains the right answer for
+  anyone unwilling to touch arity.
+- **`(4,4)`** — same rung, same 23.62 GB, same 0.7469, `MAX_LOAD_FACTOR` 0.95 rather
+  than 0.91, but a **784.50 MB** hint. It buys cuckoo robustness this workload's
+  insert rate says it does not need, and charges 231 MB of browser download for it.
+- **Any configuration with `MAX_LOAD_FACTOR < 0.90`** — `(2,1)` 0.48, `(2,2)` 0.83,
+  `(2,3)` 0.89, `(3,1)` 0.85. A deployment whose point is that the structure runs hot
+  has no business on a rung that cannot.
+
+**1. The rung menu is the whole problem — the target load is not a size dial.**
+
+`num_buckets` is `2^t` (arity 2/4) or `3·2^t` (arity 3), so
+`slots = num_buckets × bucket_size` can only take the values **`{2^t, 3·2^t, 9·2^t}`**.
+At 200,503,969 accounts that menu is:
+
+| slots | load | server DB | reachable by |
+|---:|---:|---:|---|
+| `3·2²⁶` = 201,326,592 | 0.9959 | 17.72 GB | **unfillable** — above every published ceiling (max 0.95) |
+| `2²⁸` = 268,435,456 | **0.7469** | **23.62 GB** | `(2,4)`, `(4,1)`, `(4,2)`, `(4,4)` |
+| `9·2²⁵` = 301,989,888 | 0.6639 | 26.58 GB | `(3,3)` only |
+| `3·2²⁷` = 402,653,184 | 0.4980 | 35.43 GB | `(3,4)` ← today, `(2,3)`, `(3,1)`, `(3,2)`, `(4,3)` |
+
+There is nothing between 0.7469 and 0.9959, so **0.7469 is the highest load any
+buildable configuration reaches at this account count** — a consequence of
+`segmented-cuckoo`'s masking-based hash, not of any load-factor analysis. Raising the
+sizing target alone therefore changes almost nothing: swept across all twelve
+buildable `(arity, bucket_size)` at the live count, moving the target from
+`min(0.75, 0.85×MLF)` to `min(0.90, 0.95×MLF)` changes the chosen geometry of
+**exactly one** — `(2,2)`, from 268,435,456 to 134,217,728 buckets — and of no
+candidate considered here.
+
+Note also that **no arity-3 configuration reaches the top rung**: arity 3's rungs are
+`{3·2^t, 9·2^t}`, whose best fillable load is `(3,3)`'s 0.6639. Wanting maximum load
+*forces* the arity change. That is the one respect in which ADR-0030's "arity is not
+the lever" needs qualifying: arity is not a lever on **database size at a fixed
+load**, which is what that ADR measured and which still holds exactly. It *is* a
+lever on **which loads are reachable at all**, because it selects the quantization
+lattice. Both statements are true; ADR-0030 only needed the first.
+
+**2. On that rung, arity 2 wins — `hint ∝ √arity` (ADR-0030's own law).**
+
+All four members of the 268,435,456-slot rung have identical `server_db`. They do not
+have identical hints:
+
+| configuration | MLF | hint total | client resident | query / response |
+|---|---:|---:|---:|---:|
+| **`(2,4)`** | 0.91 | **553.82 MB** | **1.11 GB** | 435.07 / 434.37 KB |
+| `(4,1)` | 0.91 | 784.05 MB | 1.57 GB | 614.62 / 614.94 KB |
+| `(4,2)` | 0.94 | 783.60 MB | 1.57 GB | 614.98 / 614.59 KB |
+| `(4,4)` | 0.95 | 784.50 MB | 1.57 GB | 614.27 / 615.30 KB |
+
+`xtask::geometry::tests::sqrt_arity_hint_law` already pins the mechanism. Dropping to
+two segments is what turns a 12 GB database saving into a **33% cut on the browser's
+first download** as well — the constraint `CLAUDE.md` calls "the whole product
+constraint" and ADR-0032 built a pre-flight around.
+
+That cut changes a product verdict, not just a number. ADR-0032's pre-flight estimates
+the browser's init peak at `3 × hint` and refuses when it exceeds half of
+`navigator.deviceMemory`. The device class that pre-flight was written for — real
+4–8 GB phones, which report `deviceMemory = 4`, budget 2.0 GB — was refused at
+`(3,4)` (peak `3 × 830.73 MB` = 2.49 GB). At `(2,4)` the peak is `3 × 553.82 MB` =
+**1.66 GB, inside the 2.0 GB budget**, so those devices are now admitted. The complete
+set stops being desktop-only for them. `web/test/e2e.mjs` asserts both halves — the
+refusal still fires at the historical `(3,4)` size, so ADR-0032's regression cannot be
+retired by a geometry shrink, and the new admission is asserted rather than assumed.
+
+**3. The load is safe here because this workload almost never inserts.**
+
+Measured on the live deployment, bootstrap → first reload (`docs/deploy.md` §5.3):
+
+| | block | accounts |
+|---|---:|---:|
+| snapshot ingested, setup done | 25,613,233 | 200,503,969 |
+| state reloaded | 25,613,849 | 200,510,802 |
+| **Δ over 616 blocks** | | **+6,833** |
+
+**≈ 11.1 net new accounts/block**, ~79,850/day at 7,200 blocks/day. Mainnet's
+balance-changing rate is ~300 accounts/block (the brief's figure; `docs/verification.md`
+Correction 9 measures *Sepolia* at ~140/block and corroborates the shape, it does not
+re-measure mainnet). Insertions are therefore **~3.7%** of the write load — ~7.4% even
+if the true mainnet rate were Sepolia's ~140 — and the other ~93–96% are updates and
+deletes, which `apply_change` routes to `store.update` / `store.delete`, neither of
+which walks an eviction chain. Cuckoo insert cost — the thing a high load factor
+actually makes expensive — is paid on roughly one mutation in twenty-seven.
+
+This is one 616-block window (~2 h of chain time), not a long-run average, and it is
+the only interval for which two exact account counts exist in the log. It is reported
+as such. It settles the question it is used for — whether inserts or updates dominate
+— by more than an order of magnitude either way.
+
+**4. Why the target constants move too, and why that is not cosmetic.**
+
+`(2,4)` is chosen correctly by the *old* 0.75 target as well. The constants must still
+move, for a reason that only bites later: with a flat 0.75, capacity for this geometry
+is `0.75 × 268,435,456 = 201,326,592` accounts — **822,623 above today's count, about
+ten days of growth**. Past that, any future re-bootstrap silently sizes up to `2²⁹`
+slots and **47.24 GB**, worse than the 35.43 GB it replaced. The 0.75 figure was never
+a property of the structure; it was headroom policy, and this deployment has
+explicitly traded headroom for density.
+
+At `min(0.90, 0.95 × MLF)`, `(2,4)`'s target is `0.95 × 0.91 = 0.8645`, capacity is
+232,062,451 accounts, and the runway becomes:
+
+| threshold | accounts | runway at ~79,850/day |
+|---|---:|---:|
+| target 0.8645 (re-bootstrap due) | 232,062,451 | ~395 days |
+| `MAX_LOAD_FACTOR` 0.91 (fill fails) | 244,276,265 | ~548 days |
+
+The blast radius of the retune is the inverse of ADR-0031's: at `(0.90, 0.95)` **ten**
+of twelve buildable configurations are bound by the per-configuration ceiling and only
+`(4,3)` / `(4,4)` by the flat cap, where before it was three and nine. The
+exact-integer arithmetic is unaffected — `95 × 91 = 8_645` and `95 × 95 = 9_025` land
+on the existing `TARGET_DEN = 10_000` scale exactly, as `85 × …` did. ADR-0031's
+motivating regression still holds: `(2,1)` sizes to `0.95 × 0.48 = 0.456` and fills.
+The four pinned `(3,4)` bench/deploy `num_buckets` values (49,152 / 393,216 /
+3,145,728 / 100,663,296) are **unchanged** by the retune — verified arithmetically
+before the constants moved, so
+`for_accounts_deployed_and_bench_num_buckets_unchanged` keeps its meaning rather than
+being re-baselined to whatever the new code prints.
+
+**5. What this costs: the demo quantizes worse, and the bench scales flatter it least.**
+
+Arity 2 is not free everywhere. At the partial demo's account counts the `2^t` lattice
+lands *badly* where `3·2^t` landed well: at `--partial-capacity 1000000` the geometry
+goes 393,216 → 524,288 buckets, so the server DB grows **0.13 → 0.17 GB (+33%)** and
+load drops 0.6358 → 0.4768, while the hint improves only slightly, 48.96 → 46.51 MB.
+The same shape holds at 250 K / 500 K / 4 M. This is the identical quantization effect
+that hands the complete set its win, running in the other direction; the demo is small
+enough that paying it is the right trade, but it is a real cost and is recorded here
+rather than discovered later.
+
+The same effect dominates `docs/numbers.md` §1–§6, whose three bench scales
+(100 K / 1 M / 9,437,184) are all counts where arity 2 quantizes poorly: at 9,437,184
+accounts `(3,4)` takes 3,145,728 buckets (load 0.75, 251,658,240 cells) and `(2,4)`
+takes 4,194,304 (load 0.5625, **1.33× more cells**). A same-machine control run
+confirms the consequence — full rebuild 8.984 s at `(3,4)` against 12.797 s at
+`(2,4)`, i.e. `(2,4)` measures 1.42× slower *because it is holding a third more data
+at that particular account count*, not because of the arity. **At the complete set the
+relationship inverts**: `(2,4)` holds 1.50× *fewer* cells. §7 of that file carries the
+control table so the committed §1–§6 cannot be read as "the geometry change made
+everything slower". The one genuine arity effect visible in the control runs the other
+way: per-block patch time is *lower* at `(2,4)` (5.2321 ms vs 6.8111 ms at the top
+scale), because there are two segments to patch instead of three.
+
+**6. The state file does not survive this, and that must fail loudly.**
+
+`state.rs`'s load path reconstructs the store with a **compile-time concrete type** and
+performed no arity validation of its own: the format (`RPST2`) carries `CuckooParams`,
+and nothing in this repo compared `params.arity()` against the scheme the binary was
+built with. After this change the live 36 GB state file — written by a 3-ary binary,
+`num_buckets` 100,663,296 — is loaded by a 2-ary one.
+
+The mismatch was *already* caught, and caught by name: at the pinned IKPIR rev
+(`3d60fa7`), `CuckooKVStore::<Segmented2aryScheme>::from_cells` checks
+`params.scheme_kind` before anything else and returns
+`InvalidParams("scheme_kind mismatch: expected Segmented2ary")`. This ADR adds an
+explicit check anyway, for three reasons that the upstream one does not cover:
+
+1. **It is not ours.** It lives in a pinned git dependency. Repointing that rev, or an
+   upstream refactor of `from_cells`, would remove this repo's only defence against a
+   geometry-lineage mismatch, and nothing here would notice.
+2. **It reports the wrong class of failure.** It surfaces as
+   `StateError::Corrupt("store reconstruction: …")`, and the operator instruction that
+   goes with `Corrupt` is "restore from backup or re-bootstrap". The file is not
+   corrupt. It is intact and of the previous lineage, and restoring an older backup of
+   the same lineage makes things worse, not better.
+3. **It fires too late.** It runs during store reconstruction — after `parse_raw` has
+   already read and allocated the entire cells array, ~36 GB and minutes of I/O at the
+   complete set.
+
+The check therefore sits in `parse_raw`, immediately after the setup header decodes and
+before the cells section is read at all, and its message names the cause (a previous
+geometry lineage), the fix (move the `--state` file aside and re-bootstrap), and what
+*not* to do (restore from backup). The repo's first binding rule — never return a wrong
+answer — does not permit relying on a dependency's shape check to stand in for a
+geometry-lineage check.
+
+**Operationally this means the change is a re-bootstrap, not a restart.** The running
+deployment keeps serving `(3,4)` until the operator moves `~/risepir-state.bin` aside
+and re-runs `~/bootstrap-complete.sh` (~33 min at the complete set). Between merge and
+that re-bootstrap the code and the live server disagree **by design**; `docs/deploy.md`
+§5.3 records which is which, and a plain restart now fails the arity check by name
+rather than starting up wrong.
+
+**Measured vs. computed.** The account-growth figures are measured, from the live log,
+over the single 616-block window named in §3. The ~300 mutations/block is the brief's
+mainnet figure, not re-measured here (see §3). The rebuild/patch/latency figures in §5
+are measured, today, on this laptop, both geometries back to back in one session —
+absolute times on this machine are ~1.5× slower than the 2026-07-22 run
+`docs/numbers.md` §1–§6 previously published, which is why the control was run at all.
+Every geometry figure — loads, database sizes, hints, capacities, runways — is exact
+closed-form arithmetic from `risepir_proto::geometry`, reproducible with
+`cargo run -p xtask --release -- geometry`. `(2,4)` has been demonstrated to fill for
+real by `--fill-check`, including at load 0.75 — the deployed operating point — at
+reduced scale. No fill has been run at 200 M; that needs the production box.
+
+**Follow-ups.** (a) Arity and `bucket_size` are still compile-time constants behind a
+concrete store type; making them runtime flags needs dispatch over the scheme type and
+is deliberately not attempted here. (b) The genuinely high-load demo this deployment
+wants is `bucket_size = 7` — `(2,7)` at `2²⁵` buckets gives 234,881,024 slots, **load
+0.8536** and a **20.67 GB** database — which needs
+`segmented_cuckoo::SUPPORTED_BUCKET_SIZES` widened past 4 and a `MAX_LOAD_FACTOR` row
+measured for it. That is now the highest-value upstream item in IKPIR for this project,
+ahead of non-power-of-two segment counts. (c) `docs/numbers.md` §1–§6 should be
+re-measured on a quiet machine, and §7's complete-set rebuild figure re-measured on the
+box after the re-bootstrap; both are `(3,4)`-lineage or slow-machine numbers today and
+are labelled as such.

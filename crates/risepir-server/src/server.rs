@@ -239,9 +239,12 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// what a state file must persist for [`Self::from_parts`] to
     /// reassemble this server.
     ///
-    /// At the complete mainnet set this array is ~35 GB, so a caller that
-    /// only *reads* the cells (state serialization, above all) must use
-    /// [`Self::cells`] instead — see that method.
+    /// At the complete mainnet set this array is ~23.6 GB at the deployed
+    /// `(arity 2, bucket_size 4)` geometry (ADR-0034; ~35 GB at the previous
+    /// `(arity 3, bucket_size 4)` geometry, which is what the live
+    /// deployment still actually runs until it is re-bootstrapped), so a
+    /// caller that only *reads* the cells (state serialization, above all)
+    /// must use [`Self::cells`] instead — see that method.
     pub fn snapshot_cells(&self) -> Vec<u32> {
         self.store.snapshot_cells()
     }
@@ -253,12 +256,16 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     ///
     /// The cell array is the whole PIR database: `num_buckets *
     /// bucket_size * cells_per_slot` `u32`s, which at the complete
-    /// mainnet set (200.5 M accounts, 100 663 296 buckets) is **35.4 GB**.
+    /// mainnet set (200.5 M accounts) is **23.62 GB** at the deployed
+    /// `(arity 2, bucket_size 4)` geometry — 67,108,864 buckets (ADR-0034);
+    /// it was **35.4 GB** at 100,663,296 buckets under the previous
+    /// `(arity 3, bucket_size 4)` geometry, which is what the live
+    /// deployment still actually runs until it is re-bootstrapped.
     /// `snapshot_cells` allocates a second one, so any caller that copies
     /// merely to read — as state serialization did — doubles the
-    /// process's peak RSS to ~73 GB and decides what machine the
-    /// deployment needs. Streaming from this borrow keeps a state save
-    /// allocation-free.
+    /// process's peak RSS (to ~47 GB at the current geometry, ~73 GB at
+    /// the previous one) and decides what machine the deployment needs.
+    /// Streaming from this borrow keeps a state save allocation-free.
     pub fn cells(&self) -> &[u32] {
         self.store.as_cells()
     }
@@ -666,12 +673,15 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         // same `self`, so there was never a real conflict here to
         // snapshot around. A copy is not an option at this crate's
         // deployment scale either way: `self.store.as_cells()` is the
-        // whole PIR database — 35.4 GB at the complete mainnet set (see
-        // [`Self::cells`]) — so a `.to_vec()` here would hold the
+        // whole PIR database — 23.62 GB at the complete mainnet set's
+        // deployed `(arity 2, bucket_size 4)` geometry, ADR-0034 (was
+        // 35.4 GB at the previous `(arity 3, bucket_size 4)` geometry —
+        // see [`Self::cells`]) — so a `.to_vec()` here would hold the
         // original and the copy live simultaneously, taking peak RSS from
-        // ~38 GB to ~73 GB and turning this method's own documented
-        // repair path for a failed [`Self::apply_block`] into the very
-        // OOM it exists to recover from.
+        // ~24.7 GB to ~47 GB today (was ~38 GB to ~73 GB pre-ADR-0034) and
+        // turning this method's own documented repair path for a failed
+        // [`Self::apply_block`] into the very OOM it exists to recover
+        // from.
         let cells: &[u32] = self.store.as_cells();
 
         let mut backend_params = Vec::with_capacity(arity);
@@ -733,12 +743,12 @@ mod tests {
     use ikpir_common::{SimpleConfig, SimplePirBackend};
     use risepir_proto::geometry::Geometry;
     use risepir_proto::{AddressHash, Balance, ValueError};
-    use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+    use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
     // ── Shared small test geometry (per this crate's spec: small enough
     // that the whole suite is fast) ──────────────────────────────────────
-    const ARITY: u32 = 3;
-    const NUM_BUCKETS: u32 = 3 * 1024;
+    const ARITY: u32 = 2;
+    const NUM_BUCKETS: u32 = 2 * 1024;
     const BUCKET_SIZE: u32 = 4;
     const FINGERPRINT_BITS: u32 = 32;
     const KEY_TAG_BITS: u32 = 32;
@@ -793,8 +803,8 @@ mod tests {
         }
     }
 
-    fn empty_store(geom: &Geometry) -> Segmented3aryCuckooKVStore {
-        Segmented3aryCuckooKVStore::new(
+    fn empty_store(geom: &Geometry) -> Segmented2aryCuckooKVStore {
+        Segmented2aryCuckooKVStore::new(
             geom.num_buckets,
             geom.bucket_size,
             geom.fingerprint_bits,
@@ -804,7 +814,7 @@ mod tests {
         .unwrap()
     }
 
-    fn server(geom: &Geometry) -> RisePirServer<Segmented3aryScheme, SimplePirBackend> {
+    fn server(geom: &Geometry) -> RisePirServer<Segmented2aryScheme, SimplePirBackend> {
         RisePirServer::new(empty_store(geom), config(), value_codec(), 0)
     }
 
@@ -940,8 +950,8 @@ mod tests {
             .collect();
 
         // ── Claim 1: delta content, against a real IkpirServer oracle. ──
-        let ikpir_store = Segmented3aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
-        let mut ikpir: ikpir_server::IkpirServer<Segmented3aryScheme, SimplePirBackend> =
+        let ikpir_store = Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
+        let mut ikpir: ikpir_server::IkpirServer<Segmented2aryScheme, SimplePirBackend> =
             ikpir_server::IkpirServer::new(ikpir_store, cfg.clone());
 
         let mut per_mutation_deltas = Vec::with_capacity(changes.len());
@@ -955,8 +965,8 @@ mod tests {
         }
         let ikpir_coalesced = BlockDelta::coalesce(&per_mutation_deltas).unwrap();
 
-        let risepir_store = Segmented3aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
-        let mut risepir: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+        let risepir_store = Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
+        let mut risepir: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             RisePirServer::new(risepir_store, cfg.clone(), codec, 0);
         let genesis_bundle = risepir.setup();
 
@@ -979,7 +989,7 @@ mod tests {
         // randomness (see the doc comment above for why not cross-system). ──
         let final_bundle = risepir.setup();
 
-        let mut replay_store = Segmented3aryCuckooKVStore::from_cells(cells0, params0, n0).unwrap();
+        let mut replay_store = Segmented2aryCuckooKVStore::from_cells(cells0, params0, n0).unwrap();
         replay_store.enable_mutation_log();
         let _ = replay_store.drain_mutations();
 
@@ -1051,8 +1061,8 @@ mod tests {
         let params0 = genesis_store.params();
         let n0 = genesis_store.num_items();
 
-        let mut s: RisePirServer<Segmented3aryScheme, SimplePirBackend> = RisePirServer::new(
-            Segmented3aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap(),
+        let mut s: RisePirServer<Segmented2aryScheme, SimplePirBackend> = RisePirServer::new(
+            Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap(),
             cfg.clone(),
             codec,
             0,
@@ -1086,8 +1096,8 @@ mod tests {
         // output depends only on its own old→new transition, which is
         // identical in both scenarios, so an honest implementation's
         // `delta2` must match this exactly.
-        let mut oracle: RisePirServer<Segmented3aryScheme, SimplePirBackend> = RisePirServer::new(
-            Segmented3aryCuckooKVStore::from_cells(cells0, params0, n0).unwrap(),
+        let mut oracle: RisePirServer<Segmented2aryScheme, SimplePirBackend> = RisePirServer::new(
+            Segmented2aryCuckooKVStore::from_cells(cells0, params0, n0).unwrap(),
             cfg,
             value_codec(),
             0,
@@ -1370,8 +1380,8 @@ mod tests {
     /// name in `cargo test` output, per this crate's spec.
     #[test]
     fn risepir_server_is_send_and_sync() {
-        assert_send::<RisePirServer<Segmented3aryScheme, SimplePirBackend>>();
-        assert_sync::<RisePirServer<Segmented3aryScheme, SimplePirBackend>>();
+        assert_send::<RisePirServer<Segmented2aryScheme, SimplePirBackend>>();
+        assert_sync::<RisePirServer<Segmented2aryScheme, SimplePirBackend>>();
     }
 }
 
@@ -1386,10 +1396,10 @@ mod verified_apply_tests {
     use ikpir_common::pir_params::simple_max_plaintext_bits;
     use ikpir_common::{SimpleConfig, SimplePirBackend};
     use risepir_proto::{AddressHash, Balance, ValueError};
-    use segmented_cuckoo::{CuckooParams, Segmented3aryCuckooKVStore, Segmented3aryScheme};
+    use segmented_cuckoo::{CuckooParams, Segmented2aryCuckooKVStore, Segmented2aryScheme};
     use std::collections::HashMap;
 
-    const NUM_BUCKETS: u32 = 3 * 8; // tiny: keeps the birthday search ~2^18
+    const NUM_BUCKETS: u32 = 2 * 8; // tiny: keeps the birthday search ~2^18
     const BUCKET_SIZE: u32 = 4;
     const FP_BITS: u32 = 32;
     const BALANCE_BITS: u32 = 96;
@@ -1402,10 +1412,10 @@ mod verified_apply_tests {
         }
     }
 
-    fn tiny_server() -> RisePirServer<Segmented3aryScheme, SimplePirBackend> {
+    fn tiny_server() -> RisePirServer<Segmented2aryScheme, SimplePirBackend> {
         let codec = codec();
-        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 3, BUCKET_SIZE, FP_BITS, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented3aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, codec.value_bits(), pb).unwrap();
+        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let store = Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, codec.value_bits(), pb).unwrap();
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
     }
 

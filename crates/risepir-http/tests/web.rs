@@ -18,9 +18,9 @@ use ikpir_common::{SimpleConfig, SimplePirBackend};
 use risepir_http::{NodeState, WebAssets};
 use risepir_proto::{Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const LWE_DIM: u32 = 256;
@@ -37,7 +37,7 @@ fn build_node() -> Arc<NodeState> {
     let codec = value_codec();
     let geom = Geometry::for_accounts(1_000, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
         .expect("geometry");
-    let store = Segmented3aryCuckooKVStore::new(
+    let store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -45,7 +45,7 @@ fn build_node() -> Arc<NodeState> {
         geom.plaintext_bits,
     )
     .expect("store");
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), codec, 0);
     Arc::new(NodeState::new(server, DeltaRing::new(64), true))
 }

@@ -72,15 +72,15 @@ use risepir_client::{Lookup, RisePirClient};
 use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_proto::{AddressHash, Backend, Balance, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
 // ─── Fixed deployment geometry knobs ─────────────────────────────────────
 //
 // Mirrors risepir-feed's own integration test
 // (crates/risepir-feed/tests/pipeline.rs) and risepir-server/
-// risepir-client's shared test geometry: arity-3 SCF, the ADR-0009 value
+// risepir-client's shared test geometry: arity-2 SCF, the ADR-0009 value
 // layout (32-bit key_tag / 96-bit balance / 16-bit checksum), RisePIR-S.
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const KEY_TAG_BITS: u32 = 32;
@@ -242,7 +242,7 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
     let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
         .expect("geometry: harness-configured account count/codec must be a valid geometry");
 
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -257,7 +257,7 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
         store.insert(*addr, &v).expect("insert genesis account");
     }
 
-    let mut server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let mut server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(cfg.lwe_dim), codec, 0);
     let mut ring = DeltaRing::new(cfg.blocks as usize + 8); // retain the whole run: /sync-equivalent never ages out
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(server.setup(), codec);
@@ -535,7 +535,7 @@ fn tally(sample: &[(AddressHash, &'static str)]) -> BTreeMap<String, usize> {
 /// mismatch to `mismatches`. Returns the number of checks performed.
 fn diff_sample(
     client: &mut RisePirClient<SimplePirBackend>,
-    server: &RisePirServer<Segmented3aryScheme, SimplePirBackend>,
+    server: &RisePirServer<Segmented2aryScheme, SimplePirBackend>,
     feed: &MockFeed,
     sample: &[(AddressHash, &'static str)],
     block: u64,

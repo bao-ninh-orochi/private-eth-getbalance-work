@@ -62,17 +62,18 @@ use risepir_feed::snapshot;
 use risepir_http::{NodeState, PirHttpClient};
 use risepir_proto::{keccak256, Backend, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::Segmented3aryCuckooKVStore;
+use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
 use crate::autosave::StateSaver;
 use crate::journal::{self, JournalWriter, ScanStop};
 use crate::private_eth::PrivateEth;
 use crate::state;
 
-/// SCF geometry for the mainnet deployment — same shape the measured
-/// numbers table used (`docs/numbers.md`: arity 3, `bucket_size` 4,
-/// 32-bit fp, `key_tag(32) ‖ balance(96) ‖ checksum(16)`).
-const ARITY: u32 = 3;
+/// SCF geometry for the mainnet deployment — arity 2, `bucket_size` 4,
+/// 32-bit fp, `key_tag(32) ‖ balance(96) ‖ checksum(16)` (ADR-0034; the
+/// measured numbers table this used to match, `docs/numbers.md`, was arity
+/// 3 before that retune).
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 
@@ -309,7 +310,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // sidecar would collide with the state file itself) and holds an
     // advisory lock so a double-started server fails fast here instead
     // of two writers interleaving into the same `<path>.tmp` and
-    // destroying the good 36 GB file (`state::acquire_state_path`).
+    // destroying the good multi-GB file — 36 GB at the live `(arity 3,
+    // bucket_size 4)` deployment today, ≈24 GB once re-bootstrapped to the
+    // deployed `(arity 2, bucket_size 4)` geometry (ADR-0034)
+    // (`state::acquire_state_path`).
     let _state_lock = cfg.state.as_ref().map(|path| {
         state::acquire_state_path(path).unwrap_or_else(|e| die(format!("--state {}: {e}", path.display())))
     });
@@ -504,7 +508,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             sizes.server_db as f64 / 1e9,
             sizes.load_factor,
         );
-        let mut store = Segmented3aryCuckooKVStore::new(
+        let mut store = Segmented2aryCuckooKVStore::new(
             geom.num_buckets,
             geom.bucket_size,
             geom.fingerprint_bits,
@@ -588,7 +592,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         };
         let geom = Geometry::for_accounts(cfg.partial_capacity, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
             .unwrap_or_else(|e| die(format!("geometry: {e}")));
-        let store = Segmented3aryCuckooKVStore::new(
+        let store = Segmented2aryCuckooKVStore::new(
             geom.num_buckets,
             geom.bucket_size,
             geom.fingerprint_bits,

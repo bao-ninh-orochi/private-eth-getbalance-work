@@ -459,13 +459,13 @@ mod tests {
     use risepir_proto::geometry::Geometry;
     use risepir_proto::{Balance, BlockUpdate};
     use risepir_server::RisePirServer;
-    use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+    use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     // ── Shared small test geometry, per this crate's spec ───────────────
-    const ARITY: u32 = 3;
-    const NUM_BUCKETS: u32 = 3 * 1024;
+    const ARITY: u32 = 2;
+    const NUM_BUCKETS: u32 = 2 * 1024;
     const BUCKET_SIZE: u32 = 4;
     const FINGERPRINT_BITS: u32 = 32;
     const KEY_TAG_BITS: u32 = 32;
@@ -545,8 +545,8 @@ mod tests {
         }
     }
 
-    fn empty_store(geom: &Geometry) -> Segmented3aryCuckooKVStore {
-        Segmented3aryCuckooKVStore::new(
+    fn empty_store(geom: &Geometry) -> Segmented2aryCuckooKVStore {
+        Segmented2aryCuckooKVStore::new(
             geom.num_buckets,
             geom.bucket_size,
             geom.fingerprint_bits,
@@ -556,7 +556,7 @@ mod tests {
         .unwrap()
     }
 
-    fn server<B: BackendTestSetup>(geom: &Geometry) -> RisePirServer<Segmented3aryScheme, B> {
+    fn server<B: BackendTestSetup>(geom: &Geometry) -> RisePirServer<Segmented2aryScheme, B> {
         RisePirServer::new(empty_store(geom), B::small_config(), value_codec(), 0)
     }
 
@@ -635,7 +635,7 @@ mod tests {
         B::Query: Clone,
     {
         let geom = geometry::<B>();
-        let mut srv: RisePirServer<Segmented3aryScheme, B> = server::<B>(&geom);
+        let mut srv: RisePirServer<Segmented2aryScheme, B> = server::<B>(&geom);
 
         let genesis: Vec<(AddressHash, Balance)> = (0..50u64)
             .map(|i| (addr(i), 10_000u128 + u128::from(i)))
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn ordering_trap_is_real() {
         let geom = geometry::<SimplePirBackend>();
-        let mut srv: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+        let mut srv: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             server::<SimplePirBackend>(&geom);
         srv.apply_block(&BlockUpdate {
             block: 1,
@@ -759,7 +759,7 @@ mod tests {
         B::Query: Clone,
     {
         let geom = geometry::<B>();
-        let mut srv: RisePirServer<Segmented3aryScheme, B> = server::<B>(&geom);
+        let mut srv: RisePirServer<Segmented2aryScheme, B> = server::<B>(&geom);
 
         let genesis: Vec<(AddressHash, Balance)> = (0..100u64)
             .map(|i| (addr(i), 1_000u128 + u128::from(i)))
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn gc_then_query_agrees() {
         let geom = geometry::<SimplePirBackend>();
-        let mut srv: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+        let mut srv: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             server::<SimplePirBackend>(&geom);
 
         let genesis: Vec<(AddressHash, Balance)> = (0..30u64)
@@ -916,7 +916,7 @@ mod tests {
     #[test]
     fn never_existed_is_not_found() {
         let geom = geometry::<SimplePirBackend>();
-        let mut srv: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+        let mut srv: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             server::<SimplePirBackend>(&geom);
         let genesis: Vec<(AddressHash, Balance)> = (0..500u64)
             .map(|i| (addr(i), 1_000u128 + u128::from(i)))
@@ -953,7 +953,7 @@ mod tests {
     #[test]
     fn checksum_catches_corruption() {
         let geom = geometry::<SimplePirBackend>();
-        let mut srv: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+        let mut srv: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             server::<SimplePirBackend>(&geom);
         let target = addr(555);
         let target_balance: Balance = 7_000_000_000_000_000_000u128;
@@ -1010,8 +1010,8 @@ mod tests {
 
     /// ADR-0009's core empirical claim, at a deliberately adversarial
     /// geometry: even when the store's OWN fingerprint is weakened to just
-    /// `WEAK_FP_BITS = 8` (valid for arity 3 / bucket_size 4, whose own
-    /// minimum is 4 bits, per `Segmented3aryCuckooKVStore`'s docs) — far
+    /// `WEAK_FP_BITS = 8` (valid for arity 2 / bucket_size 4, whose own
+    /// minimum is 4 bits, per `Segmented2aryCuckooKVStore`'s docs) — far
     /// below the deployment default of 32, specifically so that fp-only
     /// collisions on nonexistent keys are *common*, not a rare event this
     /// test could vacuously fail to observe — requiring the value's
@@ -1064,8 +1064,8 @@ mod tests {
             value_bits,
             SimpleParams::DEFAULT_SIGMA,
         );
-        let mut store: Segmented3aryCuckooKVStore =
-            Segmented3aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, WEAK_FP_BITS, value_bits, plaintext_bits)
+        let mut store: Segmented2aryCuckooKVStore =
+            Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, WEAK_FP_BITS, value_bits, plaintext_bits)
                 .unwrap();
 
         // ~60% load: a genuinely full store (so candidate buckets are

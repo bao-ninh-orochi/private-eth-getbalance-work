@@ -80,7 +80,7 @@ cargo run -p xtask --release -- web           # builds web/client.wasm (~157 KB)
 
 # mock: complete synthetic set, every address answers, no network
 ./target/release/risepir-rpc mock --web web
-# live mainnet, partial set, 49 MB first load (see the table below)
+# live mainnet, partial set, 46.51 MB first load (see the table below)
 ./target/release/risepir-rpc mainnet --partial --partial-capacity 1000000 --web web
 ```
 
@@ -95,18 +95,30 @@ the trade you want:
 
 | `--partial-capacity` | first load | RAM (client) | ~time before the table fills |
 |---:|---:|---:|---|
-| 250,000 | 23 MB | ~46 MB | ~1.5 h |
-| 500,000 | 35 MB | ~70 MB | ~3 h |
-| **1,000,000** | **49 MB** | **~99 MB** | **~5 h** |
-| 4,000,000 (default) | 99 MB | ~198 MB | ~1 day |
+| 250,000 | 23.66 MB | ~47 MB | ~1.5 h |
+| 500,000 | 32.64 MB | ~65 MB | ~3 h |
+| **1,000,000** | **46.51 MB** | **~93 MB** | **~5 h** |
+| 4,000,000 (default) | 93.02 MB | ~186 MB | ~1 day |
+
+(These reflect the deployed `(arity 2, bucket_size 4)` geometry, ADR-0034;
+they were 23 / 35 / 49 / 99 MB and ~46 / 70 / 99 / 198 MB at the previous
+`(arity 3, bucket_size 4)` geometry. Arity 2 quantizes *worse* than arity 3 at
+these small account counts — the same effect that wins big at the complete
+set costs a little here: the server's own database grows at every row above
+(e.g. 0.13 → 0.17 GB at 1,000,000, +33%), even though the hint a browser
+downloads still shrinks slightly. ADR-0034 §5 has the full table.)
 
 Client compute is not the constraint: a full lookup is **10 ms** at 1 M accounts
-(three segments, single-threaded wasm, no SIMD), and expanding `A` from its seed
+(two segments, single-threaded wasm, no SIMD), and expanding `A` from its seed
 at startup is another ~0.2 s. At the **actual** complete mainnet set —
 200,503,969 accounts, measured 2026-07-26, not the ~100 M once assumed here —
-the hint is **830.73 MB**, and a client holds **1.66 GB** resident once `A` is
-expanded alongside it (`docs/numbers.md` §4c). That is past what a web page
-should ask for, and is where `risepir-rpc client` on a real machine takes over.
+the deployed geometry has since moved to `(arity 2, bucket_size 4)` at a
+higher target load (ADR-0034): the hint computes to **553.82 MB**, and a
+client holds **1.11 GB** resident once `A` is expanded alongside it
+(`docs/numbers.md` §4c) — down from **830.73 MB** / **1.66 GB** at the
+`(arity 3, bucket_size 4)` geometry the live deployment still runs until an
+operator re-bootstraps it (§5.3). That is past what a web page should ask
+for, and is where `risepir-rpc client` on a real machine takes over.
 
 **What the page tells the visitor** (all of it enforced, none of it decorative):
 the deployment's mode (complete ⇒ absence is exactly `0`; partial ⇒ absence is an
@@ -298,37 +310,66 @@ classes).
 
 **These numbers were revised upward on 2026-07-26**, when the gate query was
 first actually run rather than estimated. Mainnet has **200,503,969** nonzero
-accounts — not the ~100–130 M this table assumed — and the geometry is driven by
-a power-of-two segment count, so 200.5 M rounds up to 2^25 buckets per segment
-and the server DB lands at **35.43 GB**, roughly 3× the old estimate. The
-earlier "16 GB floor" was wrong by more than 2×; anyone who provisioned from it
-would have OOMed after paying for a 5.6 GB download and a 12-minute ingest.
+accounts — not the ~100–130 M this table assumed — which is what actually
+drives the geometry. The earlier "16 GB floor" was wrong by more than 2×;
+anyone who provisioned from it would have OOMed after paying for a 5.6 GB
+download and a 12-minute ingest.
+
+**The geometry itself then changed again, in code, under ADR-0034**: deployed
+`(arity 3, bucket_size 4)` moved to **`(arity 2, bucket_size 4)`**, and
+`Geometry::for_accounts`'s target load rose from `min(0.75, 0.85×MAX_LOAD_FACTOR)`
+to `min(0.90, 0.95×MAX_LOAD_FACTOR)`. At 200,503,969 accounts the new geometry
+computes to **67,108,864 buckets, load 0.7469, server DB 23.62 GB** — every
+headline number about a third smaller. That is what a *fresh* bootstrap now
+produces, not what the live box is currently serving: the running deployment
+bootstrapped under the old geometry on 2026-07-26 and keeps serving it
+(35.43 GB, load 0.498) until an operator re-bootstraps it — §5.3 records that
+original run verbatim, and the state-file loader now refuses to load the old
+lineage under the new binary by design (`CLAUDE.md`'s state-file trap
+paragraph, ADR-0034 §6).
 
 | deployment | accounts | RAM needed | how to run it |
 |---|---:|---:|---|
 | `--partial` demo | ≤4 M tracked | ~1 GB | any laptop |
-| complete mainnet | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h. Oracle's 24 GB Always Free tier **can no longer hold the complete set** |
+| complete mainnet, `(arity 2, bucket_size 4)` — current code (ADR-0034) | **200.5 M nonzero** (2026-07-26) | server DB **23.62 GB** + hint 0.55 GB + A 0.55 GB ⇒ **~24.7 GB working set** | GCP `e2-highmem-8` (8 vCPU / 64 GB) still comfortably covers it; a smaller box is plausible but unverified — nothing has re-bootstrapped at this geometry at the complete set yet |
+| complete mainnet, `(arity 3, bucket_size 4)` — what is live today | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h — what the public deployment actually runs on right now |
 | RPC usage | — | — | dRPC + publicnode keyless tiers (the follow loop is ~5–10 requests/min steady-state) |
 
-Disk, not just RAM: the state file is ~36 GB, and `save` writes `<path>.tmp`
-before renaming, so a machine that keeps the previous state file needs **~75 GB
-free for state alone** — plus 5.7 GB of snapshot shards and the build tree.
-250 GB is comfortable.
+Disk, not just RAM: a state file at the deployed `(2,4)` geometry computes to
+**≈24.2 GB** (DB + hints; arithmetic, not yet measured — no re-bootstrap at
+this geometry has run at the complete set) against the **36.26 GB** measured
+today at the live `(3,4)` file (§5.3). Either way `save` writes `<path>.tmp`
+before renaming, so a machine that keeps the previous state file needs disk
+for two copies at once — comfortably inside 250 GB at either geometry, plus
+5.7 GB of snapshot shards and the build tree.
 
 Run the gate query first — `nonzero_accounts` fixes the real number; the geometry
-line the server prints before allocating is the commitment. At the complete set
-it reads:
+line the server prints before allocating is the commitment. A fresh bootstrap
+on the current code, at its deployed `(2,4)` geometry, now prints:
 
 ```
-risepir-rpc mainnet: geometry for 200503969 accounts: 100663296 buckets, server DB 35.43 GB, load 0.498
+risepir-rpc mainnet: geometry for 200503969 accounts: 67108864 buckets, server DB 23.62 GB, load 0.747
 ```
 
-The load factor of 0.498 (rather than the 0.75 target) is that power-of-two
-rounding: 200.5 M accounts need 66,834,657 buckets, which rounds up to
-3 × 2^25 = 100,663,296. Account growth is therefore **free up to 301,989,888
-accounts** — the same geometry, the same 35.43 GB, at which point load reaches
-exactly the 0.75 target — and the step after that doubles the DB to 70.9 GB.
-Budget the machine for the step, not for today's count.
+(The live box, still running the pre-ADR-0034 binary, printed `100663296
+buckets, server DB 35.43 GB, load 0.498` when it actually bootstrapped — §5.3
+— and will keep printing that on every restart until it is re-bootstrapped.)
+
+The load factor of 0.7469 is `segmented-cuckoo`'s own quantization, not a
+property of the target: `num_buckets` can only take the values `2^t` or
+`3·2^t`, so `slots = num_buckets × bucket_size` lands on a short menu of
+values regardless of which arity is chosen. At 200,503,969 accounts the
+highest rung any buildable configuration can fill is `2^28 = 268,435,456`
+slots (ADR-0034 §1) — reachable by `(2,4)` (the deployed choice) and by
+`(4,1)`/`(4,2)`/`(4,4)`, since arity 2 and arity 4 share the same `2^t`
+lattice — and there is nothing between that and the next, unfillable, rung.
+Account growth is therefore **free up to 232,062,451 accounts** — the same
+geometry, the same 23.62 GB, at which point load reaches the new
+`min(0.90, 0.95×MAX_LOAD_FACTOR) = 0.8645` target — and
+the step after that doubles the DB to 47.24 GB. Budget the machine for the
+step, not for today's count. (Under the old flat-0.75 target this same `(2,4)`
+geometry would have run out of headroom in about ten days — ADR-0034 §4 —
+which is why the target moved too, not just the arity.)
 
 ## 3. Pointing a wallet at it
 
@@ -607,18 +648,24 @@ credit burn-down. After the credit: switch the same VM to Spot (~$95–130/mo at
 
 ### Which cloud, if the goal is spending nothing
 
-Re-costed 2026-07-26 against the real working set (~38 GB, §2.3). **The complete
-set no longer has a $0 option** — every free tier tops out at 24 GB, below the
-floor. The rows below are what it actually costs:
+Re-costed 2026-07-26 against the working set the live deployment actually runs
+at today (~38 GB, pre-ADR-0034 `(3,4)`, §2.3). **The complete set still has no
+$0 option** — but the margin changed completely under ADR-0034's `(2,4)`
+retune: that geometry's working set computes to **~24.7 GB** (§2.3), against a
+24 GB Always-Free ceiling. The conclusion survives — 24.7 > 24, with nothing
+left over for the OS, Caddy, or a save-time `.tmp` copy of the state file — but
+it is now a **margin call, not the 1.6× overshoot** the old `(3,4)` working set
+was. The rows below are what it actually costs, at whichever geometry is the
+one being sized:
 
-| option | complete-set (48–64 GB) cost | notes |
+| option | complete-set cost | notes |
 |---|---|---|
-| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment runs on**; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
+| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment runs on**; comfortable headroom at either geometry; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
 | GCP `e2-highmem-8`, stopped when idle | ~$10/mo disk only | the honest way to run a demo box: start it for a session, `Ctrl-C` to save state, stop it |
 | AWS on-demand (`r7g.2xlarge`, 64 GB) | ≈ $0.43/h ≈ $310/mo | no free tier remotely near this RAM |
 | AWS spot (`r7g.2xlarge`) | ≈ $95–130/mo | interruptions are cheap here (state file + catch-up replay) |
-| Oracle Cloud Always Free (4 OCPU/**24 GB**) | $0 | **no longer sufficient** — 24 GB cannot hold a 35.43 GB DB |
-| this MacBook (16 GB) | $0 | partial mode only; the complete set is 2.4× its total RAM |
+| Oracle Cloud Always Free (4 OCPU/**24 GB**) | $0 | **still not sufficient, but now only just** — the `(2,4)` working set is ~24.7 GB, ~0.7 GB over a 24 GB ceiling (was ~14 GB over, at the old `(3,4)` set's ~38 GB) — no headroom left for the OS or a save-time `.tmp` copy, so still a real no, just no longer a 1.6× one |
+| this MacBook (16 GB) | $0 | partial mode only; the complete set is ~1.5× its total RAM at the deployed `(2,4)` geometry (was ~2.4× at `(3,4)`) |
 
 The partial demo runs on anything ≥2 GB, including AWS free-tier-class instances.
 
@@ -713,9 +760,12 @@ per-route `SETUP_MAX_CONCURRENT = 2` cap that used to sit here is gone, having
 been measured not to bound what it claimed (tower released its permit when the
 handler returned, not when the transfer finished). What remains undefended is
 unchanged and is the part that matters: there is **no rate limiting at all**,
-and the egress of an 830.73 MB bundle per cold visitor is still entirely real
-(threat model §3 names volumetric DoS as undefended). `/setup` behind a CDN
-plus per-IP quotas is roadmap C5/C3 — do that before sharing the link wider.
+and the egress of a large `/setup` bundle per cold visitor is still entirely
+real (threat model §3 names volumetric DoS as undefended) — **830.73 MB**
+today, since this origin has not been re-bootstrapped since ADR-0034 moved
+the deployed geometry to `(arity 2, bucket_size 4)`; a fresh bootstrap cuts
+that to **553.82 MB**. `/setup` behind a CDN plus per-IP quotas is roadmap
+C5/C3 — do that before sharing the link wider.
 
 **Certificate renewal needs the VM up occasionally.** Caddy renews from ~30 days
 before expiry over `:80`. Since this VM is stopped between demos, a gap longer
@@ -776,7 +826,9 @@ threat model §4.2 and §8.
   lock on `<state>.lock` for its lifetime; a second start on the same path
   (the classic double-`tmux` accident) fails fast with "another process
   already holds …" instead of both writers interleaving into the same
-  `<state>.tmp` and destroying the good 36 GB file. The `.lock` file itself
+  `<state>.tmp` and destroying the good multi-GB file (36 GB at the live
+  `(3,4)` deployment today, ≈24 GB once re-bootstrapped to the deployed
+  `(2,4)` geometry — ADR-0034). The `.lock` file itself
   is empty and harmless — advisory locks die with the process, so it never
   blocks a restart and needs no cleanup or backup.
 - **Lineage epochs (ADR-0033)**: `/sync`, `/answer`, and `/delta/{block}` now
@@ -850,6 +902,21 @@ over the public URL, and the harness race that only a non-loopback origin
 exposed.
 
 ### 5.3 The COMPLETE mainnet set, live (2026-07-26)
+
+> **Note (ADR-0034, added after the fact): this section is pre-ADR-0034
+> evidence, left exactly as recorded.** Every figure below — 35.43 GB,
+> `100663296` buckets, load 0.498, 1236.5 s setup, a 36.26 GB state file,
+> `arity=3 setup=830.73 MB` on the wire, ~1.66 GB in the browser — describes
+> the `(arity 3, bucket_size 4)` bootstrap **as it actually happened**, and is
+> **still what the live server is serving today**: the deployed geometry has
+> since moved to `(arity 2, bucket_size 4)` at a higher target load, but that
+> needs an operator to move `~/risepir-state.bin` aside and re-run
+> `~/bootstrap-complete.sh` (~33 min at the complete set), and that
+> re-bootstrap has not happened yet. A fresh bootstrap on the current code
+> computes to 23.62 GB / load 0.7469 / a 553.82 MB hint / ~1.11 GB in the
+> browser (§2.3, §1.5, ADR-0034) — those are the numbers a future reader
+> should size against; they are not yet what this section's live evidence
+> shows.
 
 **Stage 1.d, done.** The deployment at `https://private-eth-getbalance.duckdns.org`
 serves the complete nonzero-balance set — every one of mainnet's 200,503,969

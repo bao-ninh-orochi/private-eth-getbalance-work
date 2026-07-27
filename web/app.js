@@ -141,12 +141,16 @@ async function boot() {
 // Runs once, before boot() ever touches the network for real work. The
 // download that buys this page's privacy (see the "Why the download?"
 // aside) is also the one thing that can crash a phone's tab before it
-// gets the chance to explain itself: at the live complete-mainnet set it
-// is 830.73 MB downloaded and ~1.66 GB resident once the public matrix A
-// is expanded (docs/numbers.md §4c). assessCapacity (pir.js) makes the
-// actual call; everything here just gathers its inputs from a cheap HEAD
-// probe and whatever the device is willing to say about itself, and
-// renders whichever of its three verdicts comes back.
+// gets the chance to explain itself: at the deployed `(arity 2,
+// bucket_size 4)` geometry (ADR-0034), the live complete-mainnet set
+// computes to 553.82 MB downloaded and ~1.11 GB resident once the public
+// matrix A is expanded (docs/numbers.md §4c) — was 830.73 MB / ~1.66 GB at
+// the previous `(arity 3, bucket_size 4)` geometry, which is what the live
+// deployment still actually serves until it is re-bootstrapped.
+// assessCapacity (pir.js) makes the actual call; everything here just
+// gathers its inputs from a cheap HEAD probe and whatever the device is
+// willing to say about itself, and renders whichever of its three
+// verdicts comes back.
 
 const GB = 1_000_000_000;
 const fmtGB = (n) => (n / GB).toFixed(2);

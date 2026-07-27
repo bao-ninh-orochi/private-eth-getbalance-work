@@ -23,9 +23,9 @@ use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_http::{wire, NodeState};
 use risepir_proto::{AddressHash, Backend, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const LWE_DIM: u32 = 512;
@@ -39,7 +39,7 @@ fn codec() -> ValueCodec {
 }
 
 /// Builds a small `NodeState` from a `MockFeed` genesis population, per
-/// this crate's test spec: ~2000 genesis keys, `lwe_dim` 512, arity 3,
+/// this crate's test spec: ~2000 genesis keys, `lwe_dim` 512, arity 2,
 /// `bucket_size` 4, `ValueCodec{32,96,16}`, geometry via
 /// `Geometry::for_accounts`. Returns the state (wrapped for the router) and
 /// the still-live `MockFeed` so callers can keep driving blocks and querying
@@ -57,7 +57,7 @@ fn build_node() -> (Arc<NodeState>, MockFeed) {
 
     let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
         .expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -70,7 +70,7 @@ fn build_node() -> (Arc<NodeState>, MockFeed) {
         store.insert(addr, &v).expect("insert genesis");
     }
 
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     (state, feed)
@@ -432,7 +432,11 @@ async fn seed_history_makes_seeded_blocks_immediately_servable() {
     let deltas: Vec<BlockDelta> = (1u64..=3)
         .map(|b| BlockDelta {
             block: b,
-            per_segment: vec![vec![(0, vec![(0, b as i64)])], vec![], vec![]],
+            // One entry per segment — ARITY (2) of them, matching
+            // `build_node()`'s real geometry, or `decode_block_delta`
+            // below (which decodes against the real server's arity) would
+            // reject this synthetic delta as a shape mismatch.
+            per_segment: vec![vec![(0, vec![(0, b as i64)])], vec![]],
         })
         .collect();
     state.seed_history(deltas.clone()).await;

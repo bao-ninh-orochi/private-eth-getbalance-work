@@ -23,7 +23,7 @@
 //! # Concurrency (ADR-0010)
 //!
 //! [`node::NodeState`] wraps the PIR server in a `tokio::sync::RwLock`: the
-//! concrete `RisePirServer<Segmented3aryScheme, SimplePirBackend>` is
+//! concrete `RisePirServer<Segmented2aryScheme, SimplePirBackend>` is
 //! auto-`Send + Sync` (verified in `risepir-server`'s own test suite), so
 //! the lock gives concurrent readers on the hot `/answer` path; the writer
 //! ([`node::NodeState::apply_block`], called by the block-following driver,

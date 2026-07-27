@@ -100,13 +100,16 @@ The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind
 client compiled to wasm **in the page**, so the address never leaves the
 browser. Same origin as the PIR transport on purpose (no CORS, no mixed
 content, `connect-src 'self'` CSP). Assets are read once at startup — restart
-after editing `web/*`. First load is the whole product constraint: 49 MB at
-`--partial-capacity 1000000`, but **830.73 MB at the real complete mainnet set**
-(200,503,969 accounts, measured 2026-07-26 — the "588 MB" once quoted here was
-computed against an assumed ~130 M). A complete-set client also holds **1.66 GB**
-resident once `A` is expanded. That is where the CLI `client` takes over. Its
-residual trust — you trust whoever serves the page — is stated on the page
-itself, not just in the ADR.
+after editing `web/*`. First load is the whole product constraint: 46.51 MB at
+`--partial-capacity 1000000`, but **553.82 MB at the real complete mainnet set**
+(200,503,969 accounts, computed for the `(arity 2, bucket_size 4)` geometry
+deployed by ADR-0034 — was **830.73 MB**, measured 2026-07-26 at the `(arity 3,
+bucket_size 4)` geometry that deployment actually bootstrapped with; the
+"588 MB" once quoted here predates both, computed against an assumed ~130 M). A
+complete-set client now holds **1.11 GB** resident once `A` is expanded (was
+1.66 GB). That is where the CLI `client` takes over. Its residual trust — you
+trust whoever serves the page — is stated on the page itself, not just in the
+ADR.
 
 Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
 operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
@@ -123,8 +126,13 @@ is drivable non-interactively.
 
 Since **2026-07-26 it serves the COMPLETE mainnet set** — all 200,503,969
 nonzero accounts, `GET /mode` = 1 — not the partial demo. That is what the
-64 GB machine is for: the server DB alone is 35.43 GB (ADR-0023). It costs
-**~$8.60/day running**, so stop it when idle.
+64 GB machine is for: the server DB alone is 35.43 GB (ADR-0023) at the
+`(arity 3, bucket_size 4)` geometry this box actually bootstrapped with. The
+code has since moved to `(arity 2, bucket_size 4)` at a higher target load
+(ADR-0034) — a fresh bootstrap computes to a 23.62 GB DB — but the live box
+keeps serving the old lineage until an operator re-bootstraps it: see the
+state-file trap below, since a plain restart no longer works across this
+change. It costs **~$8.60/day running**, so stop it when idle.
 
 It is **public** at <https://private-eth-getbalance.duckdns.org> (Caddy + Let's
 Encrypt in front of a loopback-only `:8645`; deploy.md §3.7). Only 80/443 are
@@ -169,6 +177,23 @@ the snapshot means moving the state file aside first — and at the complete set
 that costs a full **~33 min** (12 min ingest + 21 min PIR setup), so prefer the
 state file. `~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.
 
+**A second, sharper trap since ADR-0034: a geometry change turns "restart"
+into "re-bootstrap."** The deployed geometry moved from `(arity 3, bucket_size
+4)` to `(arity 2, bucket_size 4)`, and the state-file loader now checks the
+stored geometry's arity **by name**, immediately after the header decodes and
+before the (multi-GB) cells section is even read (`STORE_ARITY` in
+`crates/risepir-rpc/src/state.rs`, ADR-0034 §6). A state file written by the
+old 3-ary binary is therefore *refused*, not silently loaded and not
+misreported as `Corrupt` — the error names the cause (a previous geometry
+lineage) and the fix (move `--state` aside, re-bootstrap). Concretely: the
+next time the new binary runs on the VM against the existing
+`~/risepir-state.bin`, it will **fail to start, on purpose**, until an
+operator moves that file aside and re-runs `~/bootstrap-complete.sh` — a plain
+restart no longer works once the binary and the state file disagree on arity.
+The live VM has not been re-bootstrapped yet, so today it is still serving
+`(3,4)`; deploying the new binary there without first moving the state file
+is exactly the scenario this check exists to catch.
+
 (The external IP changes across stop/start — hence `duckdns-update.sh`, whose
 empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel
 doesn't care either: `gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
@@ -178,7 +203,9 @@ Stopping the meter — in this order:
 ```bash
 gcloud --quiet compute ssh risepir \
   --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 90 && tail -1 ~/server-complete.log'
-#   → wait for "state saved; exiting" — at the complete set this writes 36 GB,
+#   → wait for "state saved; exiting" — at the complete set this writes 36 GB
+#     today (the live `(3,4)` lineage; ≈24.2 GB once re-bootstrapped to the
+#     deployed `(2,4)` geometry, ADR-0034 — arithmetic, not yet measured),
 #     so allow well over the 20 s that sufficed in partial mode
 gcloud compute instances stop risepir
 ```

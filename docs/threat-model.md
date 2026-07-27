@@ -52,7 +52,9 @@ coverage-guided fuzz targets (`fuzz/`).
 
 **Not guaranteed:** resistance to volumetric denial of service. `/answer` has
 a server-side compute cost by design (a PIR answer touches the whole
-database); `/setup` is a ~47 MB response at 1M-account scale. A per-request
+database); `/setup` is a ~46.51 MB response at 1M-account scale
+(`--partial-capacity 1000000`, the deployed `(arity 2, bucket_size 4)`
+geometry — ADR-0034; ~48.96 MB before that retune). A per-request
 timeout and a small concurrency cap on `/setup` bound the trivial cases;
 production-grade rate limiting, per-IP quotas, and a CDN for `/setup` (it is
 immutable per epoch pin) are documented follow-ups, not present.

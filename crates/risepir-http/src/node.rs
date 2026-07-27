@@ -31,7 +31,7 @@ use ikpir_common::backend::simple::SimpleServerParams;
 use ikpir_common::SimplePirBackend;
 use risepir_proto::{codec, BlockDelta, BlockUpdate};
 use risepir_server::{DeltaRing, RisePirServer, ServerError};
-use segmented_cuckoo::Segmented3aryScheme;
+use segmented_cuckoo::Segmented2aryScheme;
 
 use crate::wire;
 
@@ -150,7 +150,7 @@ fn unix_now() -> u64 {
 /// per-block bytes retrievable, capped to exactly the ring's own retention
 /// window (see [`NodeState::apply_block`]).
 struct Inner {
-    server: RisePirServer<Segmented3aryScheme, SimplePirBackend>,
+    server: RisePirServer<Segmented2aryScheme, SimplePirBackend>,
     ring: DeltaRing,
     per_block: BTreeMap<u64, BlockDelta>,
 }
@@ -289,7 +289,7 @@ impl NodeState {
     /// universe — see the field's docs; a mock deployment's synthetic
     /// universe is complete by construction.
     pub fn new(
-        server: RisePirServer<Segmented3aryScheme, SimplePirBackend>,
+        server: RisePirServer<Segmented2aryScheme, SimplePirBackend>,
         ring: DeltaRing,
         complete: bool,
     ) -> Self {
@@ -532,7 +532,7 @@ impl NodeState {
     /// crate having to know any state-file format.
     pub async fn with_server<R>(
         &self,
-        f: impl FnOnce(&RisePirServer<Segmented3aryScheme, SimplePirBackend>) -> R,
+        f: impl FnOnce(&RisePirServer<Segmented2aryScheme, SimplePirBackend>) -> R,
     ) -> R {
         f(&self.inner.read().await.server)
     }

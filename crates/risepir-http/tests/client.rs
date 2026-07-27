@@ -13,9 +13,9 @@ use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_http::{NodeState, PirHttpClient};
 use risepir_proto::{Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const LWE_DIM: u32 = 512;
@@ -44,7 +44,7 @@ async fn spawn_node() -> (String, MockFeed) {
 
     let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
         .expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -57,7 +57,7 @@ async fn spawn_node() -> (String, MockFeed) {
         store.insert(addr, &v).expect("insert genesis");
     }
 
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     let router = NodeState::router(state);
@@ -126,7 +126,7 @@ async fn sync_pulls_a_real_delta_over_http() {
     let value_codec = codec();
     let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
         .expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -138,7 +138,7 @@ async fn sync_pulls_a_real_delta_over_http() {
         let v = value_codec.encode(&addr, bal).expect("encode genesis");
         store.insert(addr, &v).expect("insert genesis");
     }
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     let router = NodeState::router(state.clone());

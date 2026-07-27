@@ -21,7 +21,7 @@ use risepir_proto::{keccak256, AddressHash, BlockUpdate, ValueCodec};
 use risepir_rpc::autosave::{SaveOutcome, StateSaver};
 use risepir_rpc::state::{self, LoadedState, Server};
 use risepir_server::DeltaRing;
-use segmented_cuckoo::Segmented3aryCuckooKVStore;
+use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
 fn codec() -> ValueCodec {
     ValueCodec {
@@ -42,9 +42,9 @@ fn plaintext_bits() -> u32 {
 
 fn small_server() -> Server {
     let codec = codec();
-    let num_buckets = 3 * 64;
-    let pb = simple_max_plaintext_bits(num_buckets / 3, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-    let store = Segmented3aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+    let num_buckets = 2 * 64;
+    let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+    let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
     Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
 }
 
@@ -379,21 +379,23 @@ async fn a_backward_gap_append_is_skipped_not_a_journal_failure() {
     // base the fresh journal hangs off.
     let raced = BlockDelta {
         block: 2,
-        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![]],
     };
     saver.append_delta(&raced, 2).await;
 
     // Journaling must still be alive: the next block appends normally.
     let next = BlockDelta {
         block: 3,
-        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![]],
     };
     saver.append_delta(&next, 3).await;
 
     let journal_path = journal_path_for(&path);
     let file = std::fs::File::open(&journal_path).unwrap();
     let len = file.metadata().unwrap().len();
-    let (header, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 3).unwrap();
+    // 2 = small_server()'s real arity — a mismatch here would make every
+    // record's payload fail to decode (ArityMismatch), not just look wrong.
+    let (header, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 2).unwrap();
     assert_eq!(header.base_block, 2, "the rotation moved the base to the save height");
     let blocks: Vec<u64> = reader.map(|rec| rec.delta.block).collect();
     assert_eq!(
@@ -406,17 +408,17 @@ async fn a_backward_gap_append_is_skipped_not_a_journal_failure() {
     // missing, and journaling shuts down rather than recording a hole.
     let hole = BlockDelta {
         block: 5,
-        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![]],
     };
     saver.append_delta(&hole, 5).await;
     let after = BlockDelta {
         block: 6,
-        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![]],
     };
     saver.append_delta(&after, 6).await;
     let file = std::fs::File::open(&journal_path).unwrap();
     let len = file.metadata().unwrap().len();
-    let (_, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 3).unwrap();
+    let (_, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 2).unwrap();
     let blocks: Vec<u64> = reader.map(|rec| rec.delta.block).collect();
     assert_eq!(blocks, vec![3], "after a forward gap nothing further may be recorded");
 

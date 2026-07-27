@@ -1,8 +1,8 @@
 # RisePIR numbers table — Stage 3 (measured)
 
 Machine: 8-core Apple Silicon, 16 GB RAM, target-cpu=native (.cargo/config.toml)
-Date: 2026-07-22
-Config: arity 3, bucket_size 4, fingerprint_bits 32, value = key_tag(32) ‖ balance(96) ‖ checksum(16) = 144 bits (ADR-0009), lwe_dim 1275 / sigma 6.4 (`SimpleConfig::default()`), mock seed 0xB0DAC0DE5CA1E000
+Date: 2026-07-27
+Config: arity 2, bucket_size 4, fingerprint_bits 32, value = key_tag(32) ‖ balance(96) ‖ checksum(16) = 144 bits (ADR-0009), lwe_dim 1275 / sigma 6.4 (`SimpleConfig::default()`), mock seed 0xB0DAC0DE5CA1E000
 Every number below is measured with `std::time::Instant` against a real, built `RisePirServer` — except the byte sizes in §4, which are computed from `Geometry::sizes` (deterministic, not timed).
 
 **IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers here are measured against the workspace's pinned IKPIR `perf/optimized` rev (`3d60fa7`, 2026-07-21 — see the root `Cargo.toml`), with the default-on `parallel` feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite this file, and only do so from a build against the pinned rev — bump the rev and these numbers together, never separately.
@@ -11,9 +11,9 @@ Every number below is measured with `std::time::Instant` against a real, built `
 
 | accounts | full rebuild (measured) |
 |---:|---:|
-| 100,000 | 0.044 s |
-| 1,000,000 | 0.392 s |
-| 9,437,184 | 6.677 s |
+| 100,000 | 0.029 s |
+| 1,000,000 | 0.657 s |
+| 9,437,184 | 9.955 s |
 
 ## 2. Per-block patch time vs. mutations/block (K), at 1,000,000 accounts
 
@@ -21,75 +21,64 @@ Each point: 5 warm-up blocks discarded, then 10 measured blocks averaged (`docs/
 
 | K (mutations/block) | patch time (ms/block, measured) |
 |---:|---:|
-| 50 | 1.8002 |
-| 150 | 2.3088 |
-| 300 | 3.5643 |
-| 600 | 5.0571 |
-| 1200 | 7.9530 |
+| 50 | 1.6999 |
+| 150 | 2.4432 |
+| 300 | 2.8230 |
+| 600 | 4.4472 |
+| 1200 | 7.0366 |
 
 ## 3. Per-block delta bytes: compact vs. naive (K≈300, 1,000,000 accounts, realistic wei-scale balances)
 
 | metric | value |
 |---|---:|
 | nonzero cells in delta | 2,724 |
-| naive (10 B/cell, upstream `u16`+`i64`) | 26.60 KB (27,240 B) |
-| compact (`BlockDelta::encoded_len`, varint/zigzag) | 7.93 KB (8,122 B) |
+| naive (10 B/cell, upstream `u16`+`i64`) | 27.24 KB (27,240 B) |
+| compact (`BlockDelta::encoded_len`, varint/zigzag) | 8.13 KB (8,135 B) |
 | compaction ratio | 3.35× |
 
 ## 4. Hint / query / response / A / server-DB sizes, and client memory
+
+Every row below is computed from a [`Geometry`] — deterministic, never timed — the same as every other scale in `self.scales` (§1/§2/§3/§5/§6 additionally report real measurements at those scales, since a server was actually built there). The final row in each of 4a/4b/4c is different in kind, not just in size: it is `DEPLOYMENT_ACCOUNTS`, the live complete mainnet set (§7), and no server has ever been built at that scale on this machine — hence no corresponding row in §1/§2/§3/§5/§6, which report only what this run actually measured. Its geometry and sizes are derived exactly like every other row's, via `Geometry::for_accounts`/`Geometry::sizes` at this module's own `ARITY`/`BUCKET_SIZE` — pure arithmetic, not a measurement in disguise, and labelled below so it cannot be mistaken for one.
 
 ### 4a. Geometry, per scale (computed)
 
 | accounts | num_buckets | plaintext_bits | load factor | cells/slot | row_width | k | R (reshape_rows) | C (reshape_row_width) |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100,000 | 49,152 | 10 | 0.5086 | 18 | 72 | 15 | 1,093 | 1,080 |
-| 1,000,000 | 393,216 | 9 | 0.6358 | 20 | 80 | 40 | 3,277 | 3,200 |
-| 9,437,184 | 3,145,728 | 9 | 0.7500 | 20 | 80 | 114 | 9,199 | 9,120 |
-| 200,503,969 (complete mainnet, 2026-07-26) | 100,663,296 | 8 | 0.4980 | 22 | 88 | 617 | 54,384 | 54,296 |
+| 100,000 | 32,768 | 10 | 0.7629 | 18 | 72 | 15 | 1,093 | 1,080 |
+| 1,000,000 | 524,288 | 9 | 0.4768 | 20 | 80 | 57 | 4,600 | 4,560 |
+| 9,437,184 | 4,194,304 | 9 | 0.5625 | 20 | 80 | 162 | 12,946 | 12,960 |
+| 200,503,969 (complete mainnet — computed, no server built at this scale) | 67,108,864 | 8 | 0.7469 | 22 | 88 | 617 | 54,384 | 54,296 |
 
 ### 4b. Per-segment sizes, per scale (computed, not timed)
 
 | accounts | hint/segment | query/segment | response/segment | A/segment | server DB |
 |---:|---:|---:|---:|---:|---:|
-| 100,000 | 5.25 MB (5,508,000 B) | 4.27 KB (4,372 B) | 4.22 KB (4,320 B) | 5.32 MB (5,574,300 B) | 13.50 MB (14,155,776 B) |
-| 1,000,000 | 15.56 MB (16,320,000 B) | 12.80 KB (13,108 B) | 12.50 KB (12,800 B) | 15.94 MB (16,712,700 B) | 120.00 MB (125,829,120 B) |
-| 9,437,184 | 44.36 MB (46,512,000 B) | 35.93 KB (36,796 B) | 35.62 KB (36,480 B) | 44.74 MB (46,914,900 B) | 960.00 MB (1,006,632,960 B) |
-| 200,503,969 (complete mainnet) | 276.91 MB (276,909,600 B) | 217.54 KB (217,536 B) | 217.18 KB (217,184 B) | 277.36 MB (277,358,400 B) | 35.43 GB (35,433,480,192 B) |
+| 100,000 | 5.51 MB (5,508,000 B) | 4.37 KB (4,372 B) | 4.32 KB (4,320 B) | 5.57 MB (5,574,300 B) | 9.44 MB (9,437,184 B) |
+| 1,000,000 | 23.26 MB (23,256,000 B) | 18.40 KB (18,400 B) | 18.24 KB (18,240 B) | 23.46 MB (23,460,000 B) | 167.77 MB (167,772,160 B) |
+| 9,437,184 | 66.10 MB (66,096,000 B) | 51.78 KB (51,784 B) | 51.84 KB (51,840 B) | 66.02 MB (66,024,600 B) | 1.34 GB (1,342,177,280 B) |
+| 200,503,969 (complete mainnet — computed, no server built at this scale) | 276.91 MB (276,909,600 B) | 217.54 KB (217,536 B) | 217.18 KB (217,184 B) | 277.36 MB (277,358,400 B) | 23.62 GB (23,622,320,128 B) |
 
-### 4c. Deployment totals (×3 segments) and client memory (computed)
+### 4c. Deployment totals (×2 segments) and client memory (computed)
 
-A client holds `A` + hint for every segment; server DB / hint / query / response / A above are already per-segment, so deployment totals and client memory both multiply by arity (3).
+A client holds `A` + hint for every segment; server DB / hint / query / response / A above are already per-segment, so deployment totals and client memory both multiply by arity (2).
 
 | accounts | hint total | query total | response total | A total | client memory (A+hint) total |
 |---:|---:|---:|---:|---:|---:|
-| 100,000 | 15.76 MB (16,524,000 B) | 12.81 KB (13,116 B) | 12.66 KB (12,960 B) | 15.95 MB (16,722,900 B) | 31.71 MB (33,246,900 B) |
-| 1,000,000 | 46.69 MB (48,960,000 B) | 38.40 KB (39,324 B) | 37.50 KB (38,400 B) | 47.82 MB (50,138,100 B) | 94.51 MB (99,098,100 B) |
-| 9,437,184 | 133.07 MB (139,536,000 B) | 107.80 KB (110,388 B) | 106.88 KB (109,440 B) | 134.22 MB (140,744,700 B) | 267.30 MB (280,280,700 B) |
-| 200,503,969 (complete mainnet) | 830.73 MB (830,728,800 B) | 652.61 KB (652,608 B) | 651.55 KB (651,552 B) | 832.08 MB (832,075,200 B) | 1.66 GB (1,662,804,000 B) |
+| 100,000 | 11.02 MB (11,016,000 B) | 8.74 KB (8,744 B) | 8.64 KB (8,640 B) | 11.15 MB (11,148,600 B) | 22.16 MB (22,164,600 B) |
+| 1,000,000 | 46.51 MB (46,512,000 B) | 36.80 KB (36,800 B) | 36.48 KB (36,480 B) | 46.92 MB (46,920,000 B) | 93.43 MB (93,432,000 B) |
+| 9,437,184 | 132.19 MB (132,192,000 B) | 103.57 KB (103,568 B) | 103.68 KB (103,680 B) | 132.05 MB (132,049,200 B) | 264.24 MB (264,241,200 B) |
+| 200,503,969 (complete mainnet — computed, no server built at this scale) | 553.82 MB (553,819,200 B) | 435.07 KB (435,072 B) | 434.37 KB (434,368 B) | 554.72 MB (554,716,800 B) | 1.11 GB (1,108,536,000 B) |
 
-The last row is the honest cost of the complete set to a *client*: **830.73 MB
-downloaded once** from `/setup`, and **1.66 GB resident** thereafter (the hint,
-plus `A` re-expanded locally from its seed rather than transferred). That is the
-inherent SimplePIR-class client footprint at 200 M accounts, and it is what
-`docs/adr/0019` means when it says the browser front end gives way to the CLI
-client at the complete set.
+The last row is the honest cost of the complete set to a *client*: **553.82 MB (553,819,200 B) downloaded once** from `/setup`, and **1.11 GB (1,108,536,000 B) resident** thereafter (the hint, plus `A` re-expanded locally from its seed rather than transferred). That is the inherent SimplePIR-class client footprint at 200,503,969 accounts, and it is what `docs/adr/0019` means when it says the browser front end gives way to the CLI client at the complete set.
 
-One caveat for the *browser* specifically: this table is steady state, and a
-tab's real ceiling is the **init peak** — encoded bundle, decoded bundle, and
-the built client transiently coexist, and wasm linear memory never shrinks, so
-the peak is also the tab's floor from then on. After the init-sequence fixes
-(free the encoded buffer between decode and build; consume decoded hints per
-segment) that peak is ~2.4× the hint (~2.0 GB here), and the front end's
-pre-flight budgets **3× the hint** for it (`ESTIMATED_PEAK_MULTIPLE`,
-`web/pir.js` — derivation there; ADR-0032 revision). The CLI client's peak is
-the same sequence minus the wasm no-shrink property.
+One caveat for the *browser* specifically: this table is steady state, and a tab's real ceiling is the **init peak** — encoded bundle, decoded bundle, and the built client transiently coexist, and wasm linear memory never shrinks, so the peak is also the tab's floor from then on. After the init-sequence fixes (free the encoded buffer between decode and build; consume decoded hints per segment) that peak is ~2.4× the hint (~1.33 GB (1,329,166,080 B) here), and the front end's pre-flight budgets **3× the hint** for it (`ESTIMATED_PEAK_MULTIPLE`, `web/pir.js` — derivation there; ADR-0032 revision). The CLI client's peak is the same sequence minus the wasm no-shrink property.
 
 ## 5. Answer latency, at 1,000,000 accounts
 
 | metric | value |
 |---|---:|
 | queries measured | 20 |
-| avg `server.answer(&queries)` latency | 2.6845 ms |
+| avg `server.answer(&queries)` latency | 3.3489 ms |
 
 ## 6. The headline: full rebuild ÷ per-block patch (K≈300)
 
@@ -97,19 +86,19 @@ Duty cycle assumes a 12 s block (`docs/plan.md` §7's framing — the honest mea
 
 | accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) | duty cycle @ 12s block |
 |---:|---:|---:|---:|---:|
-| 100,000 | 0.044 s | 1.9482 ms | 23× | 0.0162% |
-| 1,000,000 | 0.392 s | 3.5643 ms | 110× | 0.0297% |
-| 9,437,184 | 6.677 s | 4.9594 ms | 1346× | 0.0413% |
+| 100,000 | 0.029 s | 1.4266 ms | 20× | 0.0119% |
+| 1,000,000 | 0.657 s | 2.8230 ms | 233× | 0.0235% |
+| 9,437,184 | 9.955 s | 3.8505 ms | 2585× | 0.0321% |
 
 ## 7. The complete mainnet set (200,503,969 accounts)
 
-The live deployment (`docs/deploy.md` §5.3) serves the complete nonzero-balance mainnet set — 21x larger than this file's largest bench scale (9,437,184 accounts, §1–§6). This section states plainly what is and is not measured at that scale, and what a defensible extrapolation of the §6 headline ratio looks like. §1–§6 above are left exactly as measured 2026-07-22 — see the reproducibility note below for why.
+The live deployment (`docs/deploy.md` §5.3) serves the complete nonzero-balance mainnet set — 21x larger than this file's largest bench scale (9,437,184 accounts, §1–§6). This section states plainly what is and is not measured at that scale, and what a defensible extrapolation of the §6 headline ratio looks like. §1–§6 above are this run's own fresh measurements, never a value anyone hand-maintains to match them — see the reproducibility note below for how much run-to-run machine variance to expect before comparing them against any other figure this section cites.
 
-**What is measured, and where.** The complete set's one-time full PIR-setup rebuild took **1236.5 s** at 200,503,969 accounts — `docs/deploy.md` §5.3, "PIR setup (one-time)", on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB), **not** this benchmark machine. That is exactly §1's quantity (full-rebuild time) at deployment scale, but measured on a different machine from every other row in §1 and §6 — a fact that must travel with the number wherever it is quoted.
+**What is measured, and where.** The complete set's one-time full PIR-setup rebuild took **1236.5 s** at 200,503,969 accounts — `docs/deploy.md` §5.3, "PIR setup (one-time)", on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB), **not** this benchmark machine, and under the pre-ADR-0034 `(arity 3, bucket_size 4)` lineage that host is still running (it has not yet been re-bootstrapped onto the `(arity 2, bucket_size 4)` geometry §1–§6 above measure). That is exactly §1's quantity (full-rebuild time) at deployment scale, but measured on a different machine, and a different geometry, from every other row in §1 and §6 — a fact that must travel with the number wherever it is quoted.
 
-**What is not measured, plainly.** Per-block patch time has never been measured at the complete set. This laptop cannot hold that set — the geometry alone is a 35.43 GB server DB (§4b) — and the deployment box is a production server, not a benchmark rig, so it has never run the bench harness's warm-up/measured-block protocol either. §6 therefore has no 200,503,969-account row, and deliberately does not get one: a patch time nobody measured has no business next to five that were.
+**What is not measured, plainly.** Per-block patch time has never been measured at the complete set. This laptop cannot hold that set — the now-deployed `(arity 2, bucket_size 4)` geometry alone is a 23.62 GB server DB (§4b; the live host, still on the pre-ADR-0034 `(arity 3, bucket_size 4)` build, actually holds 35.43 GB today, until it is re-bootstrapped) — and the deployment box is a production server, not a benchmark rig, so it has never run the bench harness's warm-up/measured-block protocol either. §6 therefore has no 200,503,969-account row, and deliberately does not get one: a patch time nobody measured has no business next to five that were.
 
-**What the trend shows.** A separate run on 2026-07-27 — "Run B" below, uncontaminated by competing builds, *not* the run behind §1–§6 — extended this harness past 9,437,184 accounts with this worktree's own `xtask bench --scales <n,n,...> --mid-scale <n>` flags. Its three largest points:
+**What the trend shows.** A separate run on 2026-07-27 — "Run B" below, uncontaminated by competing builds, *not* the run behind §1–§6 — extended this harness past 9,437,184 accounts with this worktree's own `xtask bench --scales <n,n,...> --mid-scale <n>` flags, under the pre-ADR-0034 `(arity 3, bucket_size 4)` lineage this harness ran at the time (its `ARITY` constant has since moved to 2) — not the now-deployed `(arity 2, bucket_size 4)` geometry §1–§6 above measure. Its three largest points:
 
 | accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) |
 |---:|---:|---:|---:|
@@ -126,8 +115,24 @@ Per-block patch time is *not* holding flat here — it grows from single-digit t
 - Run A (the contaminated run, not tabulated above) fits the same way to a smaller extrapolated ratio — consistent with treating this as an order-of-magnitude statement, not a precise one.
 - Cross-check, itself EXTRAPOLATION: dividing the deployment's own measured 1236.5 s full rebuild by the ~2 × 10^4 extrapolated ratio implies a per-block patch of roughly 62 ms (55–75 ms, allowing for the extrapolation's own uncertainty) at 200,503,969 accounts on that host — a figure nobody has measured (see "instrumentation now exists" below).
 
-**Honest summary.** The 1346× this file publishes for 9,437,184 accounts (§6) understates the argument at deployment scale by more than an order of magnitude; a 10^5 claim (the original brief's assumption) would overstate it. The defensible statement today is: **on the order of 10^4, and rising with N.**
+**Honest summary.** The 2585× this file publishes for 9,437,184 accounts (§6) understates the argument at deployment scale by roughly 8×; a 10^5 claim (the original brief's assumption) would overstate it. The defensible statement today is: **on the order of 10^4, and rising with N.**
 
-**Reproducibility note.** Two runs on 2026-07-27 (Run A, contaminated by competing cargo builds; Run B, quoted above) came out uniformly 1.6–2× slower than the 2026-07-22 figures in §1–§5 across measurements that share no code path with the scale extension — e.g. answer latency at 1,000,000 accounts (5.5713 ms vs. the published 2.6845 ms, §5) and full-rebuild time at 9,437,184 accounts (10.559 s vs. the published 6.677 s, §1). That is a machine-state difference on this laptop, not a code change, so §1–§6 above were deliberately left at their measured 2026-07-22 values rather than overwritten with slower 2026-07-27 numbers — and this section's own figures are comparable to §1–§6 only in shape (the trend, the ratio), never in absolute terms.
+**Reproducibility note.** Two historical runs on 2026-07-27 — Run A (contaminated by competing cargo builds) and Run B (quoted above), both this module's pre-ADR-0034 `(arity 3, bucket_size 4)` — measured answer latency at 1,000,000 accounts (5.5713 ms) and full-rebuild time at 9,437,184 accounts (10.559 s), uniformly slower than the 2026-07-22 `(3,4)` baseline this file used to publish (2.6845 ms and 6.677 s respectively — fixed historical citations, not this file's own current §1/§5, which may since be a different geometry and a different day). This run's own figures at the same two scales — 9.955 s (§1) and 3.3489 ms (§5) — are a third, independent data point in that same run-to-run variance. That gap is machine-state variance on this laptop, not a code change — which is exactly why §1–§6 above are always this run's own fresh measurements rather than a value anyone hand-maintains to match them: comparing any two runs of this file is meaningful only in *shape* (the trend, the ratio), never in absolute terms. See the same-machine control below for a same-day, same-machine comparison that isolates the geometry's own effect from exactly this kind of variance.
+
+**Same-machine control (2026-07-27).** §1–§6 above are this run's own fresh measurements at the now-deployed `(arity 2, bucket_size 4)` geometry (ADR-0034) — a different geometry, and very possibly a different day, from the 2026-07-22 `(arity 3, bucket_size 4)` table this file used to publish before ADR-0034, so comparing the two naively conflates both changes at once. To separate them, this laptop ran both configurations back to back, otherwise idle, at `BenchConfig::default()`'s three scales — measured *before* the run that produced §1–§6 above, so this control's own `(2,4)` column differs from whatever §1/§5/§6 actually show by however much the machine's load changed between the two runs, not by a code or geometry change: exactly the run-to-run variance this control exists to expose, not a discrepancy to reconcile.
+
+| accounts | (2,4) rebuild | (2,4) patch (K≈300) | (2,4) ratio | (3,4) rebuild | (3,4) patch (K≈300) | (3,4) ratio |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100,000 | 0.037 s | 2.4493 ms | 15× | 0.066 s | 2.8398 ms | 23× |
+| 1,000,000 | 0.973 s | 4.6408 ms | 210× | 0.569 s | 4.8994 ms | 116× |
+| 9,437,184 | 12.797 s | 5.2321 ms | 2446× | 8.984 s | 6.8111 ms | 1319× |
+
+(§5's exact measurement, answer latency @ 1,000,000 accounts: 5.5062 ms at `(2,4)`, 4.3058 ms at `(3,4)`.)
+
+Three things this control establishes, holding the machine fixed:
+
+- The machine is still in a slow state: today's `(3,4)` control latency (4.3058 ms) and the 2026-07-27 Run B figure (5.5713 ms, above) are both well above the 2026-07-22 `(3,4)` baseline this file used to publish (2.6845 ms) — clear evidence of how much this laptop's run-to-run timing varies on its own, independent of any code or geometry change.
+- The ratio is machine-state-robust — direct evidence for the reproducibility note's "the ratio largely cancels a uniform machine slowdown" argument above: every absolute time in the control table runs roughly 1.5× slower than that same 2026-07-22 baseline, yet the `(3,4)` control's 1319× ratio at 9,437,184 accounts lands within 2.0% of the baseline's own 1346× — the ratio held even though nothing else did.
+- At these three bench scales `(2,4)` is the *unfavourable* case, and the committed numbers therefore understate the deployed geometry — a reader must not conclude the arity change itself made this system 1.42× slower. Arity 2's power-of-two quantization lands badly at exactly 9,437,184 accounts: `(3,4)` needs 3,145,728 buckets (load 0.7500, 251,658,240 cells) where `(2,4)` needs 4,194,304 (0.5625 load, 335,544,320 cells — 1.33× more data), which is why the `(2,4)` control rebuilds 1.42× slower here (12.797 s vs. 8.984 s) — a consequence of the account count landing awkwardly for this arity's quantization at this particular scale, not of the arity change in general. At the complete set the relationship inverts: `(2,4)`'s server DB is 23.62 GB (23,622,320,128 B) against `(3,4)`'s 35.43 GB (35,433,480,192 B) — 1.50× *fewer* cells at deployment scale. The one genuine arity effect visible in the control table runs the other way from rebuild time: per-block patch time is *lower* at `(2,4)` (5.2321 ms vs. 6.8111 ms at 9,437,184 accounts) even though that scale holds more data under `(2,4)` — fewer segments (2, not 3) to patch.
 
 **Instrumentation now exists.** `NodeState::apply_block` (`crates/risepir-http/src/node.rs`) now returns its own measured hint-patch duration, and the mainnet follow loop (`crates/risepir-rpc/src/mainnet.rs`) aggregates and periodically logs it with the mean mutations/block (K) over the same window. The next restart of the live deployment will start producing the one number this section still lacks — a directly measured complete-set patch time — with no extrapolation involved.

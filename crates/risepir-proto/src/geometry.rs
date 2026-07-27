@@ -161,20 +161,27 @@ impl std::error::Error for GeomError {}
 
 /// Flat ceiling `for_accounts` never sizes above, regardless of arity or
 /// bucket_size, expressed as a numerator over [`TARGET_DEN`]:
-/// `GLOBAL_TARGET_NUM / TARGET_DEN` = `7_500 / 10_000` = `0.75`.
+/// `GLOBAL_TARGET_NUM / TARGET_DEN` = `9_000 / 10_000` = `0.90`.
 ///
-/// `docs/plan.md` §9: "run at ~75% load for headroom." This used to be the
-/// *only* term `for_accounts` sized against; it is now one of two terms
-/// [`effective_target_load`] takes the `min` of — see that function and ADR-0031
-/// (`docs/adr/README.md`) for why a flat cap survives alongside a
-/// per-configuration one: this store mutates continuously inside a
-/// ~12 s block budget while holding the write lock `/answer` also needs,
-/// it cannot grow in place once built (`RisePirServer::full_rebuild` only
-/// ever re-derives hints for the *existing* geometry), and a `TableFull`
-/// mid-block is therefore a full re-bootstrap outage rather than a
-/// slowdown — so the flat 0.75 headroom is kept regardless of what any
-/// single `(arity, bucket_size)` could theoretically reach.
-const GLOBAL_TARGET_NUM: u128 = 7_500;
+/// Retuned from `0.75` by ADR-0034 (`docs/adr/README.md`) for the
+/// `(arity 2, bucket_size 4)` deployment. (This doc used to cite
+/// `docs/plan.md` §9 for "run at ~75% load for headroom" — that string is
+/// not in §9; the plan's only "~75%" is §7's headline bench table, which
+/// describes one *measured* configuration, not a target. The number itself
+/// has only ever come from ADR-0031/ADR-0034, never from the plan.)
+///
+/// This used to be the *only* term `for_accounts` sized against; it is now
+/// one of two terms [`effective_target_load`] takes the `min` of — see that
+/// function and ADR-0031 (`docs/adr/README.md`) for why a flat cap survives
+/// alongside a per-configuration one *at all*, independent of where either
+/// number is set: this store mutates continuously inside a ~12 s block
+/// budget while holding the write lock `/answer` also needs, it cannot grow
+/// in place once built (`RisePirServer::full_rebuild` only ever re-derives
+/// hints for the *existing* geometry), and a `TableFull` mid-block is
+/// therefore a full re-bootstrap outage rather than a slowdown — so a flat
+/// headroom is kept regardless of what any single `(arity, bucket_size)`
+/// could theoretically reach.
+const GLOBAL_TARGET_NUM: u128 = 9_000;
 
 /// Common denominator for every target-load fraction in this module:
 /// hundredths of a percent. Large enough to represent both
@@ -189,13 +196,20 @@ const TARGET_DEN: u128 = 10_000;
 /// out of 100, so `SAFETY_MARGIN_NUM * (a MAX_LOAD_FACTOR hundredth)` lands
 /// directly on the [`TARGET_DEN`] scale.
 ///
-/// See [`effective_target_load`] and ADR-0031 for the measured blast
-/// radius at this margin: exactly three `(arity, bucket_size)`
-/// configurations bind — `(2,1)`, `(2,2)`, `(3,1)` — and none of them is
-/// used anywhere in this repo (deployed and benched configurations are all
-/// `(3,4)`), so every configuration this repo actually deploys or benches
-/// is bit-identical to before this safety margin existed.
-const SAFETY_MARGIN_NUM: u128 = 85;
+/// See [`effective_target_load`] for the measured blast radius at this
+/// margin, retuned `85` → `95` (i.e. `0.85` → `0.95`) by ADR-0034 alongside
+/// [`GLOBAL_TARGET_NUM`] (`0.75` → `0.90`) for the `(arity 2, bucket_size
+/// 4)` deployment: **ten** of the twelve `(arity, bucket_size)`
+/// configurations now bind the per-configuration ceiling below the flat
+/// cap — `(2,1)`, `(2,2)`, `(2,3)`, `(2,4)`, `(3,1)`, `(3,2)`, `(3,3)`,
+/// `(3,4)`, `(4,1)`, `(4,2)` — including the deployed `(2,4)` and every
+/// configuration this repo benches. Only `(4,3)` and `(4,4)` still bind the
+/// flat cap instead (`0.95 × 0.95 = 0.9025`, which exceeds `0.90`). Before
+/// ADR-0034, at margin `0.85` against a flat `0.75` cap, exactly three
+/// configurations bound — `(2,1)`, `(2,2)`, `(3,1)` — and none of them was
+/// used anywhere in this repo; ADR-0034 exists because that stopped being
+/// true once the deployed configuration became `(2,4)`.
+const SAFETY_MARGIN_NUM: u128 = 95;
 
 /// `segmented_cuckoo::MAX_LOAD_FACTOR[arity - 2][bucket_size - 1]`,
 /// converted once to an exact numerator over a denominator of 100 (e.g.
@@ -267,14 +281,18 @@ impl Geometry {
     /// constraint) with `accounts / (num_buckets * bucket_size) <=` the
     /// *effective* target load for this `(arity, bucket_size)` — see
     /// [`effective_target_load`] (`pub`, so the `xtask geometry` sweep
-    /// derives the same ratio instead of mirroring it): the smaller of a flat 0.75 cap and a
-    /// safety margin on `segmented_cuckoo::MAX_LOAD_FACTOR`'s own
-    /// published achievable-load ceiling for that configuration
-    /// (ADR-0031). For every `(arity, bucket_size)` this repo actually
-    /// deploys or benches, the effective target is still exactly 0.75 —
-    /// the per-configuration term only ever tightens three combinations
-    /// this repo does not use. Then derives `plaintext_bits` from
-    /// `ikpir_common::pir_params` for `backend` at that geometry.
+    /// derives the same ratio instead of mirroring it): the smaller of a
+    /// flat 0.90 cap and a safety margin on
+    /// `segmented_cuckoo::MAX_LOAD_FACTOR`'s own published achievable-load
+    /// ceiling for that configuration (the two-term `min` is ADR-0031's
+    /// mechanism; both numbers were retuned `0.75`/`0.85` → `0.90`/`0.95`
+    /// by ADR-0034 for the `(arity 2, bucket_size 4)` deployment). Ten of
+    /// the twelve `(arity, bucket_size)` combinations now bind the
+    /// per-configuration term — including the deployed `(2,4)` — and only
+    /// `(4,3)`/`(4,4)` still land on the flat 0.90 cap; see
+    /// `SAFETY_MARGIN_NUM`'s docs for the full split. Then derives
+    /// `plaintext_bits` from `ikpir_common::pir_params` for `backend` at
+    /// that geometry.
     ///
     /// Before ADR-0031, `for_accounts` sized every configuration against a
     /// single flat 0.75 with no regard for arity/bucket_size, which is
@@ -282,7 +300,11 @@ impl Geometry {
     /// achievable load for `(arity=2, bucket_size=1)` is only ~0.48, so a
     /// flat 0.75 target could return a geometry too small for the store to
     /// actually be filled to (a measured failure at 1,051,458 of
-    /// 1,500,000 inserts, 70.1%, before this fix — see ADR-0031).
+    /// 1,500,000 inserts, 70.1%, before that fix — see ADR-0031). ADR-0034
+    /// later raised both the flat cap and the margin once the deployed
+    /// configuration became `(2,4)`, whose own achievable ceiling (`0.91`)
+    /// left more of `segmented_cuckoo`'s own headroom on the table than the
+    /// original flat `0.75` was using.
     ///
     /// The whole target-load search — including the per-configuration
     /// ceiling, converted from `segmented_cuckoo::MAX_LOAD_FACTOR`'s `f64`
@@ -525,7 +547,12 @@ mod tests {
     /// num_buckets=3*2^25, bucket_size=4, fp=32, value_bits=96`. Both
     /// backends land on `plaintext_bits==8` here (unlike the arity-4 point
     /// above, where they differ) — a useful second data point precisely
-    /// because it does *not* exercise the same coincidence.
+    /// because it does *not* exercise the same coincidence. Like
+    /// `pinned_arity4_65536` above, this pins `sizes()`'s formulas at a
+    /// hand-picked geometry built directly as a struct literal, not via
+    /// `Geometry::for_accounts` — it is a statement about the formulas, not
+    /// about any deployed or benched configuration (arity 3 here predates
+    /// ADR-0034's move to the deployed arity 2).
     #[test]
     fn pinned_mainnet_point() {
         let num_buckets = 3 * (1u32 << 25);
@@ -618,8 +645,8 @@ mod tests {
                         .unwrap();
                     let sizes = g.sizes(Backend::Simple, accounts);
                     assert!(
-                        sizes.load_factor <= 0.75 + 1e-9,
-                        "accounts={accounts} arity={arity} bucket_size={bucket_size}: load_factor={} > 0.75",
+                        sizes.load_factor <= 0.90 + 1e-9,
+                        "accounts={accounts} arity={arity} bucket_size={bucket_size}: load_factor={} > 0.90",
                         sizes.load_factor
                     );
                 }
@@ -716,20 +743,41 @@ mod tests {
         }
     }
 
-    /// The whole blast radius of ADR-0031's 0.85 safety margin, asserted
-    /// rather than trusted: at margin 0.85, exactly three `(arity,
-    /// bucket_size)` configurations bind the per-configuration ceiling
-    /// below the flat 0.75 cap, and every other configuration in `2..=4 x
-    /// 1..=4` stays at *exactly* 0.75 — bit-identical to before this
-    /// module considered a per-configuration ceiling at all.
+    /// The whole blast radius of ADR-0034's retuned `0.95` safety margin,
+    /// asserted rather than trusted: at margin `0.95` against a flat `0.90`
+    /// cap, **ten** of the twelve `(arity, bucket_size)` configurations in
+    /// `2..=4 x 1..=4` bind the per-configuration ceiling below the flat
+    /// cap — including the deployed `(2,4)` and every configuration this
+    /// repo benches — and only two, `(4,3)` and `(4,4)`, still land on the
+    /// flat cap (before ADR-0034, at margin `0.85` against a flat `0.75`
+    /// cap, it was the other way around: only three bound, and none of
+    /// them was used anywhere in this repo).
     #[test]
     fn effective_target_load_matches_measured_blast_radius() {
         // (arity, bucket_size) -> numerator over TARGET_DEN, i.e.
         // SAFETY_MARGIN_NUM * MAX_LOAD_FACTOR-as-hundredths:
-        //   (2,1): 85 * 48 = 4_080  (0.408)
-        //   (2,2): 85 * 83 = 7_055  (0.7055)
-        //   (3,1): 85 * 85 = 7_225  (0.7225)
-        let tight: [((u32, u32), u128); 3] = [((2, 1), 4_080), ((2, 2), 7_055), ((3, 1), 7_225)];
+        //   (2,1): 95 * 48 = 4_560  (0.4560)
+        //   (2,2): 95 * 83 = 7_885  (0.7885)
+        //   (2,3): 95 * 89 = 8_455  (0.8455)
+        //   (2,4): 95 * 91 = 8_645  (0.8645)  <- deployed
+        //   (3,1): 95 * 85 = 8_075  (0.8075)
+        //   (3,2): 95 * 93 = 8_835  (0.8835)
+        //   (3,3): 95 * 94 = 8_930  (0.8930)
+        //   (3,4): 95 * 94 = 8_930  (0.8930)  <- deployed before ADR-0034
+        //   (4,1): 95 * 91 = 8_645  (0.8645)
+        //   (4,2): 95 * 94 = 8_930  (0.8930)
+        let tight: [((u32, u32), u128); 10] = [
+            ((2, 1), 4_560),
+            ((2, 2), 7_885),
+            ((2, 3), 8_455),
+            ((2, 4), 8_645),
+            ((3, 1), 8_075),
+            ((3, 2), 8_835),
+            ((3, 3), 8_930),
+            ((3, 4), 8_930),
+            ((4, 1), 8_645),
+            ((4, 2), 8_930),
+        ];
         for ((arity, bucket_size), expected_num) in tight {
             assert_eq!(
                 effective_target_load(arity, bucket_size),
@@ -738,48 +786,71 @@ mod tests {
             );
             assert!(
                 expected_num < GLOBAL_TARGET_NUM,
-                "({arity},{bucket_size}): must be strictly below the flat 0.75 cap"
+                "({arity},{bucket_size}): must be strictly below the flat 0.90 cap"
             );
         }
 
-        let flat: [(u32, u32); 9] = [
-            (2, 3),
-            (2, 4),
-            (3, 2),
-            (3, 3),
-            (3, 4),
-            (4, 1),
-            (4, 2),
-            (4, 3),
-            (4, 4),
-        ];
+        // (4,3) and (4,4) both publish MAX_LOAD_FACTOR 0.95:
+        // 95 * 95 = 9_025, which exceeds GLOBAL_TARGET_NUM (9_000), so the
+        // flat cap binds for these two instead.
+        let flat: [(u32, u32); 2] = [(4, 3), (4, 4)];
         for (arity, bucket_size) in flat {
             assert_eq!(
                 effective_target_load(arity, bucket_size),
                 (GLOBAL_TARGET_NUM, TARGET_DEN),
-                "({arity},{bucket_size}): expected the flat 0.75 cap to stay exact"
+                "({arity},{bucket_size}): expected the flat 0.90 cap to bind"
             );
         }
     }
 
-    /// "Nothing else moved": every configuration this repo actually
-    /// deploys or benches — all `(arity=3, bucket_size=4)`, none of the
-    /// three ADR-0031 tightens — must land on exactly the same
-    /// `num_buckets` as before this fix (`docs/numbers.md` §4a,
-    /// `docs/deploy.md` §5.3 / ADR-0023).
+    /// "Nothing else moved" — for `(arity=3, bucket_size=4)`, the
+    /// configuration this repo deployed and benched *before* ADR-0034: none
+    /// of these four account counts change `num_buckets` across either
+    /// retune (ADR-0031's introduction of the per-configuration ceiling, or
+    /// ADR-0034's `0.75`/`0.85` → `0.90`/`0.95` retune of both terms). This
+    /// no longer pins a live deployment — see
+    /// `for_accounts_deployed_2_4_num_buckets_unchanged` below for the
+    /// configuration ADR-0034 actually deploys — but it stays as a
+    /// regression pin on arity 3, and on the historical figures in
+    /// `docs/numbers.md` §4a / `docs/deploy.md` §5.3 / ADR-0023 (all
+    /// pre-ADR-0034 now).
     #[test]
     fn for_accounts_deployed_and_bench_num_buckets_unchanged() {
         let cases: [(u64, u32); 4] = [
             (100_000, 49_152),
             (1_000_000, 393_216),
             (9_437_184, 3_145_728),
-            (200_503_969, 100_663_296), // the live complete mainnet set
+            (200_503_969, 100_663_296), // the live complete mainnet set, pre-ADR-0034
         ];
         for (accounts, expected_num_buckets) in cases {
             let g = Geometry::for_accounts(accounts, 3, 4, 32, &codec_96(), Backend::Simple).unwrap();
             assert_eq!(
                 g.num_buckets, expected_num_buckets,
-                "accounts={accounts}: num_buckets must be bit-identical to pre-ADR-0031"
+                "accounts={accounts}: num_buckets must be bit-identical across both retunes"
+            );
+        }
+    }
+
+    /// The sibling of `for_accounts_deployed_and_bench_num_buckets_unchanged`
+    /// at the configuration ADR-0034 actually deploys, `(arity=2,
+    /// bucket_size=4)`: the same four account counts, pinning the
+    /// `num_buckets` the retuned target now picks. Different numbers from
+    /// the arity-3 pin above are expected — arity changes the quantization
+    /// shape (powers of two vs. `3 * 2^t`) — this only asserts that this
+    /// specific new deployed geometry is itself stable and reproducible.
+    #[test]
+    fn for_accounts_deployed_2_4_num_buckets_unchanged() {
+        let cases: [(u64, u32); 4] = [
+            (100_000, 32_768),
+            (1_000_000, 524_288),
+            (9_437_184, 4_194_304),
+            (200_503_969, 67_108_864), // the live complete mainnet set
+        ];
+        for (accounts, expected_num_buckets) in cases {
+            let g = Geometry::for_accounts(accounts, 2, 4, 32, &codec_96(), Backend::Simple).unwrap();
+            assert_eq!(
+                g.num_buckets, expected_num_buckets,
+                "accounts={accounts}: num_buckets must match the deployed (arity=2, bucket_size=4) geometry"
             );
         }
     }

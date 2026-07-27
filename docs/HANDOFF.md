@@ -58,10 +58,15 @@ the complete set. See `docs/deploy.md` §2.1 (recorded gate output), §2.3
 (revised sizing) and §5.3 (live evidence).
 
 The one number that mattered: mainnet has **200,503,969** nonzero accounts, not
-the ~100–130 M this file and the runbook had assumed, which makes the server DB
-**35.43 GB** rather than 10–13 GB. The "16–24 GB box" advice was wrong by more
-than 2×; the deployment runs on a 64 GB `e2-highmem-8`. Anything that still
-quotes the old figures is stale.
+the ~100–130 M this file and the runbook had assumed. At the geometry deployed
+then (`arity 3, bucket_size 4`), that made the server DB **35.43 GB** rather
+than 10–13 GB. The "16–24 GB box" advice was wrong by more than 2× regardless;
+the deployment runs on a 64 GB `e2-highmem-8`. ADR-0034 has since retuned the
+deployed geometry to `(arity 2, bucket_size 4)` at a higher target load, which
+computes to **23.62 GB** for the same account count (`docs/deploy.md` §2.3) —
+though the live box has not been re-bootstrapped onto it yet, so today it is
+still serving 35.43 GB. Anything that still quotes the old figures without
+noting which lineage they belong to is stale.
 
 **2. Known open items, in priority order:**
 - **Withdrawal-recipient hard refresh** (deploy.md §4): a one-time absolute
@@ -71,19 +76,31 @@ quotes the old figures is stale.
   (`docs/data-acquisition.md` path 3) would bulk-replay the snapshot→head gap if
   the join gets long.
 - Upstream PR candidates (offer, don't block on): batch-mutation API; seed
-  injection in `server_setup` (`docs/verification.md`); non-power-of-two
-  `segmented-cuckoo` segment sizes, which is what caps `bucket_size` at 4
-  today (ADR-0030) — `xtask geometry [--fill-check]` is the tool for this
-  question if it comes up again.
+  injection in `server_setup` (`docs/verification.md`); widening
+  `segmented_cuckoo::SUPPORTED_BUCKET_SIZES` past 4 with a measured
+  `MAX_LOAD_FACTOR` for it — `(2,7)` would reach load 0.8536 at 20.67 GB, and
+  ADR-0034 now ranks this the highest-value upstream ask for this project;
+  non-power-of-two `segmented-cuckoo` segment sizes is next — that masking-based
+  hash is why `num_buckets` quantizes by factors of two, and so why
+  `slots` lands on the coarse `{2^t, 3·2^t, 9·2^t}` rung menu that ADR-0034 §1
+  had to pick from rather than sizing freely. `xtask geometry [--fill-check]`
+  is the tool for either question if it comes up again.
 - Optional polish: MetaMask walkthrough screenshots. (~~A public deployment on
   the Oracle free-tier box~~ — public deployment shipped in PR #5 on GCP; the
-  Oracle 24 GB free tier can no longer hold the 35.43 GB complete set at all.)
+  Oracle 24 GB free tier still can't hold the complete set, though ADR-0034
+  changed the margin completely: at the live `(3,4)` geometry it was never
+  close (35.43 GB DB alone), and even at the deployed `(2,4)` geometry's
+  ~24.7 GB working set it is still ~0.7 GB over — a real no, just no longer a
+  1.6× one. `docs/deploy.md` §2.3/§3.6.)
 - **Hint caching is now the front end's binding constraint, not a nicety.** At
-  the complete set `/setup` is **830.73 MB** and a client holds **1.66 GB**
-  resident (`docs/numbers.md` §4c) — versus 49 MB at `--partial-capacity
-  1000000`. Every page load pays that download again. ADR-0019 lists caching as
-  deferred-with-conditions (it is sound only against the delta-ring retention
-  check — a `409` must force a re-download); at 831 MB it is what decides
+  the deployed `(arity 2, bucket_size 4)` geometry (ADR-0034), `/setup`
+  computes to **553.82 MB** and a client holds **1.11 GB** resident (was
+  **830.73 MB** / **1.66 GB** at the `(arity 3, bucket_size 4)` geometry the
+  live box still serves until it is re-bootstrapped — `docs/numbers.md` §4c) —
+  versus 46.51 MB at `--partial-capacity 1000000`. Every page load pays that
+  download again. ADR-0019 lists caching as deferred-with-conditions (it is
+  sound only against the delta-ring retention check — a `409` must force a
+  re-download); even at the smaller 554 MB figure it is still what decides
   whether the browser front end is usable against the complete set at all.
 - **Web front end, remaining deferrals** (ADR-0019 records why, and what each
   needs): ~~public exposure~~ (shipped, PR #5); and serving the page from a

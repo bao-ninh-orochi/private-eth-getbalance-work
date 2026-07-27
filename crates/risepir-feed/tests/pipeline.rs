@@ -19,9 +19,9 @@ use risepir_client::{Lookup, RisePirClient};
 use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_proto::{AddressHash, Backend, Balance, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const LWE_DIM: u32 = 512;
@@ -39,7 +39,7 @@ fn codec() -> ValueCodec {
 /// head, rewind + scan on the client.
 fn private_lookup(
     client: &mut RisePirClient<SimplePirBackend>,
-    server: &RisePirServer<Segmented3aryScheme, SimplePirBackend>,
+    server: &RisePirServer<Segmented2aryScheme, SimplePirBackend>,
     addr: &AddressHash,
 ) -> Lookup {
     let (queries, ctx) = client.build_query(addr);
@@ -63,7 +63,7 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
     // invariant live set keeps us there), then build the store from genesis.
     let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
         .expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -76,7 +76,7 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
         store.insert(addr, &v).expect("insert genesis");
     }
 
-    let mut server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let mut server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), codec, 0);
     let mut ring = DeltaRing::new(300);
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(server.setup(), codec);

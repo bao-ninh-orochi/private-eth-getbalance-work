@@ -3,7 +3,7 @@
 //! multi-hundred-KB input, and the decoded queries feed straight into the
 //! server's matvec, which indexes on the *exact*-length assumption).
 //!
-//! The first three input bytes steer the deployment geometry the decoder
+//! The first two input bytes steer the deployment geometry the decoder
 //! is checking against (per-segment expected lengths in 1..=64), so the
 //! fuzzer explores the interaction of wire bytes × geometry, not one
 //! hard-coded shape.
@@ -15,12 +15,12 @@ use risepir_http::wire::{decode_query_bundle, encode_query_bundle};
 use segmented_cuckoo::{CuckooParams, SchemeKind};
 
 fuzz_target!(|data: &[u8]| {
-    let [l0, l1, l2, rest @ ..] = data else { return };
-    let expected_len_per_seg =
-        [u32::from(l0 % 64) + 1, u32::from(l1 % 64) + 1, u32::from(l2 % 64) + 1];
+    let [l0, l1, rest @ ..] = data else { return };
+    let expected_len_per_seg = [u32::from(l0 % 64) + 1, u32::from(l1 % 64) + 1];
     let params = CuckooParams {
-        scheme_kind: SchemeKind::Segmented3ary,
-        num_buckets: 96,
+        // arity 2 (ADR-0034) — matches this repo's deployed geometry.
+        scheme_kind: SchemeKind::Segmented2ary,
+        num_buckets: 64,
         bucket_size: 4,
         fingerprint_bits: 32,
         value_bits: 96,

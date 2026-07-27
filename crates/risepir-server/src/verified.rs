@@ -190,13 +190,13 @@ mod tests {
     use super::*;
     use ikpir_common::backend::simple::SimpleParams;
     use ikpir_common::pir_params::simple_max_plaintext_bits;
-    use segmented_cuckoo::{CuckooParams, Segmented3aryCuckooKVStore};
+    use segmented_cuckoo::{CuckooParams, Segmented2aryCuckooKVStore};
     use std::collections::HashMap;
 
     // Tiny store so the birthday search below only needs ~2^17.7 keys:
     // colliding on (32-bit fp, first candidate bucket) is a 2^35 space at
     // segment_size 8.
-    const NUM_BUCKETS: u32 = 3 * 8;
+    const NUM_BUCKETS: u32 = 2 * 8;
     const BUCKET_SIZE: u32 = 4;
     const FP_BITS: u32 = 32;
 
@@ -208,10 +208,10 @@ mod tests {
         }
     }
 
-    fn store() -> Segmented3aryCuckooKVStore {
+    fn store() -> Segmented2aryCuckooKVStore {
         let value_bits = codec().value_bits();
-        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 3, BUCKET_SIZE, FP_BITS, value_bits, SimpleParams::DEFAULT_SIGMA);
-        Segmented3aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, value_bits, pb).unwrap()
+        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, value_bits, SimpleParams::DEFAULT_SIGMA);
+        Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, value_bits, pb).unwrap()
     }
 
     fn addr(i: u64) -> AddressHash {

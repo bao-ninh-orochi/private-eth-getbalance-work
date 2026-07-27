@@ -27,9 +27,9 @@ use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_http::{wire, NodeState};
 use risepir_proto::{Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 const LWE_DIM: u32 = 512;
@@ -66,7 +66,7 @@ fn build_node(ring_capacity: usize) -> (Arc<NodeState>, MockFeed) {
         Backend::Simple,
     )
     .expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -79,7 +79,7 @@ fn build_node(ring_capacity: usize) -> (Arc<NodeState>, MockFeed) {
         store.insert(addr, &v).expect("insert genesis");
     }
 
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(ring_capacity), true));
     (state, feed)

@@ -11,19 +11,21 @@ use risepir_server::SetupBundle;
 use crate::error::RpcError;
 
 /// Minimum spacing between two re-bootstrap attempts (ADR-0029, amended).
-/// A re-bootstrap is a full `/setup` re-download — 830.73 MB at the live
-/// complete set, ~8 minutes measured — so when a catch-up-replaying
-/// server outruns even a freshly bootstrapped client (ADR-0029's own
-/// motivating case), retrying per *call* turns a polling caller into an
-/// unmetered re-download loop: every lookup pays the download and still
-/// stalls. Within this window of the previous attempt,
-/// [`PrivateEth::get_balance`] reports the stall honestly instead of
-/// paying again — erroring is fine, an 831 MB-per-call retry loop is not.
-/// Five minutes sits between the ~8-minute worst-case download (retrying
-/// faster than one download can even finish is provably useless) and the
-/// ~10-minute window a freshly regenerated `/setup` bundle now leaves a
-/// client even at replay speed (`NodeState::setup_bytes`'s freshness
-/// rule).
+/// A re-bootstrap is a full `/setup` re-download — 553.82 MB at the live
+/// complete set's deployed `(arity 2, bucket_size 4)` geometry (ADR-0034;
+/// was 830.73 MB at the previous `(arity 3, bucket_size 4)` geometry,
+/// ~8 minutes measured there and proportionally less now, not re-measured
+/// at the new size) — so when a catch-up-replaying server outruns even a
+/// freshly bootstrapped client (ADR-0029's own motivating case), retrying
+/// per *call* turns a polling caller into an unmetered re-download loop:
+/// every lookup pays the download and still stalls. Within this window of
+/// the previous attempt, [`PrivateEth::get_balance`] reports the stall
+/// honestly instead of paying again — erroring is fine, a 554 MB-per-call
+/// retry loop is not. Five minutes sits between the (pre-ADR-0034)
+/// ~8-minute worst-case download (retrying faster than one download can
+/// even finish is provably useless) and the ~10-minute window a freshly
+/// regenerated `/setup` bundle now leaves a client even at replay speed
+/// (`NodeState::setup_bytes`'s freshness rule).
 pub(crate) const REBOOTSTRAP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Everything about one bootstrapped RisePIR session that must move
@@ -148,9 +150,11 @@ pub struct PrivateEth {
     pub(crate) pir: PirHttpClient,
     /// When the last re-bootstrap *started*, if any — the cooldown clock
     /// for [`Self::get_balance`]'s stall recovery (ADR-0029, amended):
-    /// one re-bootstrap costs a full `/setup` re-download (830.73 MB at
-    /// the live complete set), so when a replaying server outruns even a
-    /// fresh bootstrap, per-call retries would turn a polling caller
+    /// one re-bootstrap costs a full `/setup` re-download (553.82 MB at
+    /// the live complete set's deployed `(arity 2, bucket_size 4)`
+    /// geometry, ADR-0034; was 830.73 MB pre-ADR-0034), so when a
+    /// replaying server outruns even a fresh bootstrap, per-call retries
+    /// would turn a polling caller
     /// into an unmetered re-download loop. Within
     /// [`REBOOTSTRAP_COOLDOWN`] of the previous attempt, a stalled call
     /// reports the stall honestly instead of paying again. A `std`

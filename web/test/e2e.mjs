@@ -67,7 +67,13 @@ const wasmBytes = readFileSync(wasmPath);
 // fixed asset MANIFEST, and this repo's static-asset routing has no
 // path-mapping fallback to ride a new file in on (ADR-0019).
 {
-  const COMPLETE_SET_HINT_BYTES = 830_728_800; // docs/numbers.md §4c, measured
+  // docs/numbers.md §4c, computed for the deployed (arity 2, bucket_size 4)
+  // geometry (ADR-0034). PRE_ADR_0034_HINT_BYTES is the (3,4) figure the
+  // ADR-0032 pre-flight was designed against and the box still serves until
+  // it is re-bootstrapped — kept because the 4 GB-phone regression below is
+  // only meaningful at the size that produced the bug.
+  const COMPLETE_SET_HINT_BYTES = 553_819_200;
+  const PRE_ADR_0034_HINT_BYTES = 830_728_800;
   const MOCK_HINT_BYTES = 1_770_000; // ~1.77 MB — this repo's own mock deployment
 
   const tinyDevice = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 2 });
@@ -132,7 +138,7 @@ const wasmBytes = readFileSync(wasmPath);
   // below 4x (the measured pre-fix worst case, before risepir_init freed
   // the encoded buffer mid-init and from_setup consumed hints per
   // segment).
-  const measuredResidentBytes = 1_662_804_000; // docs/numbers.md §4c, steady-state A+hint
+  const measuredResidentBytes = 1_108_536_000; // docs/numbers.md §4c, steady-state A+hint
   const estimate = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 1000 }).estimatedPeakBytes;
   check(
     "the peak estimate exceeds the steady-state resident figure (peak ⊃ resident, never equal)",
@@ -149,11 +155,27 @@ const wasmBytes = readFileSync(wasmPath);
   // rounds down, so real 4-8 GB phones report 4 — budget 2.0 GB. Under
   // the old 2x steady-state estimate (1.66 GB) they slipped through, paid
   // the 830 MB download, and had the renderer killed at the real ~2.5 GB
-  // peak. They must be REFUSE now.
+  // peak. At the (3,4) hint size that produced the bug they must still be
+  // REFUSE — that is the ADR-0032 regression, and it is pinned against the
+  // historical size on purpose, so shrinking the deployment can never
+  // quietly retire it.
+  const midPhonePreAdr0034 = assessCapacity({ hintBytes: PRE_ADR_0034_HINT_BYTES, deviceMemoryGb: 4 });
+  check(
+    "a deviceMemory=4 phone is refused at the pre-ADR-0034 hint size (the pre-fix wave-through)",
+    midPhonePreAdr0034.verdict === CAPACITY_VERDICT.REFUSE,
+    JSON.stringify(midPhonePreAdr0034),
+  );
+
+  // ...and the honest consequence of ADR-0034: a third off the hint puts the
+  // same phone back INSIDE its budget — estimated peak 3 x 553.82 MB =
+  // 1.66 GB against 2.0 GB usable — so the complete set stops being a
+  // desktop-only deployment for this device class. Asserted, not assumed:
+  // this is a real product change, and if a future geometry pushes the
+  // estimate back over the budget this flips and says so.
   const midPhone = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 4 });
   check(
-    "a deviceMemory=4 phone is refused at the complete set (the pre-fix wave-through)",
-    midPhone.verdict === CAPACITY_VERDICT.REFUSE,
+    "the same phone is admitted at the ADR-0034 complete-set hint (33% smaller)",
+    midPhone.verdict === CAPACITY_VERDICT.OK && midPhone.estimatedPeakBytes < midPhone.budgetBytes,
     JSON.stringify(midPhone),
   );
 

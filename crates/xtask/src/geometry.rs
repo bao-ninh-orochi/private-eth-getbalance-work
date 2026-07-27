@@ -1,21 +1,60 @@
 //! `xtask geometry` — sweep [`risepir_proto::geometry::Geometry`] across
 //! `arity x bucket_size` and, opt-in, measure real cuckoo-store fill
-//! behaviour at those points (ADR-0030).
+//! behaviour at those points (ADR-0030, retuned by ADR-0034).
 //!
 //! # Why this exists
 //!
-//! The live deployment runs `arity 3, bucket_size 4`
-//! (`crates/risepir-rpc/src/mainnet.rs`) and lands at load factor 0.498
-//! against the 0.75 target `Geometry::for_accounts` sizes towards, because
-//! `arity 3` forces `num_buckets` to `3 * 2^t`. It is tempting to conclude
-//! that a different arity would recover the wasted headroom — it would
-//! not: **the database size is a function of the achieved load factor
-//! alone; arity does not enter the `server_db` formula at all** (see
-//! [`compute_row`] and `risepir_proto::geometry::Sizes::server_db`).
-//! `bucket_size` reaches the same load factors without touching arity.
-//! Arity *does* move the hint total, proportional to `sqrt(arity)` — the
-//! wrong direction for a browser client already fighting an 831 MB first
-//! load. ADR-0030 records the full argument; this module is what makes it
+//! The live deployment runs `arity 2, bucket_size 4`
+//! (`crates/risepir-rpc/src/mainnet.rs`) and lands at load factor 0.7469 —
+//! comfortably under its own per-configuration target of 0.8645
+//! (`risepir_proto::geometry::effective_target_load(2, 4)`), itself
+//! tighter than the flat 0.90 cap every configuration is also bounded by
+//! (ADR-0034). Before ADR-0034 the deployment ran `arity 3, bucket_size 4`
+//! at load factor 0.498 against a flat 0.75 cap — a configuration
+//! [`compute_row`] still reproduces exactly
+//! (`tests::pre_adr_0034_configuration_pins_historical_geometry`), and one
+//! this module's default fill-check candidates still include for
+//! comparison.
+//!
+//! It is tempting to conclude that picking a different arity, by itself,
+//! recovers wasted database headroom — it still does not: **the database
+//! size is a function of the achieved load factor alone (equivalently, of
+//! `slots = num_buckets * bucket_size`); arity does not enter the
+//! `server_db` formula at all** (see [`compute_row`] and
+//! `risepir_proto::geometry::Sizes::server_db`, pinned by
+//! `tests::db_size_depends_on_slots_not_arity`, which finds `(2,4)` and
+//! `(4,4)` bit-identical in `server_db` at the live account count).
+//! `bucket_size` reaches the same load factors without touching arity
+//! either. This is ADR-0030's original argument, and it still stands.
+//!
+//! What ADR-0034 adds is the other half: arity fixes which `num_buckets`
+//! values are reachable at all, and therefore which `slots` "rungs" a
+//! configuration can land on. `Geometry::for_accounts` shapes `num_buckets`
+//! as a power of two for arity 2/4, or as `3 * 2^t` for arity 3. Combined
+//! with `bucket_size`'s own factor into `slots = num_buckets *
+//! bucket_size`, the buildable configurations (`bucket_size` 1..=4,
+//! `segmented_cuckoo::SUPPORTED_BUCKET_SIZES`) can only ever reach `slots`
+//! in one of exactly three families: `2^u` (arity 2 or 4 with `bucket_size`
+//! 1, 2, or 4 — themselves powers of two), `3 * 2^u` (arity 3 with
+//! `bucket_size` 1, 2, or 4, or arity 2/4 with `bucket_size = 3`), or
+//! `9 * 2^u` (arity 3 with `bucket_size = 3`). A configuration can only
+//! land on a rung in its own family — so no arity-3 configuration, at any
+//! buildable `bucket_size`, can ever land exactly on the 268,435,456-slot
+//! rung (`2^28`, not divisible by 3) that `(2,4)` and `(4,4)` both reach at
+//! the live account count; arity 3's nearest rung in its own `3 * 2^u`
+//! family is 402,653,184 slots, half again as large. That is *why* the
+//! pre-ADR-0034 `(3,4)` deployment had a bigger database than `(2,4)`: not
+//! because arity itself moves `server_db` at equal `slots` (it provably
+//! does not — see the previous paragraph), but because arity 3 cannot
+//! reach the smaller rung that arity 2 (and 4) can. Once two configurations
+//! *do* share a rung, arity stops mattering for database size and starts
+//! mattering only for the hint: it moves the hint total, proportional to
+//! `sqrt(arity)` — the wrong direction for a browser client already
+//! fighting a first load in the hundreds of MB (554 MB at the deployed
+//! `(2,4)`; `(4,4)` reaches the identical database on the same rung for
+//! ~231 MB more hint — see
+//! `tests::arity_on_a_shared_rung_only_moves_the_hint`). ADR-0030 and
+//! ADR-0034 record the full argument; this module is what makes it
 //! reproducible instead of a one-off calculation.
 //!
 //! # Two deliverables, one module
@@ -30,8 +69,9 @@
 //!    only (`--fill-check`), because it builds a real
 //!    `segmented_cuckoo::CuckooKVStore` and inserts millions of synthetic
 //!    keys — arithmetic can say a geometry's load factor *should* reach
-//!    0.75, but only an actual cuckoo-eviction run can say it *does*. Never
-//!    runs under `cargo test` (too slow) — see that function's docs.
+//!    its target, but only an actual cuckoo-eviction run can say it
+//!    *does*. Never runs under `cargo test` (too slow) — see that
+//!    function's docs.
 //!
 //! # A finding this module's own [`GeometryRow::buildable`] flag surfaces
 //!
@@ -59,12 +99,18 @@ use segmented_cuckoo::{
 // ─── Fixed knobs ──────────────────────────────────────────────────────────
 
 /// The live complete-set account count — every nonzero-balance mainnet
-/// account as of the 2026-07-26 bootstrap. Source of truth:
-/// `docs/deploy.md` §5.3 ("every one of mainnet's 200,503,969 funded
-/// accounts") and its recorded geometry line ("100663296 buckets, server
-/// DB 35.43 GB, load 0.498"). Named, not repeated as a bare literal, so a
-/// future re-export (or a re-run of the §2.1 gate query) is a one-line
-/// change.
+/// account as of the 2026-07-26 bootstrap. Source of truth: `docs/deploy.md`
+/// §5.3 ("every one of mainnet's 200,503,969 funded accounts") — that count
+/// is still current. §5.3's *geometry* line quoted alongside it ("100663296
+/// buckets, server DB 35.43 GB, load 0.498") is not: it recorded the
+/// pre-ADR-0034 `(arity 3, bucket_size 4)` deployment, kept here as an
+/// explicit historical pin
+/// (`tests::pre_adr_0034_configuration_pins_historical_geometry`). The live
+/// geometry since ADR-0034 is `(arity 2, bucket_size 4)` — 67,108,864
+/// buckets, 23.62 GB, load 0.7469 — see
+/// `tests::deployed_configuration_pins_live_geometry`. Named, not repeated
+/// as a bare literal, so a future re-export (or a re-run of the §2.1 gate
+/// query) is a one-line change.
 pub const LIVE_COMPLETE_SET_ACCOUNTS: u64 = 200_503_969;
 
 /// Default `--fingerprint-bits`: unchanged across every deployment and
@@ -76,7 +122,7 @@ const DEFAULT_FINGERPRINT_BITS: u32 = 32;
 /// it (it is a `const`, private to that module), and depending on the
 /// whole `risepir-rpc` binary crate for two `u32` literals would be
 /// disproportionate. Used only to flag [`GeometryRow::deployed`].
-const DEPLOYED_ARITY: u32 = 3;
+const DEPLOYED_ARITY: u32 = 2;
 /// Bucket size of the live deployment (`crates/risepir-rpc/src/mainnet.rs`'s
 /// `const BUCKET_SIZE`) — see [`DEPLOYED_ARITY`]'s docs for why this is a
 /// mirror, not an import.
@@ -87,11 +133,18 @@ const DEPLOYED_BUCKET_SIZE: u32 = 4;
 // `risepir_proto::geometry`'s then-private constants — which was correct
 // only for as long as the target actually was flat for every
 // configuration. ADR-0031 made it per-`(arity, bucket_size)`
-// (`min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`), at which point a
-// copy here would have quietly overstated the headroom of exactly the three
-// combinations that fix tightens — `(2,1)`, `(2,2)`, `(3,1)` — while every
-// row this repo deploys stayed right, which is the worst shape a stale
-// mirror can take. `risepir_proto::geometry::effective_target_load` is now
+// (`min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)` at the time), at
+// which point a copy here would have quietly overstated the headroom of
+// exactly the three combinations that fix tightens — `(2,1)`, `(2,2)`,
+// `(3,1)` — while every row this repo deployed or benched stayed right,
+// which is the worst shape a stale mirror can take. ADR-0034 then retuned
+// both numbers to `0.90`/`0.95` for the `(arity 2, bucket_size 4)`
+// deployment, which inverts that split: ten of the twelve combinations now
+// resolve below the flat cap, including the deployed row itself (see
+// `risepir_proto::geometry::SAFETY_MARGIN_NUM`'s docs for the full list) —
+// a mirror kept here would by now have silently overstated the headroom of
+// the one row this whole module exists to report on correctly.
+// `risepir_proto::geometry::effective_target_load` is now
 // public for this caller, so the column is derived from the same rule
 // `for_accounts` applies rather than from a comment asking the next person
 // to keep two numbers in sync. Still exact integers, never `f64`: the ratio
@@ -136,16 +189,19 @@ pub struct GeometryRow {
     /// hint) * arity` — what a long-lived rewind client holds.
     pub client_mem_total: u64,
     /// The largest account count this exact `num_buckets` still satisfies
-    /// this configuration's own target load for (ADR-0031 — 0.75 for every
-    /// row this repo deploys or benches) — i.e. its capacity before the
-    /// next doubling.
+    /// this configuration's own target load for
+    /// (`risepir_proto::geometry::effective_target_load` — ADR-0031's
+    /// per-row mechanism at ADR-0034's retuned `0.90`/`0.95`; `0.8645` for
+    /// the deployed `(2,4)`, not a flat number for every row) — i.e. its
+    /// capacity before the next doubling.
     pub max_accounts_at_target: u64,
     /// `(max_accounts_at_target / accounts - 1) * 100` — percentage growth
     /// still free before this geometry must re-bootstrap into a bigger one.
     pub headroom_pct: f64,
     /// `server_db` of the configuration one account past
     /// `max_accounts_at_target` — i.e. what today's account count grows
-    /// into once it crosses the cliff.
+    /// into once `max_accounts_at_target` is exceeded and `num_buckets`
+    /// must double.
     pub next_db: u64,
     /// Whether `segmented_cuckoo`'s real `CuckooKVStore` constructors
     /// accept this `bucket_size` today (`segmented_cuckoo::SUPPORTED_BUCKET_SIZES`,
@@ -315,15 +371,22 @@ pub fn sweep(cfg: &SweepConfig) -> Result<Vec<GeometryRow>, GeomError> {
 /// / [`GeometryRow::buildable`]).
 pub fn render_sweep_table(rows: &[GeometryRow], accounts: u64) -> String {
     let mut out = String::new();
-    // Not "target load 0.75": since ADR-0031 the target is per-row
-    // (`min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`), so a single
-    // number in the header would be wrong for exactly the rows where it
-    // matters. Every configuration this repo deploys or benches still
-    // resolves to 0.75; the three that do not are `(2,1)`, `(2,2)`, `(3,1)`.
+    // Not "target load 0.90" either: since ADR-0031 the target is per-row
+    // (`min(GLOBAL_TARGET, SAFETY_MARGIN × segmented_cuckoo::MAX_LOAD_FACTOR)`
+    // — `min(0.90, 0.95 × MAX_LOAD_FACTOR)` since ADR-0034's retune — so a
+    // single number in the header would be wrong for exactly the rows where
+    // it matters. ADR-0034 inverted which rows those are: ten of the twelve
+    // `(arity, bucket_size)` combinations now resolve *below* 0.90,
+    // including the deployed `(2,4)` (0.8645) and every configuration this
+    // repo benches; only `(4,3)` and `(4,4)` still resolve to the flat 0.90
+    // (see `risepir_proto::geometry::SAFETY_MARGIN_NUM`'s docs for the full
+    // split — before ADR-0034 it was the other way around: only `(2,1)`,
+    // `(2,2)`, `(3,1)` did not resolve to the flat 0.75, and none of those
+    // three was used anywhere in this repo).
     writeln!(
         out,
-        "accounts = {accounts} (target load per row: min(0.75, 0.85 x MAX_LOAD_FACTOR); \
-         docs/plan.md §9, ADR-0030, ADR-0031)"
+        "accounts = {accounts} (target load per row: min(0.90, 0.95 x MAX_LOAD_FACTOR); \
+         ADR-0030, ADR-0031, ADR-0034)"
     )
     .unwrap();
     writeln!(
@@ -426,25 +489,31 @@ pub struct FillCandidate {
 }
 
 /// The minimum candidate set this deliverable asks for: today's deployed
-/// point, the arity-3 alternatives ADR-0030's recommendation compares
-/// (including `bucket_size = 6`, which — see [`GeometryRow::buildable`] —
-/// this fill-check is exactly what catches as unconstructible today), and
-/// one point each at arity 2 and 4 so the "arity does not move the
-/// database size" claim is checked empirically, not just arithmetically.
+/// point (`(2,4)`, ADR-0034) first, then the previously-deployed `(3,4)`
+/// and the arity-3 alternatives ADR-0030's recommendation compares against
+/// it (including `bucket_size = 6`, which — see [`GeometryRow::buildable`]
+/// — this fill-check is exactly what catches as unconstructible today),
+/// and one point at arity 4 so the "arity does not move the database size
+/// at a shared rung" claim is checked empirically against the deployed
+/// point, not just arithmetically.
 pub const DEFAULT_FILL_CANDIDATES: [FillCandidate; 5] = [
+    FillCandidate { arity: 2, bucket_size: 4 },
     FillCandidate { arity: 3, bucket_size: 4 },
     FillCandidate { arity: 3, bucket_size: 6 },
     FillCandidate { arity: 3, bucket_size: 3 },
-    FillCandidate { arity: 2, bucket_size: 4 },
     FillCandidate { arity: 4, bucket_size: 4 },
 ];
 
 /// Default `--fill-accounts` scale: comfortably fits 16 GB, and matches
-/// `xtask::bench::BenchConfig::default()`'s own largest scale (the
-/// `segment_rows = 2^20`-at-75%-load point `docs/verification.md` already
-/// reports numbers at), so this tool's fill-check sits next to numbers
-/// already measured elsewhere in this repo rather than inventing a new
-/// unrelated scale.
+/// `xtask::bench::BenchConfig::default()`'s own largest scale, so this
+/// tool's fill-check sits next to numbers already measured elsewhere in
+/// this repo rather than inventing a new unrelated scale. That scale was
+/// originally chosen (pre-ADR-0034) as the arity-3 `segment_rows =
+/// 2^20`-at-75%-load point `docs/verification.md` already reports numbers
+/// at; kept unchanged for comparability even though it lands differently
+/// under the deployed `(arity 2, bucket_size 4)` geometry (`num_buckets =
+/// 2^22`, `segment_rows = 2^21`, load 0.5625 — see
+/// `xtask::bench::BenchConfig::default`'s doc for the full accounting).
 pub const DEFAULT_FILL_ACCOUNTS: u64 = 9_437_184;
 
 /// Deterministic seed for the fill-check's synthetic genesis population —
@@ -646,19 +715,39 @@ mod tests {
         crate::bench::value_codec()
     }
 
-    /// Pins the deployed configuration (`arity 3, bucket_size 4`) at the
-    /// live complete-set account count against the exact figures recorded
-    /// in `docs/deploy.md` §5.3 and re-derived for ADR-0030: 100,663,296
-    /// buckets, load 0.4980, a 35,433,480,192 B server DB, and an
-    /// 830,728,800 B total hint.
+    /// Pins the deployed configuration (`arity 2, bucket_size 4`, ADR-0034)
+    /// at the live complete-set account count: 67,108,864 buckets, load
+    /// 0.7469, a 23,622,320,128 B server DB, and a 553,819,200 B total
+    /// hint — every figure taken from this tool's own `compute_row`, not
+    /// copied from the ADR draft (whose independent hand-arithmetic landed
+    /// on a slightly different hint figure, 553,821,600 B; the value
+    /// pinned here is the one the code actually produces).
     #[test]
     fn deployed_configuration_pins_live_geometry() {
-        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 3, 4, 32, &codec()).expect("deployed configuration must size");
+        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 4, 32, &codec()).expect("deployed configuration must size");
+        assert_eq!(row.num_buckets, 67_108_864);
+        assert!((row.load_factor - 0.7469).abs() < 1e-4, "load_factor = {}", row.load_factor);
+        assert_eq!(row.server_db, 23_622_320_128);
+        assert_eq!(row.hint_total, 553_819_200);
+        assert!(row.deployed);
+        assert!(row.buildable);
+    }
+
+    /// The pre-ADR-0034 deployment (`arity 3, bucket_size 4`), kept as an
+    /// explicit historical pin: the exact figures recorded in
+    /// `docs/deploy.md` §5.3 and re-derived for ADR-0030 — 100,663,296
+    /// buckets, load 0.4980, a 35,433,480,192 B server DB, and an
+    /// 830,728,800 B total hint — still reproduce bit-for-bit from this
+    /// tool, but this configuration is no longer the one [`GeometryRow`]
+    /// flags [`GeometryRow::deployed`].
+    #[test]
+    fn pre_adr_0034_configuration_pins_historical_geometry() {
+        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 3, 4, 32, &codec()).expect("historical configuration must size");
         assert_eq!(row.num_buckets, 100_663_296);
         assert!((row.load_factor - 0.4980).abs() < 1e-4, "load_factor = {}", row.load_factor);
         assert_eq!(row.server_db, 35_433_480_192);
         assert_eq!(row.hint_total, 830_728_800);
-        assert!(row.deployed);
+        assert!(!row.deployed, "ADR-0034 moved the deployed configuration to (2,4)");
         assert!(row.buildable);
     }
 
@@ -720,37 +809,53 @@ mod tests {
         );
     }
 
-    /// The cliff: `arity 4, bucket_size 4` (the brief's proposed swap) has
-    /// under 1% growth headroom before the next doubling, and that next
-    /// doubling (47.24 GB) is worse than today's deployed 35.43 GB — i.e.
-    /// the "saving" evaporates within weeks of mainnet's account growth.
-    /// This also cross-checks the headroom column's target-load source
-    /// (`risepir_proto::geometry::effective_target_load`) against
-    /// `for_accounts`'s real behaviour at the exact boundary: capacity
-    /// must satisfy this `num_buckets`, and one more account must not.
+    /// Replaces `arity4_bucket4_sits_on_the_cliff`: that test's premise
+    /// (`headroom_pct < 1.0` for `arity 4, bucket_size 4`) was an artefact
+    /// of the flat 0.75 target, which ADR-0034's retune to 0.90/0.95 has
+    /// erased — `(4,4)` now carries ≈20.5% headroom
+    /// (`max_accounts_at_target` 241,591,910 against 200,503,969 today),
+    /// not a cliff. What is still true, and load-bearing for ADR-0034:
+    /// `(2,4)` (the deployed configuration) and `(4,4)` (the brief's
+    /// original swap target) sit on the exact same 67,108,864-bucket /
+    /// 268,435,456-slot rung at the live account count
+    /// (`db_size_depends_on_slots_not_arity` already proves this in
+    /// general — this test pins the deployment-specific instance of it),
+    /// so their `server_db` is bit-identical, and the only real cost of
+    /// choosing `(4,4)` over `(2,4)` on that shared rung is 230,683,200 B
+    /// (~231 MB) more hint. Once a rung is chosen by slots, the arity *on*
+    /// that rung is a hint-size decision, not a database-size or headroom
+    /// decision.
     #[test]
-    fn arity4_bucket4_sits_on_the_cliff() {
+    fn arity_on_a_shared_rung_only_moves_the_hint() {
         let c = codec();
-        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 4, 32, &c).unwrap();
-        assert!(row.headroom_pct < 1.0, "headroom must be under 1%, got {:.2}%", row.headroom_pct);
+        let deployed = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 4, 32, &c).unwrap();
+        let alt = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 4, 32, &c).unwrap();
 
-        let deployed = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 3, 4, 32, &c).unwrap();
+        assert!(deployed.deployed, "(2,4) must be the flagged deployed configuration");
+        assert!(!alt.deployed);
+        assert_eq!(deployed.num_buckets, alt.num_buckets, "(2,4) and (4,4) must land on the same rung");
+        assert_eq!(deployed.server_db, alt.server_db, "a shared rung means identical server_db");
+
+        let hint_delta_bytes = alt.hint_total - deployed.hint_total;
+        assert_eq!(hint_delta_bytes, 230_683_200, "(4,4) must cost exactly this much more hint than (2,4)");
+
+        // The cliff is gone: both configurations now carry comparable,
+        // healthy headroom under the retuned target.
         assert!(
-            row.next_db > deployed.server_db,
-            "post-doubling DB ({} B) must exceed today's deployed DB ({} B)",
-            row.next_db,
-            deployed.server_db
+            alt.headroom_pct > 15.0,
+            "headroom must no longer be a cliff, got {:.2}%",
+            alt.headroom_pct
         );
 
-        // Target-load self-check: capacity fits this num_buckets, one
-        // more account does not.
+        // Target-load self-check (kept from the test this replaces):
+        // capacity fits this num_buckets, one more account does not.
         let at_capacity =
-            Geometry::for_accounts(row.max_accounts_at_target, row.arity, row.bucket_size, 32, &c, Backend::Simple).unwrap();
-        assert_eq!(at_capacity.num_buckets, row.num_buckets, "capacity must still fit today's num_buckets");
+            Geometry::for_accounts(alt.max_accounts_at_target, alt.arity, alt.bucket_size, 32, &c, Backend::Simple).unwrap();
+        assert_eq!(at_capacity.num_buckets, alt.num_buckets, "capacity must still fit this num_buckets");
         let past_capacity =
-            Geometry::for_accounts(row.max_accounts_at_target + 1, row.arity, row.bucket_size, 32, &c, Backend::Simple).unwrap();
+            Geometry::for_accounts(alt.max_accounts_at_target + 1, alt.arity, alt.bucket_size, 32, &c, Backend::Simple).unwrap();
         assert!(
-            past_capacity.num_buckets > row.num_buckets,
+            past_capacity.num_buckets > alt.num_buckets,
             "one account past capacity must force the next doubling"
         );
     }
@@ -773,8 +878,10 @@ mod tests {
     /// ADR-0031, and it is now sized *safely*: a flat 0.75 target used to
     /// land it at load 0.7469 against a published ceiling of 0.48 — a real
     /// store died with `TableFull` at 70.1% of its inserts — while
-    /// `effective_target_load` now caps it at `0.85 × 0.48 = 0.408`, so the
-    /// sweep reports a row that can actually be filled.
+    /// `effective_target_load` now caps it at `0.95 × 0.48 = 0.456`
+    /// (ADR-0034's retuned margin; ADR-0031's original margin gave
+    /// `0.85 × 0.48 = 0.408`), so the sweep reports a row that can actually
+    /// be filled.
     ///
     /// This is the sweep-level regression test for that fix: it asserts the
     /// property (sized at or under the ceiling), not the exact figure, so

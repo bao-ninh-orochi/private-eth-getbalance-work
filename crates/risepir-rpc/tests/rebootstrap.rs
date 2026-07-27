@@ -34,9 +34,9 @@ use risepir_http::{NodeState, PirHttpClient};
 use risepir_proto::{keccak256, AddressHash, Backend, BlockUpdate, Geometry, ValueCodec};
 use risepir_rpc::{PrivateEth, RpcError};
 use risepir_server::{DeltaRing, RisePirServer};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-const ARITY: u32 = 3;
+const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
 // Small on purpose, for test speed — the same trade-off `demo.rs` and
@@ -72,7 +72,7 @@ fn addr(byte: u8) -> [u8; 20] {
 async fn spawn_test_node(capacity: u64, ring_capacity: usize, complete: bool, genesis: &[(AddressHash, u128)]) -> (String, Arc<NodeState>) {
     let value_codec = codec();
     let geom = Geometry::for_accounts(capacity, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple).expect("geometry");
-    let mut store = Segmented3aryCuckooKVStore::new(
+    let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -85,7 +85,7 @@ async fn spawn_test_node(capacity: u64, ring_capacity: usize, complete: bool, ge
         store.insert(*key, &encoded).expect("insert genesis balance");
     }
 
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(ring_capacity), complete));
     let router = NodeState::router(state.clone());
@@ -262,7 +262,7 @@ async fn force_stall(req: Request, next: Next) -> Response {
 async fn spawn_permanently_stalled_node(capacity: u64, complete: bool) -> String {
     let value_codec = codec();
     let geom = Geometry::for_accounts(capacity, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple).expect("geometry");
-    let store = Segmented3aryCuckooKVStore::new(
+    let store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -271,7 +271,7 @@ async fn spawn_permanently_stalled_node(capacity: u64, complete: bool) -> String
     )
     .expect("store");
 
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     // The ring's real capacity is irrelevant here (`force_stall` overrides
     // `/sync` unconditionally); `DeltaRing::new` just requires >= 1.
@@ -318,9 +318,10 @@ async fn a_second_consecutive_stall_is_reported_not_retried_forever() {
 }
 
 /// The re-download meter (ADR-0029, amended): each stalled `get_balance`
-/// used to run its *own* full re-bootstrap — at the live complete set,
-/// 830.73 MB of `/setup` per call — so a polling caller against a
-/// replaying server became an unmetered download loop. Within
+/// used to run its *own* full re-bootstrap — at the live complete set's
+/// deployed `(arity 2, bucket_size 4)` geometry, 553.82 MB of `/setup` per
+/// call (ADR-0034; was 830.73 MB pre-ADR-0034) — so a polling caller against
+/// a replaying server became an unmetered download loop. Within
 /// `REBOOTSTRAP_COOLDOWN` of an attempt, further stalled calls must
 /// report the stall without touching `/setup` again.
 #[tokio::test]
@@ -349,7 +350,7 @@ async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
     let value_codec = codec();
     let geom = Geometry::for_accounts(100, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
         .expect("geometry");
-    let store = Segmented3aryCuckooKVStore::new(
+    let store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
         geom.fingerprint_bits,
@@ -357,7 +358,7 @@ async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
         geom.plaintext_bits,
     )
     .expect("store");
-    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+    let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(1), true));
     let router = NodeState::router(state)

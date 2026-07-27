@@ -509,9 +509,10 @@ export const USABLE_MEMORY_FRACTION = 0.5;
 /// Below this estimated peak, a `deviceMemory`-less visitor (Safari,
 /// Firefox — see below) is never even offered the softer coarse-signal
 /// warning — comfortably above every demo-scale deployment this repo ships
-/// (49 MB at `--partial-capacity 1000000`, ~1.77 MB for `mock`) and
-/// comfortably below the real complete-set hint, so only a deployment
-/// actually built at that scale can ever reach it.
+/// (46.51 MB at `--partial-capacity 1000000` per ADR-0034's deployed
+/// geometry, ~1.77 MB for `mock`) and comfortably below the real
+/// complete-set hint (553.82 MB, ADR-0034), so only a deployment actually
+/// built at that scale can ever reach it.
 export const COARSE_SIGNAL_WARN_PEAK_BYTES = 200_000_000;
 
 /// A viewport this narrow reads as a phone/small-tablet layout — one of the

@@ -772,6 +772,13 @@ threat model §4.2 and §8.
 - **Client fell behind the delta window** (`-32000 "server is resyncing"`): the
   in-process front-end client resyncs from `/setup` on next use; external PIR
   clients do the same.
+- **One process per `--state` path, enforced**: the server holds an advisory
+  lock on `<state>.lock` for its lifetime; a second start on the same path
+  (the classic double-`tmux` accident) fails fast with "another process
+  already holds …" instead of both writers interleaving into the same
+  `<state>.tmp` and destroying the good 36 GB file. The `.lock` file itself
+  is empty and harmless — advisory locks die with the process, so it never
+  blocks a restart and needs no cleanup or backup.
 - **Lineage epochs (ADR-0033)**: `/sync`, `/answer`, and `/delta/{block}` now
   require the `?epoch=` token clients read off `/setup` (`x-risepir-epoch`),
   and refuse (`409`/`404`) across a mismatch — so a client that survived a

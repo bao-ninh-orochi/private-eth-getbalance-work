@@ -263,11 +263,13 @@ export class PirSession {
       len = streamed.streamedInto;
     }
     this.traffic.setupBytes = len;
+    // risepir_init frees the encoded input buffer itself, between
+    // decoding and building — the one point where releasing it actually
+    // lowers the tab's permanent footprint (wasm memory never shrinks;
+    // see ESTIMATED_PEAK_MULTIPLE's derivation below).
     if (this.exports.risepir_init(len) !== 0) {
       throw new PirError(`GET /setup: ${this.#lastError()}`);
     }
-    // The setup bundle is the biggest thing this page ever holds twice.
-    this.exports.risepir_in_release();
 
     // The lineage token every /sync and /answer must echo (ADR-0033) —
     // derived by the wasm from the bundle's own seeds, so it cannot
@@ -463,15 +465,31 @@ export function formatEth(wei) {
 /// is advice, never a lock-out.
 export const CAPACITY_VERDICT = Object.freeze({ OK: "ok", WARN: "warn", REFUSE: "refuse" });
 
-/// A client holds the downloaded hint *and* the publicly-seeded matrix `A`,
-/// which it expands locally to (very nearly) the hint's own size.
-/// docs/numbers.md §4c measures client memory (`A` + hint) at ~2.00-2.03x
-/// the hint across every deployment scale in that table — e.g. the live
-/// complete mainnet set: 830.73 MB hint, 1.66 GB resident. This constant is
-/// that *ratio*, not a copy of either figure: the hint size itself is never
-/// hardcoded here, or anywhere in this file — it is read fresh, per
-/// deployment, from `HEAD /setup`'s `Content-Length` (ADR-0032, point 1).
-export const ESTIMATED_PEAK_MULTIPLE = 2;
+/// The tab's estimated peak memory, as a multiple of the hint download
+/// size — and in wasm, whose linear memory never shrinks, the peak IS the
+/// tab's resident floor from then on.
+///
+/// Derived from `risepir_init`'s actual allocation sequence (see that
+/// function in crates/risepir-wasm — the two must move together), not
+/// from steady state: (1) the encoded bundle streams into the wasm input
+/// buffer (1x); (2) decoding builds the owned bundle beside it (peak ~2x);
+/// (3) the input buffer is freed *before* the client is built, and the
+/// decoded hints are consumed per segment while the client's own hint
+/// copy and the expanded `A` (each ~1x — docs/numbers.md §4c measures
+/// `A`+hint at ~2.00-2.03x hint) accumulate — peaking near 2.4x mid-build.
+/// 3 is that worst phase rounded up for allocator fragmentation, which
+/// wasm never gives back.
+///
+/// This replaces an earlier value of 2, which was calibrated against
+/// §4c's *steady-state* figure and therefore waved 4 GB phones
+/// (`deviceMemory` 4 → 2.0 GB budget) into a download whose true peak —
+/// then ~4x, before the two init-sequence fixes above — killed the
+/// renderer after the data was already spent: the exact pre-ADR-0032
+/// failure the gate exists to prevent. This constant is a *ratio*; the
+/// hint size itself is never hardcoded here, or anywhere in this file —
+/// it is read fresh, per deployment, from `HEAD /setup`'s
+/// `Content-Length` (ADR-0032, point 1).
+export const ESTIMATED_PEAK_MULTIPLE = 3;
 
 /// The share of the device's *total* memory one browser tab may reasonably
 /// claim. A tab shares the device with the OS, the browser's own overhead,
@@ -480,10 +498,12 @@ export const ESTIMATED_PEAK_MULTIPLE = 2;
 /// reports still clears the complete set's cost: `navigator.deviceMemory`
 /// is capped at 8 regardless of real installed RAM (rounded down for
 /// privacy — a 32 GB machine reports the same 8 a device with exactly 8
-/// GB does), and 8 * 0.5 = 4 GB comfortably exceeds the 1.66 GB complete-set
-/// estimate — so this fraction is never *itself* the reason a real desktop
-/// gets turned away. At the other end, a real 2 GB phone's budget (1 GB) is
-/// genuinely, and correctly, below that same 1.66 GB.
+/// GB does), and 8 * 0.5 = 4 GB clears the ~2.5 GB complete-set *peak*
+/// estimate (3x hint — see `ESTIMATED_PEAK_MULTIPLE`) — so this fraction
+/// is never *itself* the reason a real desktop gets turned away. At the
+/// other end, a phone reporting 4 has a 2.0 GB budget, genuinely and
+/// correctly below that same ~2.5 GB peak — that phone is exactly who
+/// this gate exists for.
 export const USABLE_MEMORY_FRACTION = 0.5;
 
 /// Below this estimated peak, a `deviceMemory`-less visitor (Safari,
@@ -522,29 +542,44 @@ const BYTES_PER_GB = 1_000_000_000;
 ///    match); only ever consulted when `deviceMemoryGb` is unavailable.
 ///  - `viewportWidth` — `window.innerWidth`, or `null`/`undefined`; same
 ///    caveat.
+///  - `saveData` — `navigator.connection.saveData === true`: the user
+///    explicitly asked user agents to spend less data. Memory can be
+///    plentiful and the download still unwanted, so this can downgrade an
+///    otherwise-`ok` verdict on a large deployment to `warn` (never to
+///    `refuse` — it is a preference, and the gate is advice either way).
 ///
 /// Returns `{ verdict, hintBytes, estimatedPeakBytes, deviceMemoryGb,
-/// budgetBytes, coarseSignal, basis }` — the verdict plus every number that
-/// went into it, so `app.js` can render the real figures instead of
-/// re-deriving them.
-export function assessCapacity({ hintBytes, deviceMemoryGb, coarsePointer, viewportWidth } = {}) {
+/// budgetBytes, coarseSignal, saveData, basis }` — the verdict plus every
+/// number that went into it, so `app.js` can render the real figures
+/// instead of re-deriving them.
+export function assessCapacity({ hintBytes, deviceMemoryGb, coarsePointer, viewportWidth, saveData } = {}) {
   const hint = Number(hintBytes);
   const estimatedPeakBytes = (Number.isFinite(hint) && hint > 0 ? hint : 0) * ESTIMATED_PEAK_MULTIPLE;
+  const wantsDataSavings = Boolean(saveData);
+
+  // The user's own stated preference outranks a machine-guessed "this is
+  // probably fine" — but only on a deployment big enough to matter (the
+  // same threshold as the coarse-signal warning), and never as a refusal.
+  const saveDataDowngrade = (base) =>
+    base.verdict === CAPACITY_VERDICT.OK && wantsDataSavings && base.hintBytes > COARSE_SIGNAL_WARN_PEAK_BYTES
+      ? { ...base, verdict: CAPACITY_VERDICT.WARN, basis: "save-data" }
+      : base;
 
   const haveDeviceMemory =
     typeof deviceMemoryGb === "number" && Number.isFinite(deviceMemoryGb) && deviceMemoryGb > 0;
 
   if (haveDeviceMemory) {
     const budgetBytes = deviceMemoryGb * BYTES_PER_GB * USABLE_MEMORY_FRACTION;
-    return {
+    return saveDataDowngrade({
       verdict: estimatedPeakBytes > budgetBytes ? CAPACITY_VERDICT.REFUSE : CAPACITY_VERDICT.OK,
       hintBytes: hint,
       estimatedPeakBytes,
       deviceMemoryGb,
       budgetBytes,
       coarseSignal: false,
+      saveData: wantsDataSavings,
       basis: "device-memory",
-    };
+    });
   }
 
   // No real number to compare against: a missing deviceMemory must never
@@ -558,13 +593,14 @@ export function assessCapacity({ hintBytes, deviceMemoryGb, coarsePointer, viewp
     Boolean(coarsePointer) ||
     (typeof viewportWidth === "number" && viewportWidth > 0 && viewportWidth < SMALL_VIEWPORT_WIDTH_PX);
   const warrantsWarning = coarseSignal && estimatedPeakBytes > COARSE_SIGNAL_WARN_PEAK_BYTES;
-  return {
+  return saveDataDowngrade({
     verdict: warrantsWarning ? CAPACITY_VERDICT.WARN : CAPACITY_VERDICT.OK,
     hintBytes: hint,
     estimatedPeakBytes,
     deviceMemoryGb: null,
     budgetBytes: null,
     coarseSignal,
+    saveData: wantsDataSavings,
     basis: coarseSignal ? "coarse-signal" : "no-signal",
-  };
+  });
 }

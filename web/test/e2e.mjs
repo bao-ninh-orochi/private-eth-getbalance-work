@@ -124,15 +124,59 @@ const wasmBytes = readFileSync(wasmPath);
     JSON.stringify(unknownNoSignal),
   );
 
-  // Sanity: the 2x peak-estimate multiple is chosen to match the measured
-  // ratio in docs/numbers.md §4c, not picked independently of it.
-  const measuredResidentBytes = 1_662_804_000;
+  // The estimate must model the browser's init PEAK, not steady state:
+  // wasm linear memory never shrinks, so the init peak is the tab's
+  // floor. It therefore has to sit strictly ABOVE §4c's steady-state
+  // A+hint figure (an estimate at or below it re-creates the bug where
+  // 4 GB phones were waved into a renderer-killing download) and at or
+  // below 4x (the measured pre-fix worst case, before risepir_init freed
+  // the encoded buffer mid-init and from_setup consumed hints per
+  // segment).
+  const measuredResidentBytes = 1_662_804_000; // docs/numbers.md §4c, steady-state A+hint
   const estimate = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 1000 }).estimatedPeakBytes;
-  const relErr = Math.abs(estimate - measuredResidentBytes) / measuredResidentBytes;
   check(
-    "the 2x peak estimate tracks docs/numbers.md §4c's measured hint->resident ratio within 1%",
-    relErr < 0.01,
-    `estimate ${estimate}, measured ${measuredResidentBytes}, error ${(relErr * 100).toFixed(2)}%`,
+    "the peak estimate exceeds the steady-state resident figure (peak ⊃ resident, never equal)",
+    estimate > measuredResidentBytes,
+    `estimate ${estimate} vs steady-state ${measuredResidentBytes}`,
+  );
+  check(
+    "the peak estimate stays at or below the pre-fix 4x worst case",
+    estimate <= COMPLETE_SET_HINT_BYTES * 4,
+    `estimate ${estimate}`,
+  );
+
+  // THE phone this gate exists for: navigator.deviceMemory caps at 8 and
+  // rounds down, so real 4-8 GB phones report 4 — budget 2.0 GB. Under
+  // the old 2x steady-state estimate (1.66 GB) they slipped through, paid
+  // the 830 MB download, and had the renderer killed at the real ~2.5 GB
+  // peak. They must be REFUSE now.
+  const midPhone = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 4 });
+  check(
+    "a deviceMemory=4 phone is refused at the complete set (the pre-fix wave-through)",
+    midPhone.verdict === CAPACITY_VERDICT.REFUSE,
+    JSON.stringify(midPhone),
+  );
+
+  // Save-Data: an explicit user preference downgrades an otherwise-fine
+  // large download to a warning — never a refusal, and never any effect
+  // on a small deployment.
+  const saveDataBig = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 32, saveData: true });
+  check(
+    "Save-Data downgrades a large-deployment OK to WARN (basis save-data)",
+    saveDataBig.verdict === CAPACITY_VERDICT.WARN && saveDataBig.basis === "save-data",
+    JSON.stringify(saveDataBig),
+  );
+  const saveDataMock = assessCapacity({ hintBytes: MOCK_HINT_BYTES, deviceMemoryGb: 2, saveData: true });
+  check(
+    "Save-Data leaves a mock-sized deployment untouched",
+    saveDataMock.verdict === CAPACITY_VERDICT.OK,
+    JSON.stringify(saveDataMock),
+  );
+  const saveDataTiny = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 2, saveData: true });
+  check(
+    "Save-Data never upgrades a REFUSE (memory outranks preference)",
+    saveDataTiny.verdict === CAPACITY_VERDICT.REFUSE,
+    JSON.stringify(saveDataTiny),
   );
 }
 

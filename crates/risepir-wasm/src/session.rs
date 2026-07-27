@@ -27,6 +27,23 @@ use ikpir_common::SimplePirBackend;
 use risepir_client::{ClientError, Lookup, QueryCtx, RisePirClient};
 use risepir_proto::{codec::CodecError, keccak256, AddressHash, ValueCodec};
 use risepir_http::wire::{self, WireError};
+use risepir_server::SetupBundle;
+
+/// Parses a `GET /mode` body (or the equivalent single header byte the
+/// host converted): exactly `[0]` (partial) or `[1]` (complete).
+///
+/// # Errors
+///
+/// [`SessionError::BadModeByte`] for anything else — the completeness
+/// flag decides whether absence means `0x0`, so a malformed one is fatal
+/// rather than defaulted (ADR-0015/0017: "never guessed").
+pub fn parse_mode(mode_bytes: &[u8]) -> Result<bool, SessionError> {
+    match mode_bytes {
+        [0] => Ok(false),
+        [1] => Ok(true),
+        other => Err(SessionError::BadModeByte(other.len())),
+    }
+}
 
 /// The value encoding this deployment uses (`docs/plan.md` §3.5,
 /// ADR-0009). Must match the server's, which `risepir-rpc` builds from the
@@ -185,6 +202,11 @@ impl Session {
     /// Bootstrap from the two bodies a fresh client fetches: `GET /mode`
     /// (one byte) and `GET /setup` (the full bundle).
     ///
+    /// Equals [`Self::decode`] followed by [`Self::from_bundle`]; the ABI
+    /// host calls those two directly instead, so it can free the encoded
+    /// input buffer between them (see `risepir_init`) — this composed
+    /// form stays for anyone holding both byte slices at once.
+    ///
     /// # Errors
     ///
     /// [`SessionError::BadModeByte`] for a mode body that is not exactly
@@ -193,13 +215,31 @@ impl Session {
     /// failure for a ~50 MB body over a flaky connection and must be an
     /// error rather than a half-initialised client.
     pub fn new(setup_bytes: &[u8], mode_bytes: &[u8]) -> Result<Self, SessionError> {
-        let complete = match mode_bytes {
-            [0] => false,
-            [1] => true,
-            other => return Err(SessionError::BadModeByte(other.len())),
-        };
+        let complete = parse_mode(mode_bytes)?;
+        let bundle = Self::decode(setup_bytes)?;
+        Ok(Self::from_bundle(bundle, complete))
+    }
 
-        let bundle = wire::decode_setup(setup_bytes)?;
+    /// Step one of [`Self::new`]: decode the `GET /setup` body into its
+    /// owned bundle, without building anything. Split out so the host
+    /// can release the *encoded* bytes (~831 MB at the complete mainnet
+    /// set) before [`Self::from_bundle`] allocates the decoded client —
+    /// in wasm, whose linear memory never shrinks, holding both across
+    /// the build would permanently cost the tab one extra hint-set of
+    /// footprint (ADR-0032's peak estimate is derived from this exact
+    /// sequence).
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Wire`] as on [`Self::new`].
+    pub fn decode(setup_bytes: &[u8]) -> Result<SetupBundle<SimplePirBackend>, SessionError> {
+        Ok(wire::decode_setup(setup_bytes)?)
+    }
+
+    /// Step two of [`Self::new`]: build the session from an
+    /// already-decoded bundle plus the (separately validated — see
+    /// [`parse_mode`]) completeness flag.
+    pub fn from_bundle(bundle: SetupBundle<SimplePirBackend>, complete: bool) -> Self {
         let arity = bundle.params.arity();
         let plaintext_bits = bundle.params.plaintext_bits;
         let reshape_row_width_per_seg: Vec<u32> =
@@ -209,7 +249,7 @@ impl Session {
 
         let client = RisePirClient::from_setup(bundle, value_codec());
 
-        Ok(Self {
+        Self {
             client,
             reshape_row_width_per_seg,
             arity,
@@ -219,7 +259,7 @@ impl Session {
             pending_head: pinned_block,
             pinned_block,
             in_flight: None,
-        })
+        }
     }
 
     /// Whether the deployment declared a complete nonzero-balance set.

@@ -1008,6 +1008,17 @@ so these numbers are never mistaken for a production measurement:
   amortizing the encode over roughly half the ring instead of every block.
   [`DeltaRing`] gained a `pub const fn capacity(&self)` accessor so this
   arithmetic never has to duplicate the constructor's argument.
+  **[REVISED]** Half priced the client's budget at steady state (~5
+  blocks/min), but the case that decides the constant is a catch-up replay
+  (~50 blocks/min — ADR-0029's own motivating scenario): there, a
+  half-window-stale bundle leaves ~6 minutes of window against the 8-minute
+  download, so the freshly bootstrapped client stalls *again*, at 831 MB per
+  attempt. The window is now an **eighth** of the ring (75 blocks deployed:
+  at most ~90 s of staleness even at replay speed, ~10.5 minutes of client
+  budget there, ~1 h 45 min at steady state), at the cost of re-encoding at
+  most every ~15 min of steady-state chain time (~10 s CPU each at the
+  complete set). `NodeState::setup_bytes`'s doc carries the arithmetic;
+  ADR-0029's cooldown amendment is the client-side half of the same fix.
 - **`ETag` / `304`, honestly caveated.** `GET /setup` sets an `ETag` and
   `Cache-Control: no-cache` (always revalidate, never "don't store"); a
   matching `If-None-Match` gets `304 Not Modified` with no body. Checked
@@ -1095,6 +1106,16 @@ fallback against servers predating the header.
 bootstrap, a loop would spin forever while re-downloading the hint each time —
 830.73 MB on the live deployment. Bounded retry turns a permanent wedge into a
 self-healing common case and an honest error in the pathological one.
+**[REVISED — a cooldown across calls.]** "One retry per call" still let a
+*polling caller* become the loop: every stalled `get_balance` ran its own full
+re-bootstrap, 831 MB each. `PrivateEth` now meters re-bootstraps with a
+5-minute cooldown (`REBOOTSTRAP_COOLDOWN`): within it, further stalled calls
+report `Stalled` without touching `/setup`. The slot is consumed *before* the
+attempt (a failed attempt still paid the download), five minutes sits between
+the ~8-minute worst-case download (faster retries cannot even finish) and the
+~10-minute window a freshly regenerated bundle now guarantees at replay speed
+(ADR-0028's eighth-window revision — the server-side half of this same fix).
+Pinned by `a_rebootstrap_within_the_cooldown_is_not_paid_again`.
 
 **Cost:** the re-bootstrap pays a full `/setup` download, so the first query
 after a stall is as slow as a cold start. `pending_head` is never carried across
@@ -1384,6 +1405,37 @@ essentially any device's budget (even a 2 GB phone's 1 GB, at
 `USABLE_MEMORY_FRACTION`) — so `web/test/browser.mjs`, which only ever
 runs against `mock`, exercises the same `boot()` path it always has, with
 one cheap `HEAD` round trip ahead of it.
+
+**[REVISED — the multiple is the *init peak*, 3x, not steady state's 2x; and
+Save-Data now counts.]** The 2x above was calibrated against §4c's
+steady-state `A`+hint figure — but the number that kills a tab is the
+*init peak*, and in wasm (whose linear memory never shrinks) the peak is
+also the tab's floor forever after. The real sequence peaked near **4x**
+the hint: encoded bundle in the input buffer, decoded bundle beside it,
+then the client's own hint copy plus the expanded `A` — all
+simultaneously live. Concretely: a phone reporting `deviceMemory` 4
+(which real 4–8 GB phones do — the API caps at 8 and rounds down) has a
+2.0 GB budget, cleared the 1.66 GB estimate, downloaded 830.73 MB on
+mobile data, and then had its renderer killed at the real ~3.3 GB peak —
+the exact pre-flight failure this ADR exists to prevent, on the most
+common phone profile. Two init-sequence fixes cut the true peak first
+(`risepir_init` now frees the encoded input buffer between decode and
+build; `RisePirClient::from_setup` consumes decoded hints per segment),
+landing it near 2.4x, and `ESTIMATED_PEAK_MULTIPLE` is now **3** — that
+worst phase rounded up for allocator fragmentation — with its derivation
+written next to the constant and pinned by `web/test/e2e.mjs` (estimate
+strictly above steady-state resident, at or below the pre-fix 4x, and
+`deviceMemory=4` at the complete set now REFUSEs). Separately,
+`navigator.connection.saveData === true` — the user's own stated
+preference to spend less data — now downgrades an otherwise-`ok` verdict
+to the softened panel on any deployment over the coarse-signal threshold
+(never to a refusal, and never on demo-scale deployments): memory can be
+plentiful and 830 MB still unwanted. And the REFUSE path finally has a
+real-browser gate: `web/test/browser.mjs` rigs `deviceMemory` and the
+`HEAD /setup` probe inside the page (CDP-injected), then asserts the
+gate renders, **no `GET /setup` fires before consent**, and "Download
+anyway" boots end-to-end with exactly one `GET /setup` after — closing
+the "designed no-op on mock, so nothing ever executed it" blind spot.
 
 ### ADR-0033 — Every delta and answer is gated on a hint-lineage epoch; mode rides the setup response **[NEW]**
 

@@ -316,3 +316,83 @@ async fn a_second_consecutive_stall_is_reported_not_retried_forever() {
     // would always land on here (0 — the underlying node never advances).
     assert_eq!(private_eth.pinned_block().await, 0);
 }
+
+/// The re-download meter (ADR-0029, amended): each stalled `get_balance`
+/// used to run its *own* full re-bootstrap — at the live complete set,
+/// 830.73 MB of `/setup` per call — so a polling caller against a
+/// replaying server became an unmetered download loop. Within
+/// `REBOOTSTRAP_COOLDOWN` of an attempt, further stalled calls must
+/// report the stall without touching `/setup` again.
+#[tokio::test]
+async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
+    use axum::extract::{Request as AxRequest, State};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    async fn count_setup_and_stall(
+        State(counter): State<StdArc<AtomicUsize>>,
+        req: AxRequest,
+        next: Next,
+    ) -> Response {
+        match req.uri().path() {
+            "/head" => (StatusCode::OK, FAR_AHEAD_HEAD.to_le_bytes().to_vec()).into_response(),
+            "/sync" => (StatusCode::CONFLICT, "test: permanently out of window").into_response(),
+            "/setup" => {
+                counter.fetch_add(1, Ordering::SeqCst);
+                next.run(req).await
+            }
+            _ => next.run(req).await,
+        }
+    }
+
+    let setup_fetches = StdArc::new(AtomicUsize::new(0));
+    let value_codec = codec();
+    let geom = Geometry::for_accounts(100, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
+        .expect("geometry");
+    let store = Segmented3aryCuckooKVStore::new(
+        geom.num_buckets,
+        geom.bucket_size,
+        geom.fingerprint_bits,
+        geom.value_bits,
+        geom.plaintext_bits,
+    )
+    .expect("store");
+    let server: RisePirServer<Segmented3aryScheme, SimplePirBackend> =
+        RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
+    let state = Arc::new(NodeState::new(server, DeltaRing::new(1), true));
+    let router = NodeState::router(state)
+        .layer(middleware::from_fn_with_state(StdArc::clone(&setup_fetches), count_setup_and_stall));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let sock_addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("axum::serve");
+    });
+    let base = format!("http://{sock_addr}");
+
+    let private_eth = bootstrap(&base, TEST_CHAIN_ID).await;
+    assert_eq!(setup_fetches.load(Ordering::SeqCst), 1, "bootstrap = one /setup");
+
+    // First stalled call: consumes the one cooldown slot — exactly one
+    // more /setup — and still (this server never un-stalls) reports
+    // Stalled.
+    match private_eth.get_balance(addr(0x02)).await {
+        Err(RpcError::Stalled) => {}
+        other => panic!("expected Stalled, got {other:?}"),
+    }
+    assert_eq!(setup_fetches.load(Ordering::SeqCst), 2, "one re-bootstrap = one more /setup");
+
+    // Immediate follow-up calls, well inside the cooldown: the stall is
+    // reported honestly and /setup is NOT fetched again — the meter, not
+    // the recovery, is what these calls exercise.
+    for i in 0..3u8 {
+        match private_eth.get_balance(addr(0x03 + i)).await {
+            Err(RpcError::Stalled) => {}
+            other => panic!("expected Stalled on cooldown call {i}, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        setup_fetches.load(Ordering::SeqCst),
+        2,
+        "calls within the cooldown must not pay another /setup download"
+    );
+}

@@ -262,7 +262,19 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
             "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
             "--reconcile-every" => cfg.reconcile_every = parse_next(args, &mut i, "--reconcile-every"),
-            "--reconcile-samples" => cfg.reconcile_samples = parse_next(args, &mut i, "--reconcile-samples"),
+            "--reconcile-samples" => {
+                cfg.reconcile_samples = parse_next(args, &mut i, "--reconcile-samples");
+                // 0 would make every non-empty block a zero-attempt "Dark"
+                // checkpoint (violating that variant's own >= 1 invariant)
+                // and escalate a false "provider unavailable" CRITICAL at
+                // the threshold — refuse it and name the real off switch.
+                if cfg.reconcile_samples == 0 {
+                    eprintln!(
+                        "risepir-rpc: --reconcile-samples must be >= 1; to disable reconciliation use --reconcile-every 0"
+                    );
+                    std::process::exit(2);
+                }
+            }
             "--lwe-dim" => cfg.lwe_dim = Some(parse_next(args, &mut i, "--lwe-dim")),
             "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
             "--help" | "-h" => {

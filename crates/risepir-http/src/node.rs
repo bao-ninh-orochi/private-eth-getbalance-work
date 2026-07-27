@@ -550,16 +550,26 @@ impl NodeState {
     /// `GET /sync?from=B&to=<head>` — which needs every block in
     /// `B+1..=head` retained in the ring (see [`DeltaRing::range`]). This
     /// reuses the cached bytes only while
-    /// `server.block() - cached.block <= ring.capacity() / 2` — **half**
-    /// the ring, not all of it, deliberately: a client that just spent
-    /// several minutes downloading an ~831 MB bundle over a slow link
-    /// (~8 minutes measured end to end) still needs the *rest* of the
-    /// window in front of it to call `/sync` and catch up before its own
-    /// starting block ages out from under it. At the deployed 600-block
-    /// ring, half reserves ~1 hour of chain time for exactly that — far
-    /// more than any realistic download — while still amortizing the
-    /// encode over roughly half the ring instead of regenerating on every
-    /// block.
+    /// `server.block() - cached.block <= ring.capacity() / 8`.
+    ///
+    /// An **eighth** of the ring, revised down from the half this shipped
+    /// with: the budget a client needs is not measured in blocks but in
+    /// the *time* to download ~831 MB (~8 minutes measured end to end),
+    /// and how many blocks that costs depends on how fast the server is
+    /// advancing. Half the ring priced it at steady state (~5 blocks/min:
+    /// 300 blocks ≈ 1 h of margin — plenty) — but the moment that
+    /// actually matters is a catch-up replay (~50 blocks/min, ADR-0029's
+    /// own motivating case), where a half-window-stale bundle leaves only
+    /// ~6 minutes of window against that 8-minute download: the freshly
+    /// bootstrapped client stalls *again*, at 831 MB per attempt. At an
+    /// eighth (75 blocks on the deployed 600-block ring), the served
+    /// bundle is at most ~90 s stale even at replay speed, leaving ~10.5
+    /// minutes of window there (~1 h 45 min at steady state), and the
+    /// encode still amortizes over ~15 min of steady-state chain time
+    /// rather than regenerating on every block (~10 s CPU per encode at
+    /// the complete set — ~1% of steady-state wall time, ~11% during a
+    /// replay, both acceptable for making the replay case actually
+    /// converge).
     ///
     /// # Locking
     ///
@@ -580,10 +590,12 @@ impl NodeState {
 
         let inner = self.inner.read().await;
         let head = inner.server.block();
-        let half_window = inner.ring.capacity() as u64 / 2;
+        // An eighth of the ring, not half — see the freshness-rule docs
+        // above for the replay-speed arithmetic that revised this down.
+        let fresh_window = inner.ring.capacity() as u64 / 8;
 
         if let Some(cached) = cache.as_ref() {
-            if head.saturating_sub(cached.block) <= half_window {
+            if head.saturating_sub(cached.block) <= fresh_window {
                 let bytes = cached.bytes.clone();
                 let block = cached.block;
                 drop(inner);

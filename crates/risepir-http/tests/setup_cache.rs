@@ -162,9 +162,11 @@ async fn setup_is_encoded_once_and_served_byte_identically() {
 
 #[tokio::test]
 async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
-    // Ring of 8 ⇒ the cache is reused only while the head is within 4
-    // blocks of the cached bundle (half the window; see `setup_bytes`).
-    let (state, mut feed) = build_node(8);
+    // Ring of 16 ⇒ the cache is reused only while the head is within
+    // 16/8 = 2 blocks of the cached bundle (an eighth of the window; see
+    // `setup_bytes`'s freshness-rule docs for the replay-speed arithmetic
+    // that revised this down from half).
+    let (state, mut feed) = build_node(16);
     let app = NodeState::router(state.clone());
 
     let (status, _, first) = get_with(&app, "/setup", None).await;
@@ -173,16 +175,18 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
     assert_eq!(first_block, 0);
     assert_eq!(state.setup_generation(), 1);
 
-    // Still inside the half-window: the identical bytes must come back,
+    // Still inside the fresh window: the identical bytes must come back,
     // with no second encode. (Non-vacuity: if the rule were "regenerate
     // always", the assertion below would fail here rather than later.)
-    apply_blocks(&state, &mut feed, 3).await;
+    apply_blocks(&state, &mut feed, 2).await;
     let (_, _, still_cached) = get_with(&app, "/setup", None).await;
     assert_eq!(still_cached, first, "a fresh-enough cache must be reused verbatim");
     assert_eq!(state.setup_generation(), 1);
 
-    // Past the half-window: a *new* bundle, pinned at a newer block.
-    apply_blocks(&state, &mut feed, 6).await;
+    // Past the fresh window — and far enough that `first_block` will also
+    // have aged out of the 16-block ring by the end of this test: a *new*
+    // bundle, pinned at a newer block.
+    apply_blocks(&state, &mut feed, 15).await;
     let (status, _, second) = get_with(&app, "/setup", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_ne!(second, first, "a stale cache must not be served");

@@ -304,6 +304,16 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         feed.urls().join(" -> ")
     );
 
+    // Claim the --state path for this process's lifetime before anything
+    // reads or writes it: refuses a `.journal`-suffixed path (whose
+    // sidecar would collide with the state file itself) and holds an
+    // advisory lock so a double-started server fails fast here instead
+    // of two writers interleaving into the same `<path>.tmp` and
+    // destroying the good 36 GB file (`state::acquire_state_path`).
+    let _state_lock = cfg.state.as_ref().map(|path| {
+        state::acquire_state_path(path).unwrap_or_else(|e| die(format!("--state {}: {e}", path.display())))
+    });
+
     // ── Bootstrap: state file > snapshot > partial ─────────────────────
     let bootstrap: Bootstrap = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
         if !cfg.snapshot.is_empty() {

@@ -186,9 +186,12 @@ function renderCapacityGate(v) {
       ? "This deployment's hint is bigger than this device says it can comfortably hold in one " +
         "browser tab. Downloading it anyway may work — or may run out of memory partway through, " +
         "after the download is already spent."
-      : "This device did not report how much memory it has, but it looks like a small-screen or " +
-        "touch device, and this deployment's hint is a large download. This is a guess, not a " +
-        "measurement — it may be entirely fine.";
+      : v.basis === "save-data"
+        ? "This browser is set to reduce data usage, and this deployment's hint is a large " +
+          "one-time download. Memory looks fine — this pause is only about the data."
+        : "This device did not report how much memory it has, but it looks like a small-screen or " +
+          "touch device, and this deployment's hint is a large download. This is a guess, not a " +
+          "measurement — it may be entirely fine.";
 
   const rows = $("capacity-gate-rows");
   rows.replaceChildren(
@@ -220,6 +223,7 @@ async function preflight() {
     deviceMemoryGb: typeof navigator !== "undefined" ? navigator.deviceMemory : undefined,
     coarsePointer: coarsePointerSignal(),
     viewportWidth: typeof window !== "undefined" ? window.innerWidth : undefined,
+    saveData: typeof navigator !== "undefined" && navigator.connection?.saveData === true,
   });
 
   if (verdict.verdict === CAPACITY_VERDICT.OK) return boot();
@@ -341,8 +345,13 @@ async function loadSuggestions() {
   }
   if (addrs.length === 0) return;
 
+  // Wording must hold for every complete deployment — the live mainnet
+  // set serves recently-touched real accounts here, not a demo seed list
+  // (the old "Seeded demo accounts" label was written when complete ⇒
+  // mock was true, and had been wrong on the live set since 2026-07-26).
   $("suggestions-note").textContent = session.complete
-    ? "Seeded demo accounts — or type any address; this set is complete, so anything absent is exactly 0."
+    ? "Recently updated accounts this server tracks (public chain data) — or type any address; " +
+      "this set is complete, so anything absent is exactly 0."
     : "Accounts this server has seen change recently (public chain data). It cannot tell which of " +
       "these — if any — you go on to query.";
 

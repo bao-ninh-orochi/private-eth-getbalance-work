@@ -385,3 +385,84 @@ async fn oversized_record_length_is_a_clean_stop_not_an_oom() {
     std::fs::remove_file(&base_path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();
 }
+
+/// The digest-matches-but-base-block-doesn't cross-check (review
+/// follow-up to ADR-0026): unreachable today short of a writer bug —
+/// digest and block always travel together in one `SaveReport` — but the
+/// failure mode of that future bug would be replaying deltas onto a base
+/// that already contains them (silent wrong balances), so the loader
+/// refuses the journal loudly instead of trusting the pairing.
+#[tokio::test]
+async fn matching_digest_but_wrong_base_block_is_refused() {
+    let base_path = tmp("wrongbase-base.bin");
+    let server = small_server();
+    let plaintext_bits = server.params().plaintext_bits;
+    let report = state::save(&server, &codec(), true, &base_path).unwrap();
+    let journal_path = journal_path_for(&base_path);
+
+    // The REAL digest, the wrong height: only the new cross-check can
+    // tell this journal apart from a healthy one.
+    let mut writer = JournalWriter::create(&journal_path, report.digest, 5, plaintext_bits).unwrap();
+    writer
+        .append(
+            &BlockDelta {
+                block: 6,
+                per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+            },
+            1,
+        )
+        .unwrap();
+    drop(writer);
+
+    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
+    assert_eq!(restored.replayed, 0, "a wrong-base-block journal must not be replayed");
+    assert_eq!(restored.loaded.server.block(), 0, "the base loads untouched");
+    assert!(restored.scan_stop.is_none(), "the journal must not even be consulted");
+
+    std::fs::remove_file(&base_path).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
+}
+
+/// A checksum-valid record whose cell offset walks past its row's end —
+/// craftable only by a buggy writer, since the codec has no `row_width`
+/// to check against — must fail the apply loudly, never silently edit a
+/// *neighbouring row's* cell (a wrong-balance channel, not a crash).
+#[tokio::test]
+async fn row_straddling_offset_is_an_apply_failure() {
+    let base_path = tmp("straddle-base.bin");
+    let server = small_server();
+    let params = server.params();
+    let plaintext_bits = params.plaintext_bits;
+    let row_width = params.bucket_size * params.cells_per_slot();
+    let report = state::save(&server, &codec(), true, &base_path).unwrap();
+    let journal_path = journal_path_for(&base_path);
+
+    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    writer
+        .append(
+            &BlockDelta {
+                block: 1,
+                // Offset exactly == row_width: one past this row's last
+                // cell, i.e. the *next row's first cell* — in bounds for
+                // the segment slice, out of bounds for the row.
+                per_segment: vec![vec![(0, vec![(row_width as u16, 1)])], vec![], vec![]],
+            },
+            1,
+        )
+        .unwrap();
+    drop(writer);
+
+    match state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64) {
+        Err(RestoreError::ApplyFailure(msg)) => {
+            assert!(msg.contains("neighbouring row"), "the message must name the hazard, got: {msg}");
+        }
+        Err(other) => panic!("expected ApplyFailure, got: {other}"),
+        Ok(restored) => panic!(
+            "a row-straddling record must never load; got a server at block {}",
+            restored.loaded.server.block()
+        ),
+    }
+
+    std::fs::remove_file(&base_path).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
+}

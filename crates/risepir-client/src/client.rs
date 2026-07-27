@@ -92,20 +92,35 @@ impl<B: IncrementalPirBackend> RisePirClient<B> {
     /// already guarantees, not a condition arising from any input this
     /// crate accepts from elsewhere.
     pub fn from_setup(bundle: SetupBundle<B>, value_codec: ValueCodec) -> Self {
-        let arity = bundle.params.arity();
-        debug_assert_eq!(bundle.backend_params.len(), arity);
-        debug_assert_eq!(bundle.hints.len(), arity);
+        let SetupBundle {
+            params,
+            backend_params,
+            hints,
+            block: pinned_block,
+        } = bundle;
+        let arity = params.arity();
+        debug_assert_eq!(backend_params.len(), arity);
+        debug_assert_eq!(hints.len(), arity);
 
-        let states: Vec<B::ClientState> = bundle
-            .backend_params
+        // Hints are consumed *by value*, one segment at a time, so each
+        // bundle hint is freed the moment `client_setup` has cloned it
+        // into its `ClientState` — instead of the whole bundle's hint set
+        // staying live until every segment was built. At the complete
+        // mainnet set that is the difference between holding ~2 full hint
+        // sets plus one segment at the peak of this loop and holding ~3
+        // full sets: hundreds of MB of transient peak, and in the wasm
+        // client (whose linear memory never shrinks) hundreds of MB of
+        // *permanent* tab footprint (ADR-0032's browser peak estimate is
+        // derived from exactly this sequence — change one, revisit the
+        // other).
+        let states: Vec<B::ClientState> = backend_params
             .iter()
-            .zip(bundle.hints.iter())
-            .map(|(p, h)| B::client_setup(p, h))
+            .zip(hints)
+            .map(|(p, h)| B::client_setup(p, &h))
             .collect();
 
-        let pinned_block = bundle.block;
         Self {
-            params: bundle.params,
+            params,
             states,
             pinned_block,
             delta: PendingDelta::new(arity, pinned_block),

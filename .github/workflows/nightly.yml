@@ -26,9 +26,16 @@ env:
   # jobs share `Swatinem/rust-cache` artifacts across a heterogeneous
   # `ubuntu-latest` pool, and `.cargo/config.toml`'s `target-cpu=native`
   # makes those artifacts runner-specific — SIGILL on the next runner that
-  # lacks an instruction the last one had. The fuzz job is the one that
-  # would suffer most from the silent version of this: a target that dies
-  # on an illegal instruction looks a lot like a target that found a crash.
+  # lacks an instruction the last one had.
+  #
+  # Scope caveat for the fuzz job: this pin does NOT reach the fuzz-target
+  # builds themselves. `cargo fuzz` exports its own `RUSTFLAGS`
+  # (sanitizer/coverage flags), and cargo's rustflags sources are mutually
+  # exclusive — a set `RUSTFLAGS` wins over both this env var and the
+  # config file — so fuzz targets build at the generic baseline either
+  # way and never saw `native` to begin with. What the pin covers in that
+  # job is the `cargo install cargo-fuzz` build (host tools, built under
+  # this cwd's config), plus every non-fuzz job here in full.
   CARGO_BUILD_RUSTFLAGS: -C target-cpu=x86-64-v3
 
 jobs:

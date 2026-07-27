@@ -225,7 +225,81 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
         (w.written + 8, digest)
     };
     std::fs::rename(&tmp, path).map_err(io_err)?;
+    fsync_parent_dir(path);
     Ok(SaveReport { bytes: total, digest })
+}
+
+/// Best-effort fsync of `path`'s parent directory, for after a rename:
+/// the data fsync above makes the *file* durable, but the rename itself
+/// lives in the directory, and a power cut before the directory entry
+/// reaches disk rolls back to the previous save. Best-effort — an error
+/// (some filesystems refuse `fsync` on a directory handle) costs exactly
+/// that already-documented staleness window, never correctness, and must
+/// not turn every save into a failure on such a filesystem.
+pub(crate) fn fsync_parent_dir(path: &Path) {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return;
+    };
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+}
+
+/// Claims `path` as this process's `--state` path, for the process
+/// lifetime. Two guards, both against operator accidents rather than
+/// attackers:
+///
+/// 1. **Sibling-suffix self-collisions.** This module derives three
+///    sibling paths via `with_extension` — `.journal` (rotation),
+///    `.tmp` (save staging), `.lock` (this function) — so a `--state`
+///    path *already* ending in one of those derives a sibling equal to
+///    itself: rotation would rename a header-only journal **over the
+///    state file just saved**, a save would stage into its own target,
+///    and the lock's `File::create` would truncate the state file
+///    outright. Absurd inputs, one refusal for the family.
+///
+/// 2. **A second process on the same path.** Both would stage into the
+///    same `<path>.tmp` and interleave writes; whichever renames last
+///    installs a torn file. The trailing checksum catches that loudly at
+///    the *next* load — but only after the good file was already
+///    destroyed. An advisory `try_lock` on a `<path>.lock` sidecar makes
+///    the second process fail fast at startup instead. The returned
+///    `File` is the lock: hold it for as long as the path is in use
+///    (dropping it releases the claim).
+///
+/// The lock file itself stays behind (empty) after exit — advisory locks
+/// die with the process, so a stale file is harmless and never blocks a
+/// restart.
+pub fn acquire_state_path(path: &Path) -> Result<File, StateError> {
+    // Every sibling this module derives via `with_extension` collides
+    // with the state path itself when the path already carries that
+    // extension: `.journal` (rotation would rename a header-only journal
+    // over the state file), `.tmp` (the save would stage *into* its own
+    // target, voiding the previous-good-file atomicity), `.lock` (the
+    // `File::create` below would truncate the state file). One check
+    // covers the whole family.
+    for reserved in ["journal", "tmp", "lock"] {
+        if path.extension().and_then(|e| e.to_str()) == Some(reserved) {
+            return Err(StateError::Io(format!(
+                "--state {} ends in .{reserved}, which this server derives as a sibling file's \
+                 suffix for that same path — the two would collide and destroy the state file; \
+                 pick any other extension (.bin is conventional)",
+                path.display()
+            )));
+        }
+    }
+    let lock_path = path.with_extension("lock");
+    let lock = File::create(&lock_path).map_err(io_err)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(e) => Err(StateError::Io(format!(
+            "another process already holds {} ({e}) — two writers on one --state path would \
+             interleave writes into the same {}.tmp and destroy the good state file; stop the \
+             other process first (is a tmux session still running it?)",
+            lock_path.display(),
+            path.display()
+        ))),
+    }
 }
 
 /// Crate-visible raw materials behind a loaded state file, from *before*
@@ -503,6 +577,20 @@ fn apply_delta_in_place(cells: &mut [u32], params: &CuckooParams, delta: &BlockD
         for (row, edits) in seg_deltas {
             let row_base = *row as usize * row_width as usize;
             for (offset, cell_delta) in edits {
+                // The segment-slice bound below cannot catch an offset
+                // that walks past this row's end but stays inside the
+                // segment — that would silently edit a *neighbouring
+                // row's* cell, which is a wrong-balance channel, not a
+                // crash. Only checksum-valid records from a buggy writer
+                // could carry one (the codec has no row_width to check
+                // against), which is exactly why replay re-checks it
+                // here instead of trusting writer-side invariants.
+                if u32::from(*offset) >= row_width {
+                    return Err(format!(
+                        "cell offset {offset} >= row width {row_width} in segment {j} row {row} — \
+                         this record would edit a neighbouring row"
+                    ));
+                }
                 let idx = row_base + *offset as usize;
                 let Some(cell) = slice.get_mut(idx) else {
                     return Err(format!("cell index {idx} is out of bounds within segment {j}"));
@@ -558,7 +646,29 @@ pub fn load_with_journal_restore(
         let file = File::open(&journal_path).ok()?;
         let total_len = file.metadata().ok()?.len();
         let (header, reader) = JournalReader::open(BufReader::new(file), total_len, plaintext_bits, arity).ok()?;
-        (header.base_digest == base_digest).then_some(reader)
+        if header.base_digest != base_digest {
+            return None;
+        }
+        // Belt to the digest's braces, on the one field replay continuity
+        // is actually seeded from: `header.base_block` (the reader expects
+        // records from `base_block + 1`). Digest and block always come
+        // from one `SaveReport` today, so a mismatch here is unreachable
+        // short of a future writer bug — but that future bug's failure
+        // mode would be replaying deltas onto a base that already
+        // contains them, i.e. silently wrong balances, the exact class
+        // ADR-0026 exists to contain. One comparison converts it to
+        // "journal ignored, loudly".
+        if header.base_block != base_block {
+            eprintln!(
+                "risepir-rpc: WARNING: journal {} matches this base's digest but names base block {} \
+                 while the state file is at block {base_block} — refusing to replay it (writer bug?); \
+                 delete the journal to silence this",
+                journal_path.display(),
+                header.base_block
+            );
+            return None;
+        }
+        Some(reader)
     });
 
     let Some(mut reader) = opened else {
@@ -826,5 +936,43 @@ mod tests {
         ));
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn acquire_state_path_refuses_sibling_suffixed_paths() {
+        for reserved in ["journal", "tmp", "lock"] {
+            let path = std::env::temp_dir()
+                .join(format!("risepir-state-{}-selfclobber.{reserved}", std::process::id()));
+            match acquire_state_path(&path) {
+                Err(StateError::Io(msg)) => {
+                    assert!(msg.contains(&format!(".{reserved}")), "must name the collision: {msg}")
+                }
+                other => panic!("a .{reserved} --state path must be refused, got {other:?}"),
+            }
+            assert!(!path.exists(), "the refusal must not have created (or truncated) anything at the path");
+        }
+    }
+
+    #[test]
+    fn acquire_state_path_locks_out_a_second_claimant() {
+        let path = std::env::temp_dir().join(format!("risepir-state-{}-locked.bin", std::process::id()));
+        let lock_path = path.with_extension("lock");
+
+        let held = acquire_state_path(&path).expect("first claim succeeds");
+        // flock is per open file description, so a second `File::create` +
+        // `try_lock` from this same process conflicts exactly like a
+        // second process would.
+        match acquire_state_path(&path) {
+            Err(StateError::Io(msg)) => {
+                assert!(msg.contains("another process"), "must explain the conflict: {msg}");
+            }
+            other => panic!("a second claim on a held path must fail, got {other:?}"),
+        }
+
+        // Dropping the guard releases the claim; a fresh claim succeeds.
+        drop(held);
+        let _re = acquire_state_path(&path).expect("a released path can be re-claimed");
+
+        std::fs::remove_file(&lock_path).unwrap();
     }
 }

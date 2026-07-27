@@ -451,6 +451,88 @@ if (complete) {
   );
 }
 
+// ── 3.5 the capacity gate actually gates (mock only) ─────────────────
+//
+// ADR-0032's REFUSE path is a designed no-op against mock's ~1.77 MB
+// hint, so nothing anywhere exercised it in a real browser: a regression
+// letting preflight() fall through to boot() on REFUSE, or leaving
+// "Download anyway" dead, passed every gate. This phase makes the gate
+// fire against the same mock server by giving the *page* a rigged view
+// of the world — `navigator.deviceMemory` pinned to 4 and the HEAD
+// /setup probe answered in-page with a complete-set-sized
+// Content-Length — then asserts the one thing the gate is for: **no GET
+// /setup happens before consent, one happens after.** The interception
+// lives entirely inside the page (CDP-injected before its scripts run),
+// so the network assertions below observe the real wire.
+if (expectMock) {
+  await send("Network.enable");
+  const setupGets = [];
+  ws.addEventListener("message", (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.method === "Network.requestWillBeSent") {
+      const { url, method } = msg.params.request;
+      if (method === "GET" && new URL(url).pathname === "/setup") setupGets.push(url);
+    }
+  });
+
+  await send("Page.enable");
+  await send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `
+      Object.defineProperty(Navigator.prototype, "deviceMemory", { get: () => 4, configurable: true });
+      const realFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : input?.url ?? "";
+        const method = (init?.method ?? (typeof input === "object" ? input?.method : "") ?? "GET").toUpperCase();
+        if (method === "HEAD" && url.includes("/setup")) {
+          // The complete mainnet set's measured size: with deviceMemory 4
+          // (budget 2.0 GB) the 3x peak estimate must land on REFUSE.
+          return Promise.resolve(new Response(null, { status: 200, headers: { "content-length": "830728800" } }));
+        }
+        return realFetch.call(this, input, init);
+      };
+    `,
+  });
+  await send("Page.navigate", { url: `${base}/` });
+
+  // The gate must render instead of the download starting.
+  let gate = null;
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline; ) {
+    try {
+      gate = await evaluate(`
+        const g = document.getElementById("capacity-gate");
+        if (g && !g.classList.contains("hidden")) {
+          return {
+            lede: document.getElementById("capacity-gate-lede").textContent,
+            bootHidden: document.getElementById("boot").classList.contains("hidden"),
+          };
+        }
+        return null;
+      `);
+      if (gate) break;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check("a refused device sees the capacity gate, not a download", gate !== null, "gate never rendered");
+  check(
+    "the gate names the memory problem",
+    /bigger than this device says/.test(gate?.lede ?? ""),
+    JSON.stringify(gate?.lede ?? ""),
+  );
+  check("the setup panel is hidden while the gate is up", gate?.bootHidden === true);
+  check(
+    "no GET /setup fired before consent — the whole point of the gate",
+    setupGets.length === 0,
+    setupGets.join(" | "),
+  );
+
+  // "Download anyway" must be a real door, not a label: one click, and
+  // the very boot() a capable device runs unconditionally.
+  await evaluate(`document.getElementById("capacity-continue").click(); return true;`);
+  const rebooted = await pollForBoot(BOOT_BUDGET_MS);
+  check("Download anyway boots the client end-to-end", rebooted?.ok === true, rebooted?.error ?? "");
+  check("and exactly one GET /setup followed consent", setupGets.length === 1, setupGets.join(" | "));
+}
+
 // ── 4. nothing broke quietly ─────────────────────────────────────────
 
 const csp = consoleErrors.filter((e) => /Content Security Policy|Refused to/i.test(e));

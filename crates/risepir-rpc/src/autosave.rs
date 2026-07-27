@@ -225,6 +225,28 @@ impl StateSaver {
             return; // no journal active right now (nothing has rotated yet, or a rotation failed)
         };
         if let Err(e) = writer.append(delta, num_items_after) {
+            // A *backward* gap (`found < expected`) is not a failure: it is
+            // the shutdown/append race. The follow loop commits block N in
+            // memory, then heads here to journal it; if a SIGINT-triggered
+            // `save_now` wins the mutex in between, that save is taken at
+            // height N (it reads the in-memory state, which includes N) and
+            // rotates the journal to a fresh one whose base is N — so by the
+            // time this parked append resumes, the delta it carries is
+            // already *inside the base* the new journal hangs off, and the
+            // journal on disk is exactly correct without it. `append` wrote
+            // zero bytes for a Gap (checked before any I/O), so skipping is
+            // clean, journaling stays enabled for the blocks that follow,
+            // and no misleading "disabling journaling" WARNING fires during
+            // a perfectly healthy shutdown. A *forward* gap
+            // (`found > expected`) still means a block went missing between
+            // the journal's tail and this delta — a real continuity break a
+            // replay would silently jump, so that (and any I/O error, which
+            // may have torn the tail) still disables journaling loudly.
+            if let crate::journal::JournalError::Gap { expected, found } = e {
+                if found < expected {
+                    return;
+                }
+            }
             eprintln!(
                 "risepir-rpc mainnet: WARNING: journal append failed ({e}) — disabling journaling for \
                  the rest of this run; state saves continue on schedule (--save-interval), so durability \

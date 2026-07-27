@@ -272,7 +272,11 @@ async fn concurrent_saves_reload_consistently() {
 async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     let path = tmp("skip.bin");
     let node = NodeState::new(small_server(), DeltaRing::new(16), true);
-    let interval = Duration::from_millis(20);
+    // Wide enough that one save — including its post-rename parent-dir
+    // fsync, which on macOS alone can cost tens of ms — always finishes
+    // well inside it; the NotDue assertion below is about the *clock*,
+    // and a save that outlives the interval would make it racy.
+    let interval = Duration::from_millis(250);
     let saver = StateSaver::new(path.clone(), codec(), true, interval, None, plaintext_bits(), None);
 
     node.apply_block(&update_for(1)).await.unwrap();
@@ -342,4 +346,80 @@ async fn concurrent_save_now_calls_serialize() {
     let loaded = state::load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
     assert_eq!(loaded.server.block(), 1);
     std::fs::remove_file(&path).unwrap();
+}
+
+/// The shutdown/append race artifact (review follow-up to ADR-0025/0026):
+/// the follow loop commits block N in memory and is on its way to journal
+/// it when a SIGINT-triggered `save_now` wins the saver mutex — the save
+/// captures height N (the in-memory state includes it) and rotates the
+/// journal to a fresh one based at N, so the parked append's delta is
+/// already inside the new journal's base. That append must be a silent
+/// no-op — journaling stays enabled, no "disabling journaling" WARNING
+/// during a perfectly healthy shutdown — while a *forward* gap (a block
+/// genuinely skipped) must still disable it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backward_gap_append_is_skipped_not_a_journal_failure() {
+    use risepir_proto::BlockDelta;
+    use risepir_rpc::journal::{journal_path_for, JournalReader};
+    use std::io::BufReader;
+
+    let path = tmp("benign-gap.bin");
+    let node = NodeState::new(small_server(), DeltaRing::new(16), true);
+    let saver = StateSaver::new(path.clone(), codec(), true, Duration::from_secs(3600), None, plaintext_bits(), None);
+
+    node.apply_block(&update_for(1)).await.unwrap();
+    node.apply_block(&update_for(2)).await.unwrap();
+    // The "shutdown" save at height 2: rotates in a fresh journal based at 2.
+    assert!(matches!(
+        saver.save_now(&node, "test-shutdown-race").await.unwrap(),
+        SaveOutcome::Saved { block: 2, .. }
+    ));
+
+    // The parked append that lost the race: block 2 is already inside the
+    // base the fresh journal hangs off.
+    let raced = BlockDelta {
+        block: 2,
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+    };
+    saver.append_delta(&raced, 2).await;
+
+    // Journaling must still be alive: the next block appends normally.
+    let next = BlockDelta {
+        block: 3,
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+    };
+    saver.append_delta(&next, 3).await;
+
+    let journal_path = journal_path_for(&path);
+    let file = std::fs::File::open(&journal_path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let (header, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 3).unwrap();
+    assert_eq!(header.base_block, 2, "the rotation moved the base to the save height");
+    let blocks: Vec<u64> = reader.map(|rec| rec.delta.block).collect();
+    assert_eq!(
+        blocks,
+        vec![3],
+        "the raced block-2 append must be absent (subsumed by the base), block 3 present (journaling alive)"
+    );
+
+    // A *forward* gap is still a real failure: block 5 after 3 leaves 4
+    // missing, and journaling shuts down rather than recording a hole.
+    let hole = BlockDelta {
+        block: 5,
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+    };
+    saver.append_delta(&hole, 5).await;
+    let after = BlockDelta {
+        block: 6,
+        per_segment: vec![vec![(0, vec![(0, 1)])], vec![], vec![]],
+    };
+    saver.append_delta(&after, 6).await;
+    let file = std::fs::File::open(&journal_path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let (_, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 3).unwrap();
+    let blocks: Vec<u64> = reader.map(|rec| rec.delta.block).collect();
+    assert_eq!(blocks, vec![3], "after a forward gap nothing further may be recorded");
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
 }

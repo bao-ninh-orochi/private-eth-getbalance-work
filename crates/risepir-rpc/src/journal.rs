@@ -498,6 +498,7 @@ impl JournalWriter {
             w.get_ref().sync_all().map_err(io_err)?;
         }
         std::fs::rename(&tmp, path).map_err(io_err)?;
+        crate::state::fsync_parent_dir(path);
         let file = OpenOptions::new().append(true).open(path).map_err(io_err)?;
         Ok(Self {
             file,

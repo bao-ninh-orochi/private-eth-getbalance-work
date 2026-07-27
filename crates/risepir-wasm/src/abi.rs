@@ -168,8 +168,11 @@ pub fn last_error() -> String {
     ERR.with(|e| e.borrow().clone())
 }
 
-/// Drop the input buffer's capacity. Worth calling after
-/// [`risepir_init`], whose input is the ~50 MB setup bundle.
+/// Drop the input buffer's capacity. [`risepir_init`] now does this
+/// itself at the moment it matters most (between decoding the setup
+/// bundle and building the client — see its docs); this export stays for
+/// hosts that want to drop the buffer after any *other* large input, and
+/// calling it after `risepir_init` anyway is a harmless no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn risepir_in_release() {
     IN.with(|i| {
@@ -216,20 +219,36 @@ pub extern "C" fn risepir_set_mode_byte(value: u32) -> i32 {
 /// Ingest `GET /setup`'s body and build the client. Returns `0`, or
 /// [`STATUS_ERROR`] (including when [`risepir_set_mode`] has not run —
 /// the completeness flag is required, never assumed).
+///
+/// Decode and build are two steps with the input buffer **freed in
+/// between**: at the complete mainnet set the encoded bundle is
+/// ~831 MB, the decoded bundle another ~831 MB, and the built client
+/// (per-segment hint + expanded `A`) ~2x that again — and wasm linear
+/// memory never shrinks, so whatever peak this function reaches is the
+/// tab's floor forever after. Releasing the encoded bytes before
+/// `Session::from_bundle` allocates the client cuts that permanent
+/// floor by one full hint set; `risepir-client`'s own `from_setup`
+/// consumes the decoded hints per segment for the same reason. This is
+/// the sequence ADR-0032's `ESTIMATED_PEAK_MULTIPLE` is derived from —
+/// change one, revisit the other.
 #[unsafe(no_mangle)]
 pub extern "C" fn risepir_init(len: usize) -> i32 {
     clear_err();
     let Some(mode) = MODE.with(|m| m.borrow().clone()) else {
         return set_err("GET /mode must be loaded before GET /setup (the completeness flag is never assumed)");
     };
-    let built = with_input(len, |setup| Session::new(setup, &mode));
-    match built {
-        Ok(s) => {
-            SESSION.with(|slot| *slot.borrow_mut() = Some(s));
-            0
-        }
-        Err(e) => set_err(e),
-    }
+    let complete = match crate::session::parse_mode(&mode) {
+        Ok(c) => c,
+        Err(e) => return set_err(e),
+    };
+    let bundle = match with_input(len, Session::decode) {
+        Ok(b) => b,
+        Err(e) => return set_err(e),
+    };
+    risepir_in_release();
+    let session = Session::from_bundle(bundle, complete);
+    SESSION.with(|slot| *slot.borrow_mut() = Some(session));
+    0
 }
 
 /// `1` if the deployment declared a complete nonzero-balance set, `0` if

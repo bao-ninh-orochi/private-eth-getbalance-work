@@ -36,7 +36,12 @@ pub enum ServerError {
     /// [`crate::RisePirServer::full_rebuild`] for recovery — the same
     /// recovery `IkpirServer::insert`'s `TableFull` documents: rebuild at
     /// a larger `num_buckets` from authoritative `(address, balance)`
-    /// state, since the cuckoo store itself does not retain keys.
+    /// state, since the cuckoo store itself does not retain keys. Note
+    /// that in the *deployed* topology this recovery means a process
+    /// re-bootstrap, not an in-place `full_rebuild` call — see that
+    /// method's "do not wire this into a serving process" warning for
+    /// the `NodeState` caches an in-place rebuild would silently
+    /// invalidate.
     TableFull,
     /// [`crate::RisePirServer::apply_block`] was called with
     /// `update.block` not strictly greater than the server's current

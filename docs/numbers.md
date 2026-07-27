@@ -74,6 +74,16 @@ inherent SimplePIR-class client footprint at 200 M accounts, and it is what
 `docs/adr/0019` means when it says the browser front end gives way to the CLI
 client at the complete set.
 
+One caveat for the *browser* specifically: this table is steady state, and a
+tab's real ceiling is the **init peak** — encoded bundle, decoded bundle, and
+the built client transiently coexist, and wasm linear memory never shrinks, so
+the peak is also the tab's floor from then on. After the init-sequence fixes
+(free the encoded buffer between decode and build; consume decoded hints per
+segment) that peak is ~2.4× the hint (~2.0 GB here), and the front end's
+pre-flight budgets **3× the hint** for it (`ESTIMATED_PEAK_MULTIPLE`,
+`web/pir.js` — derivation there; ADR-0032 revision). The CLI client's peak is
+the same sequence minus the wasm no-shrink property.
+
 ## 5. Answer latency, at 1,000,000 accounts
 
 | metric | value |

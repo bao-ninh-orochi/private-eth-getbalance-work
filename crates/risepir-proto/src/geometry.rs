@@ -266,7 +266,8 @@ impl Geometry {
     /// Picks the smallest `num_buckets` (respecting the arity shape
     /// constraint) with `accounts / (num_buckets * bucket_size) <=` the
     /// *effective* target load for this `(arity, bucket_size)` — see
-    /// `effective_target_load` (private to this module): the smaller of a flat 0.75 cap and a
+    /// [`effective_target_load`] (`pub`, so the `xtask geometry` sweep
+    /// derives the same ratio instead of mirroring it): the smaller of a flat 0.75 cap and a
     /// safety margin on `segmented_cuckoo::MAX_LOAD_FACTOR`'s own
     /// published achievable-load ceiling for that configuration
     /// (ADR-0031). For every `(arity, bucket_size)` this repo actually

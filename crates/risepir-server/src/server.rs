@@ -617,6 +617,22 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// alone) — `full_rebuild` only ever re-derives hints for the
     /// **existing** geometry.
     ///
+    /// # Do not wire this into a *serving* process without invalidation
+    ///
+    /// `risepir-http`'s `NodeState` snapshots `backend_params` once at
+    /// construction (its `/answer` length checks depend on them) and
+    /// caches one encoded `/setup` whose freshness check is
+    /// block-distance only — and a rebuild changes hints *without*
+    /// moving the block. Nothing invalidates either today, which is
+    /// sound only because nothing in a serving process calls this
+    /// (`NodeState::with_server` is read-only). If a future recovery
+    /// path runs `full_rebuild` inside a live server, it must also
+    /// re-derive `NodeState`'s caches, or `/answer` decodes with stale
+    /// reshape geometry and `/setup` serves pre-rebuild bytes — garbage
+    /// decodes, which complete mode can surface as a wrong `0x0`.
+    /// (Lineage epochs — ADR-0033 — deliberately do *not* change across
+    /// a rebuild: seeds persist, and same-lineage deltas remain valid.)
+    ///
     /// # Memory
     ///
     /// Allocates one new `ServerParams`/`HintMaterial`/`Hint` set per

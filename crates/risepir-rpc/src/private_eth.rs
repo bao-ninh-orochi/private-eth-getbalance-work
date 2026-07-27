@@ -10,6 +10,22 @@ use risepir_server::SetupBundle;
 
 use crate::error::RpcError;
 
+/// Minimum spacing between two re-bootstrap attempts (ADR-0029, amended).
+/// A re-bootstrap is a full `/setup` re-download — 830.73 MB at the live
+/// complete set, ~8 minutes measured — so when a catch-up-replaying
+/// server outruns even a freshly bootstrapped client (ADR-0029's own
+/// motivating case), retrying per *call* turns a polling caller into an
+/// unmetered re-download loop: every lookup pays the download and still
+/// stalls. Within this window of the previous attempt,
+/// [`PrivateEth::get_balance`] reports the stall honestly instead of
+/// paying again — erroring is fine, an 831 MB-per-call retry loop is not.
+/// Five minutes sits between the ~8-minute worst-case download (retrying
+/// faster than one download can even finish is provably useless) and the
+/// ~10-minute window a freshly regenerated `/setup` bundle now leaves a
+/// client even at replay speed (`NodeState::setup_bytes`'s freshness
+/// rule).
+pub(crate) const REBOOTSTRAP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Everything about one bootstrapped RisePIR session that must move
 /// together, atomically, whenever the client re-bootstraps
 /// ([`PrivateEth::rebootstrap`]): the rewind client itself, the block its
@@ -130,6 +146,18 @@ impl Session {
 pub struct PrivateEth {
     pub(crate) session: tokio::sync::Mutex<Session>,
     pub(crate) pir: PirHttpClient,
+    /// When the last re-bootstrap *started*, if any — the cooldown clock
+    /// for [`Self::get_balance`]'s stall recovery (ADR-0029, amended):
+    /// one re-bootstrap costs a full `/setup` re-download (830.73 MB at
+    /// the live complete set), so when a replaying server outruns even a
+    /// fresh bootstrap, per-call retries would turn a polling caller
+    /// into an unmetered re-download loop. Within
+    /// [`REBOOTSTRAP_COOLDOWN`] of the previous attempt, a stalled call
+    /// reports the stall honestly instead of paying again. A `std`
+    /// mutex, never held across an `.await` (tokio's own guidance for
+    /// few-field critical sections); always locked while the `session`
+    /// tokio mutex is already held, so there is no lock-order ambiguity.
+    pub(crate) last_rebootstrap: std::sync::Mutex<Option<std::time::Instant>>,
     /// This deployment's `ValueCodec` — fixed workspace-wide, not a
     /// per-request choice, but stored (rather than hardcoded inline)
     /// so [`Self::rebootstrap`] can rebuild a [`RisePirClient`] from a
@@ -172,6 +200,7 @@ impl PrivateEth {
         Self {
             session: tokio::sync::Mutex::new(Session::from_bundle(bundle, value_codec, complete)),
             pir,
+            last_rebootstrap: std::sync::Mutex::new(None),
             value_codec,
             chain_id,
             proxy_upstream,
@@ -283,10 +312,41 @@ impl PrivateEth {
 
         let first = self.try_get_balance(&key, &mut session).await;
         if let Err(RpcError::Stalled) = first {
+            if !self.take_rebootstrap_slot() {
+                // Within [`REBOOTSTRAP_COOLDOWN`] of the previous attempt:
+                // report the stall honestly instead of paying another full
+                // ~831 MB `/setup` download that the last attempt just
+                // proved insufficient (ADR-0029, amended).
+                return first;
+            }
             self.rebootstrap(&mut session).await?;
             return self.try_get_balance(&key, &mut session).await;
         }
         first
+    }
+
+    /// Claims the one re-bootstrap slot per [`REBOOTSTRAP_COOLDOWN`]
+    /// window. Consumes the slot *before* the attempt runs, deliberately:
+    /// an attempt that fails, or succeeds and immediately stalls again,
+    /// still paid the full download — the cooldown meters the cost, not
+    /// the success. Callers always hold the `session` tokio mutex here,
+    /// so the inner `std` lock is uncontended and never held across an
+    /// `.await`; a poisoned lock is recovered rather than propagated
+    /// (the guarded value is one timestamp — there is no invariant a
+    /// panic mid-update could tear).
+    fn take_rebootstrap_slot(&self) -> bool {
+        let mut guard = self
+            .last_rebootstrap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        match *guard {
+            Some(prev) if now.duration_since(prev) < REBOOTSTRAP_COOLDOWN => false,
+            _ => {
+                *guard = Some(now);
+                true
+            }
+        }
     }
 
     /// One attempt at [`Self::get_balance`]'s full rewind, against

@@ -264,7 +264,11 @@ its current block) → steady-state follow.
 
 Restarts are cheap: with `--state`, startup is a file load (bit-identical PIR
 parameters — previously bootstrapped clients stay valid) plus the catch-up replay
-since the save. `Ctrl-C` saves state before exiting.
+since the save. While following, the loop rewrites the file every
+`--save-interval` seconds (default 1800, `0` disables — ADR-0025), so that
+replay is bounded by the interval: an ungraceful kill costs minutes of catch-up,
+not the whole uptime. `Ctrl-C` still saves the exact final state before exiting;
+each save logs a `state saved: block …, … GB in …s` completion line.
 
 ### 2.3 Hardware / cost
 
@@ -520,7 +524,9 @@ state file is atomic-by-rename and, as of `RPST2`, carries a whole-file
 xxh3 checksum, so a copy is a valid backup exactly when `load` accepts it.
 
 ```bash
-# back up (server running is fine — copy the *state* file, never the .tmp):
+# back up (server running is fine — copy the *state* file, never the .tmp;
+# the autosave, ADR-0025, replaces it atomically by rename, so a copy taken
+# at any moment is a complete file — either the previous save or the new one):
 gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bin ~/risepir-state.bak'
 # restore = stop server, put the backup in place, start; the server replays
 # saved_block+1..finalized from the feed — the backup's age only costs
@@ -557,7 +563,9 @@ one layer up).
 for the complete set — it burns **~$8.60/day** running, against ~$10/mo for the
 250 GB disk when stopped. `gcloud compute instances stop risepir` when idle
 (always `Ctrl-C` the server first and wait for `state saved; exiting`, so the
-restart is a file load rather than a re-bootstrap); `…delete` to zero it;
+restart is a file load rather than a re-bootstrap — and since ADR-0025 the
+server also rewrites the file every `--save-interval` anyway, so even a missed
+Ctrl-C only costs the last ≤30 min of blocks as replay); `…delete` to zero it;
 `gcloud billing projects describe risepir-poc` / the console's Billing page shows
 credit burn-down. After the credit: switch the same VM to Spot (~$95–130/mo at
 64 GB) — Oracle's free tier is no longer an option at this size.

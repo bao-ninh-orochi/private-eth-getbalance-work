@@ -142,6 +142,11 @@ gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
    --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
 ```
 
+While following, the server rewrites the state file every 30 min by default
+(`--save-interval <secs>`, `0` disables — ADR-0025), so a crash or missed
+Ctrl-C replays at most the last interval, not the whole uptime. Every save
+logs a `state saved: block …, … GB in …s` completion line.
+
 The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
 signalling it never involves a wrapper shell. `--web web` is what serves the
 browser front end at all.

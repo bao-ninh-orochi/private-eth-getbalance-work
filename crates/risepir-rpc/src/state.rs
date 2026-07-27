@@ -102,15 +102,19 @@ fn io_err(e: impl std::fmt::Display) -> StateError {
 /// `Write` adapter that folds every byte written through it into an xxh3
 /// state, so [`save`] computes the trailing checksum in the same streamed
 /// pass that writes the file (never a second copy of the ~10 GB cells).
+/// Also counts bytes, so [`save`] can report the file size it produced
+/// without a second `stat`.
 struct HashingWriter<W: Write> {
     inner: W,
     hasher: xxhash_rust::xxh3::Xxh3,
+    written: u64,
 }
 
 impl<W: Write> Write for HashingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
         self.hasher.update(&buf[..n]);
+        self.written += n as u64;
         Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -142,15 +146,18 @@ impl<R: Read> Read for HashingReader<R> {
 }
 
 /// Serialize `server` (+ the completeness marker) to `path`, atomically
-/// (`<path>.tmp` + rename). Always writes the current (`RPST2`,
-/// checksummed) format.
-pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) -> Result<(), StateError> {
+/// (`<path>.tmp` + rename, with the data fsynced *before* the rename so a
+/// power cut cannot replace the previous good file with one whose bytes
+/// never reached the disk). Always writes the current (`RPST2`,
+/// checksummed) format. Returns the byte size of the file produced.
+pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) -> Result<u64, StateError> {
     let tmp = path.with_extension("tmp");
-    {
+    let total = {
         let file = File::create(&tmp).map_err(io_err)?;
         let mut w = HashingWriter {
             inner: BufWriter::new(file),
             hasher: xxhash_rust::xxh3::Xxh3::new(),
+            written: 0,
         };
 
         w.write_all(MAGIC).map_err(io_err)?;
@@ -182,9 +189,19 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
         // inner writer (it must not fold into itself).
         let digest = w.hasher.digest();
         w.inner.write_all(&digest.to_le_bytes()).map_err(io_err)?;
-        w.inner.flush().map_err(io_err)?;
-    }
-    std::fs::rename(&tmp, path).map_err(io_err)
+        // Flush + fsync before the rename: rename is the commit point, and
+        // committing data the disk has not durably accepted would let a
+        // power cut destroy the *previous* good state file too. (A plain
+        // process kill never needed this — the page cache survives it —
+        // but the autosave path renames dozens of times a day, so the
+        // rename-before-data window is no longer a once-per-deployment
+        // lottery ticket.)
+        let file = w.inner.into_inner().map_err(io_err)?;
+        file.sync_all().map_err(io_err)?;
+        w.written + 8
+    };
+    std::fs::rename(&tmp, path).map_err(io_err)?;
+    Ok(total)
 }
 
 /// Read a state file back into a running server. `config` must be the

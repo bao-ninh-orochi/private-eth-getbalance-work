@@ -611,3 +611,103 @@ see only *which blocks* this server fetches — never which account a user
 queried, which is the PIR property and is unaffected. Reconciliation still runs
 against publicnode, a third independent operator, so the never-wrong-answer
 backstop does not share an operator with either feed.
+
+### ADR-0025 — Periodic state autosave, executed by the follow loop itself **[NEW]**
+
+**Chosen:** rewrite the `--state` file periodically **from the follow-loop task,
+between block applications**, under the existing read lock: new `--save-interval
+<secs>` (default **1800**, `0` disables), interval measured from the previous
+save's *completion*, skipped when no block was applied since the last save
+(`StateSaver`, `crates/risepir-rpc/src/autosave.rs`). The shutdown save now goes
+through the same `StateSaver`, whose mutex serializes it against an in-flight
+autosave; `state::save` additionally fsyncs before the rename and reports
+size/duration (the bootstrap "saving state …" line finally has a completion
+line). File format unchanged — still `RPST2`, existing files load as before.
+**Rejected:** a periodic save on its own timer task; snapshotting the cells for
+a consistent copy; an incremental delta-journal sidecar; `fork()`-based
+copy-on-write snapshots; documenting an external periodic restart instead.
+
+**The problem, measured** (live deployment, 2026-07-26): the state file was
+written exactly twice — bootstrap and Ctrl-C — so it drifted from the running
+server without bound: file at block 25,613,849 (12:37 UTC) vs 25,617,496 in
+memory (14:28 UTC) = **3,647 blocks stale in under two hours**, growing ~300
+blocks/hour. At the replay rate of ~50 blocks/min, a kill -9 at that moment
+cost ~73 minutes of catch-up, +~6 min per further hour of uptime. Nothing
+wrong ever gets served — the gap is purely recovery time — but it is what
+stood between the deployment and being safely unattended.
+
+**Why the save must run in the applier's own task** — the fact that shaped
+everything: `tokio::sync::RwLock` is **fair (write-preferring)**, so the moment
+`apply_block` queues its write behind a long-held read guard, every *later*
+`/answer` reader parks behind the writer too. A full save streams 36.26 GB
+under the read lock — minutes at the complete set — so a save from a separate
+task turns "the follow loop waits" into "**serving stalls for the whole
+save**", every interval. Pinned executable
+(`tests/autosave.rs::queued_writer_parks_new_readers`): with one reader held
+and one writer queued, `try_read` fails. The dual fact: `NodeState`'s write
+lock is taken in exactly one place (`node.rs` `apply_block`), and its only
+caller is the follow loop — so a save executed *by that task, between blocks*
+can never have a writer queued behind it, and readers flow for the entire
+save. The trigger sits at the top of both loop bodies, so it fires while
+caught-up, mid-catch-up, and during a refused-block retry (ADR-0024), and
+always after the previous iteration's reconcile — a state that just failed
+reconciliation is never persisted (the loop exits first).
+
+**Consistency is carried by the read guard, not by the placement:** writers
+are excluded for the whole streamed save, so `D` and `H` land at one height no
+matter which task saves. Placement is purely a liveness choice. Test
+(`concurrent_saves_reload_consistently`): an applier task and a saver task
+run concurrently — the *adversarial* arrangement production avoids — and all
+40 interleaved saves reloaded byte-exact: verified reads equal to an
+independent plain-arithmetic simulation at each file's own height, and replay
+to the final height byte-identical (cells *and* encoded hints) to the live
+server. The per-block withdrawal credit makes partial-block captures
+non-idempotent, so a mid-block tear cannot cancel out.
+
+**Cost accepted:** the follow loop pauses for the save's duration (it then
+catches up — the same self-healing lag as after any restart; measuring the
+interval from save *completion* guarantees forward progress even if an
+operator sets the interval below the save duration), and the disk absorbs a
+full file rewrite per interval (~1.7 TB/day at the default on the complete
+set — persistent disks bill capacity, not writes). Worst-case on-disk
+staleness ≈ interval + one save duration; at the default that is minutes of
+replay after a kill -9, versus unbounded before. Peak RSS is untouched: the
+autosave calls the same streaming `state::save` (borrowed cells — the PR #6
+constraint) as the Ctrl-C path, so an autosave's peak equals a shutdown
+save's peak.
+
+**Why the rejections:**
+- *Separate timer task:* the fairness stall above — a minutes-long serving
+  outage per save at complete-set scale.
+- *Cell snapshot for consistency:* re-creates the +35.43 GB copy PR #6
+  removed; OOMs the 64 GB box (ADR-0023).
+- *Delta-journal sidecar (incremental checkpoints):* tiny writes and ~zero
+  staleness, but it adds a second persistence format and a second
+  reconstruction path, both of which can silently produce exactly the
+  inconsistent-server outcome this repo treats as total failure (a journal
+  entry applied to the wrong base, a torn tail mis-handled, hint-vs-cell
+  drift in replay). The full-file save reuses one battle-tested
+  format+loader whose checksum already rejects everything else. Bounding
+  recovery to minutes is enough; buying ~zero at that risk is a bad trade
+  here. Revisit only if the save duration itself becomes the problem.
+- *`fork()` copy-on-write (the Redis BGSAVE trick):* the textbook zero-copy
+  consistent snapshot, but forking a multithreaded tokio process leaves the
+  child restricted to async-signal-safe operations — a Rust `File`/allocator
+  call in the child after fork is UB-adjacent if another thread held a lock —
+  and it is unavailable on non-unix. Too sharp a tool for a PoC.
+- *External periodic clean restart:* bounds staleness only to the restart
+  cadence, costs 135.8 s of downtime per restart plus operator machinery,
+  and the in-process save turned out to cost nothing it was competing with.
+
+**Residuals, stated:** (1) reconcile samples every `--reconcile-every` blocks,
+so a feed drift can be persisted up to that many blocks before detection — the
+same window in which it is *served*; the posture (CRITICAL + re-bootstrap) is
+unchanged, and the autosave stopping with the follow loop means the file
+freezes at the last pre-condemnation save. (2) A shutdown save after a
+CRITICAL apply-failure can persist a state whose hints lag a partially-applied
+block's cells — **pre-existing** Ctrl-C behavior, now recorded: the load-time
+checksum cannot see it (the file faithfully records the inconsistent memory);
+the operator instruction after any CRITICAL remains "re-bootstrap, do not
+trust the state file". (3) `ops/systemd/risepir.service` `TimeoutStopSec` rose
+300→900: a SIGINT can now land mid-autosave and must wait for it before the
+final save; two complete-set saves must fit the stop window.

@@ -53,6 +53,7 @@ use risepir_proto::{keccak256, Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::Segmented3aryCuckooKVStore;
 
+use crate::autosave::StateSaver;
 use crate::private_eth::PrivateEth;
 use crate::state;
 
@@ -113,8 +114,15 @@ pub struct MainnetConfig {
     /// Omitted ⇒ a counting pre-pass over the shards.
     pub snapshot_accounts: Option<u64>,
     /// State file: loaded at startup if it exists; written after a
-    /// snapshot bootstrap and on Ctrl-C.
+    /// snapshot bootstrap, every [`Self::save_interval_secs`] while
+    /// following (ADR-0025), and on Ctrl-C.
     pub state: Option<PathBuf>,
+    /// Seconds between periodic state saves (`--save-interval`), measured
+    /// from the previous save's completion; `0` disables the periodic
+    /// trigger (bootstrap and Ctrl-C saves still happen). Only meaningful
+    /// with [`Self::state`]. See ADR-0025 for why the save runs inside
+    /// the follow loop rather than on its own timer task.
+    pub save_interval_secs: u64,
     /// Bootstrap empty at the current finalized block (see module docs).
     pub partial: bool,
     /// Geometry capacity for `--partial` (accounts). ~600 distinct
@@ -156,6 +164,10 @@ impl Default for MainnetConfig {
             snapshot_block: None,
             snapshot_accounts: None,
             state: None,
+            // 30 min: worst-case on-disk staleness ≈ interval + one save
+            // duration, so a kill -9 costs minutes of replay instead of
+            // hours (ADR-0025 has the arithmetic and the disk-write cost).
+            save_interval_secs: 1800,
             partial: false,
             partial_capacity: 4_000_000,
             proxy_upstream: None,
@@ -181,6 +193,11 @@ pub struct MainnetHandle {
     pub head_at_start: u64,
     /// Shared node state — `main` uses it for the Ctrl-C state save.
     pub node: Arc<NodeState>,
+    /// The state saver, when `--state` was given — `main`'s Ctrl-C path
+    /// saves through it so the shutdown save serializes with any
+    /// in-flight autosave (two concurrent writers to `<path>.tmp` would
+    /// interleave into garbage and rename it over the good file).
+    pub saver: Option<Arc<StateSaver>>,
     /// Whether the browser front end is being served (ADR-0019).
     pub web_served: bool,
 }
@@ -215,7 +232,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     );
 
     // ── Bootstrap: state file > snapshot > partial ─────────────────────
-    let (server, complete) = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
+    // The third tuple element records whether `--state`'s file already
+    // holds the server's current height — it seeds the autosaver's
+    // skip-if-unchanged check (ADR-0025).
+    let (server, complete, state_file_current) = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
         if !cfg.snapshot.is_empty() {
             eprintln!(
                 "risepir-rpc mainnet: note: state file {} exists; --snapshot is ignored \
@@ -234,7 +254,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                     server.num_items(),
                     if complete { "complete set" } else { "PARTIAL set" },
                 );
-                (server, complete)
+                (server, complete, true)
             }
             Err(e) => die(format!("loading {}: {e}", path.display())),
         }
@@ -303,15 +323,25 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             started.elapsed().as_secs_f64()
         );
 
+        let mut saved = false;
         if let Some(path) = &cfg.state {
             eprintln!("risepir-rpc mainnet: saving state to {} ...", path.display());
-            if let Err(e) = state::save(&server, &codec, true, path) {
+            let started = std::time::Instant::now();
+            match state::save(&server, &codec, true, path) {
+                Ok(bytes) => {
+                    eprintln!(
+                        "risepir-rpc mainnet: state saved: block {snapshot_block}, {:.2} GB in {:.1}s",
+                        bytes as f64 / 1e9,
+                        started.elapsed().as_secs_f64(),
+                    );
+                    saved = true;
+                }
                 // Non-fatal: the server is correct in memory; only restart
                 // speed is lost. Say so and continue.
-                eprintln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without");
+                Err(e) => eprintln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"),
             }
         }
-        (server, true)
+        (server, true, saved)
     } else if cfg.partial {
         let fin = match feed.finalized().await {
             Ok(f) => f,
@@ -334,13 +364,27 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         eprintln!(
             "risepir-rpc mainnet: partial mode serves only accounts touched from here on; everything else ERRORS (never 0x0)."
         );
-        (RisePirServer::new(store, backend_config.clone(), codec, fin), false)
+        (RisePirServer::new(store, backend_config.clone(), codec, fin), false, false)
     } else {
         die("need a data source: --snapshot <csv[.gz]> --snapshot-block <N> (complete), or --state <file> (restart), or --partial (demo)");
     };
 
     let head_at_start = server.block();
     let node = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), complete));
+
+    // ── State autosave (ADR-0025) ──────────────────────────────────────
+    // One saver per `--state` path, shared between the follow loop (the
+    // periodic trigger) and main's Ctrl-C path (the final save) so the
+    // two can never write `<path>.tmp` concurrently.
+    let saver = cfg.state.as_ref().map(|path| {
+        Arc::new(StateSaver::new(
+            path.clone(),
+            codec,
+            complete,
+            Duration::from_secs(cfg.save_interval_secs),
+            state_file_current.then_some(head_at_start),
+        ))
+    });
 
     // ── PIR HTTP transport ─────────────────────────────────────────────
     // Loaded before binding anything: a missing or unreadable asset is a
@@ -380,6 +424,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             reconcile_every: cfg.reconcile_every,
             reconcile_samples: cfg.reconcile_samples,
             start_at: head_at_start,
+            saver: saver.clone(),
         },
     ));
 
@@ -431,6 +476,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         complete,
         head_at_start,
         node,
+        saver,
     }
 }
 
@@ -439,13 +485,32 @@ struct FollowConfig {
     reconcile_every: u64,
     reconcile_samples: usize,
     start_at: u64,
+    saver: Option<Arc<StateSaver>>,
 }
 
 /// The forever loop: poll `finalized`, apply each new block exactly once,
 /// reconcile on cadence. See the module docs for the failure posture.
+///
+/// This task is also where periodic state saves run (ADR-0025): it is
+/// `NodeState`'s **only** writer, so a save executed here between blocks
+/// can never have a writer queued behind its read guard — which is what
+/// keeps `/answer` flowing for the whole save (tokio's fair `RwLock`
+/// parks new readers behind any queued writer). The trigger sits at the
+/// top of both loop bodies so it fires in every phase — caught-up
+/// polling, catch-up replay, and the fetch-retry loop a refused block
+/// causes (ADR-0024) — and always *after* the previous iteration's
+/// reconcile, so a state that just failed reconciliation is never the
+/// one being persisted (the loop exits before the next trigger).
 async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cfg: FollowConfig) {
     let mut last = cfg.start_at;
     loop {
+        if let Some(saver) = &cfg.saver {
+            // Outcome/error ignored on purpose: the saver logs, and a
+            // failed save must not stop the follow loop (it costs restart
+            // speed, never correctness; the next interval retries).
+            let _ = saver.maybe_save(&node).await;
+        }
+
         let finalized = match feed.finalized().await {
             Ok(f) => f,
             Err(e) => {
@@ -456,6 +521,10 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
         };
 
         while last < finalized {
+            if let Some(saver) = &cfg.saver {
+                let _ = saver.maybe_save(&node).await;
+            }
+
             let n = last + 1;
             let fetched = match feed.block_update(n).await {
                 Ok(f) => f,

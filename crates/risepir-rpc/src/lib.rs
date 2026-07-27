@@ -46,6 +46,7 @@ mod error;
 mod private_eth;
 pub mod rpc;
 
+pub mod autosave;
 pub mod demo;
 pub mod front;
 pub mod mainnet;

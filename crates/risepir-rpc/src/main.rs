@@ -4,7 +4,7 @@
 //! risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
 //!                     [--web <dir>]
 //! risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]
-//!                     [--state <file>] [--partial] [--partial-capacity <N>]
+//!                     [--state <file>] [--save-interval <secs>] [--partial] [--partial-capacity <N>]
 //!                     [--feed-url <url>]... [--confirm-url <url>]
 //!                     [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
 //!                     [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]
@@ -83,6 +83,7 @@ async fn run_mainnet(cfg: MainnetConfig) {
         print_proxy_warning(url);
     }
     let state_path = cfg.state.clone();
+    let save_interval = cfg.save_interval_secs;
     let handle = mainnet::spawn(cfg).await;
 
     println!("RisePIR private eth_getBalance — Ethereum mainnet");
@@ -106,20 +107,25 @@ async fn run_mainnet(cfg: MainnetConfig) {
     println!("  cast block-number --rpc-url http://{}", handle.rpc_addr);
     if state_path.is_some() {
         println!();
-        println!("Ctrl-C saves state before exiting.");
+        if save_interval > 0 {
+            println!("State autosave: every {save_interval}s while following (--save-interval; 0 disables).");
+            println!("Ctrl-C also saves state before exiting.");
+        } else {
+            println!("State autosave: DISABLED (--save-interval 0). Ctrl-C still saves state before exiting.");
+        }
     }
 
     shutdown_signal().await;
-    if let Some(path) = state_path {
-        eprintln!("risepir-rpc mainnet: shutdown signal — saving state to {} ...", path.display());
-        let codec = mainnet_value_codec();
-        let complete = handle.complete;
-        let result = handle
-            .node
-            .with_server(|server| risepir_rpc::state::save(server, &codec, complete, &path))
-            .await;
-        match result {
-            Ok(()) => eprintln!("risepir-rpc mainnet: state saved; exiting"),
+    // The final save goes through the same StateSaver the follow loop's
+    // periodic saves use (ADR-0025): its mutex is what stops this save
+    // from writing `<path>.tmp` concurrently with an in-flight autosave —
+    // interleaved writers would produce garbage and rename it over the
+    // previous good file. `save_now` waits for any running save, then
+    // always writes the current state.
+    if let Some(saver) = &handle.saver {
+        eprintln!("risepir-rpc mainnet: shutdown signal — saving state ...");
+        match saver.save_now(&handle.node, "shutdown").await {
+            Ok(_) => eprintln!("risepir-rpc mainnet: state saved; exiting"),
             Err(e) => eprintln!("risepir-rpc mainnet: WARNING: state save failed: {e}"),
         }
     }
@@ -172,17 +178,6 @@ async fn run_client(cfg: FrontConfig) {
     println!("Try:  cast balance <address> --rpc-url http://{}", handle.rpc_addr);
 
     std::future::pending::<()>().await;
-}
-
-/// The mainnet deployment's fixed value codec — mirrors
-/// `mainnet::value_codec` (crate-private there; the widths are part of
-/// the deployment's identity, not a CLI knob).
-fn mainnet_value_codec() -> risepir_proto::ValueCodec {
-    risepir_proto::ValueCodec {
-        key_tag_bits: 32,
-        balance_bits: 96,
-        checksum_bits: 16,
-    }
 }
 
 // ─── flag parsing (hand-rolled; see the Stage-0.4 note in git history) ──
@@ -243,6 +238,7 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--snapshot-block" => cfg.snapshot_block = Some(parse_next(args, &mut i, "--snapshot-block")),
             "--snapshot-accounts" => cfg.snapshot_accounts = Some(parse_next(args, &mut i, "--snapshot-accounts")),
             "--state" => cfg.state = Some(next_value(args, &mut i, "--state").into()),
+            "--save-interval" => cfg.save_interval_secs = parse_next(args, &mut i, "--save-interval"),
             "--partial" => {
                 cfg.partial = true;
                 i += 1;
@@ -307,7 +303,7 @@ fn print_usage() {
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--web <dir>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
-    eprintln!("                      [--state <file>] [--partial] [--partial-capacity <N>]");
+    eprintln!("                      [--state <file>] [--save-interval <secs>] [--partial] [--partial-capacity <N>]");
     eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
@@ -315,6 +311,9 @@ fn print_usage() {
     eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
     eprintln!();
     eprintln!("mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial.");
+    eprintln!("--save-interval (default 1800, 0 = off) bounds how far the --state file can fall behind");
+    eprintln!("the running server: the follow loop rewrites it that many seconds after the previous");
+    eprintln!("save finished, so an ungraceful kill replays minutes, not the whole uptime (ADR-0025).");
     eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
     eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
     eprintln!("--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind");
@@ -399,6 +398,23 @@ mod tests {
                 "https://b.test".to_string(),
                 "https://c.test".to_string()
             ]
+        );
+    }
+
+    /// `--save-interval` parses, and its default matches ADR-0025's
+    /// choice (30 min) — an accidental `0` default would silently
+    /// reintroduce the unbounded-staleness behavior this flag exists to
+    /// bound.
+    #[test]
+    fn save_interval_parses_and_defaults_on() {
+        assert_eq!(parse_mainnet(&args(&["--partial"])).save_interval_secs, 1800);
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--save-interval", "60"])).save_interval_secs,
+            60
+        );
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--save-interval", "0"])).save_interval_secs,
+            0
         );
     }
 

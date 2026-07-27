@@ -49,6 +49,7 @@ pub mod rpc;
 pub mod autosave;
 pub mod demo;
 pub mod front;
+pub mod journal;
 pub mod mainnet;
 pub mod state;
 

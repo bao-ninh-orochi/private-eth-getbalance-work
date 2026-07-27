@@ -31,6 +31,15 @@ fn codec() -> ValueCodec {
     }
 }
 
+/// The plaintext width `small_server`'s geometry uses — also what these
+/// tests pass to `StateSaver::new` for journal encoding. None of these
+/// pre-existing autosave tests inspect journal bytes (that is
+/// `tests/journal.rs`'s job), so only *a* valid width matters here, not
+/// this exact one — kept consistent with `small_server` regardless.
+fn plaintext_bits() -> u32 {
+    simple_max_plaintext_bits(64, 4, 32, codec().value_bits(), SimpleParams::DEFAULT_SIGMA)
+}
+
 fn small_server() -> Server {
     let codec = codec();
     let num_buckets = 3 * 64;
@@ -143,6 +152,8 @@ async fn concurrent_saves_reload_consistently() {
         true,
         Duration::from_millis(1),
         None,
+        plaintext_bits(),
+        None,
     ));
 
     let done = Arc::new(AtomicBool::new(false));
@@ -214,7 +225,7 @@ async fn concurrent_saves_reload_consistently() {
     assert!(copies.windows(2).all(|w| w[0].0 < w[1].0), "saved heights must be strictly increasing");
 
     for (saved_block, copy) in &copies {
-        let LoadedState { server: mut loaded, complete } =
+        let LoadedState { server: mut loaded, complete, .. } =
             state::load(copy, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
         assert!(complete);
         assert_eq!(loaded.block(), *saved_block, "file must carry the height it was captured at");
@@ -262,7 +273,7 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     let path = tmp("skip.bin");
     let node = NodeState::new(small_server(), DeltaRing::new(16), true);
     let interval = Duration::from_millis(20);
-    let saver = StateSaver::new(path.clone(), codec(), true, interval, None);
+    let saver = StateSaver::new(path.clone(), codec(), true, interval, None, plaintext_bits(), None);
 
     node.apply_block(&update_for(1)).await.unwrap();
     tokio::time::sleep(interval * 2).await;
@@ -287,7 +298,7 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     ));
 
     // Disabled saver: never due, no matter what.
-    let disabled = StateSaver::new(tmp("disabled.bin"), codec(), true, Duration::ZERO, None);
+    let disabled = StateSaver::new(tmp("disabled.bin"), codec(), true, Duration::ZERO, None, plaintext_bits(), None);
     tokio::time::sleep(interval).await;
     assert_eq!(disabled.maybe_save(&node).await.unwrap(), SaveOutcome::NotDue);
     assert!(!tmp("disabled.bin").exists());
@@ -305,7 +316,7 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
 async fn concurrent_save_now_calls_serialize() {
     let path = tmp("serialize.bin");
     let node = Arc::new(NodeState::new(small_server(), DeltaRing::new(16), true));
-    let saver = Arc::new(StateSaver::new(path.clone(), codec(), true, Duration::ZERO, None));
+    let saver = Arc::new(StateSaver::new(path.clone(), codec(), true, Duration::ZERO, None, plaintext_bits(), None));
     node.apply_block(&update_for(1)).await.unwrap();
 
     let tasks: Vec<_> = (0..2)

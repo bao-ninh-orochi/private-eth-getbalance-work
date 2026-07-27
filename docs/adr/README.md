@@ -711,3 +711,168 @@ the operator instruction after any CRITICAL remains "re-bootstrap, do not
 trust the state file". (3) `ops/systemd/risepir.service` `TimeoutStopSec` rose
 300→900: a SIGINT can now land mid-autosave and must wait for it before the
 final save; two complete-set saves must fit the stop window.
+
+### ADR-0026 — Sidecar delta journal beside the state file, restore opt-in behind a soak period **[NEW — revisits ADR-0025's rejection]**
+
+**Chosen:** an append-only `<state>.journal` (format `RPJL1`) recording one
+`BlockDelta` + `num_items_after` per applied block, header-bound to a specific
+base file by its `RPST2` trailing xxh3 digest (`state::SaveReport::digest`).
+Writing is **always on** once a first full save exists (`StateSaver` owns the
+current `JournalWriter`, rotating it — a fresh `create` bound to the new
+digest/height — strictly after each successful save's rename). Restoring from
+it is **opt-in**, `--journal-restore` (default off): off, the journal is only
+*scanned* read-only at startup and reported (`journal intact: N records to
+block X (--journal-restore to use)`) — the soak signal an operator watches
+before trusting it; on, every valid record is replayed onto the raw
+cells/hints *before* the store is constructed, so the server resumes at the
+journal's height instead of the base file's.
+
+**Rejected (this repo, again):** everything ADR-0025 rejected remains
+rejected for the same reasons (a separate timer task's fairness stall, a
+cell-snapshot copy, `fork()` COW, external periodic restart) — see that ADR.
+Also rejected here specifically: **content-defined-chunking dedup of the full
+image** (would still cost a diff pass over tens of GB per interval to find
+what changed — the semantic delta is already known for free, from the same
+fold step that patches the hint); **a mutable in-place state image**
+(overwriting slots as blocks apply removes the atomic-rename safety net
+entirely — a crash mid-write corrupts the *only* copy — so it would need a
+write-ahead log of its own to be crash-safe, which is this journal by another
+name, minus the existing battle-tested full-file format as a recovery
+floor); **filesystem/persistent-disk snapshots** (a snapshot is a point the
+*infrastructure* chooses, not one `apply_block` chose — it can land mid-write
+to the state file's `.tmp`, and even a clean snapshot only ever recovers to
+some past full-save-equivalent, buying nothing over the full save alone);
+**fork/COW** (unchanged from ADR-0025 — still unavailable on non-unix, still
+UB-adjacent for a multithreaded tokio process).
+
+**Why the previous rejection is now reversed:** ADR-0025 rejected exactly this
+shape — *"it adds a second persistence format and a second reconstruction
+path, both of which can silently produce exactly the inconsistent-server
+outcome this repo treats as total failure (a journal entry applied to the
+wrong base, a torn tail mis-handled, hint-vs-cell drift in replay)"* — and
+that risk was real, not hypothetical caution. This design does not dissolve
+it; it **contains** it, with the containment itself being the ADR:
+
+1. **A journal entry can never apply to the wrong base.** The header commits
+   to the exact base digest at creation time; a loader that does not see a
+   matching digest never touches a byte of the payload (`base_mismatch_*`
+   tests, `journal.rs` / `tests/journal.rs`) — "wrong base" degrades to
+   "journal ignored", never to "journal misapplied".
+2. **A torn tail cannot mis-handle itself into corruption.** The reader is a
+   streaming validator with two failure classes, never three: *pre-apply*
+   (bad checksum, decode error, height gap, truncated/oversized record) always
+   **stops at the last good record** and reports where — the scan never
+   errors the whole read, and it never skips a bad record and continues past
+   it (`ScanStop::Invalid`, pinned by five dedicated tests: torn tail,
+   mid-file bit flip, height gap, oversized length, a length exceeding the
+   remaining file size). *Apply-time* (the `0 <= cell + Δ < p` bound —
+   ADR-0005's own integrity check, now checked during replay instead of only
+   during live application) is the one failure this repo treats as
+   unrecoverable **from inside the replay**, and it is handled by refusing to
+   serve at all (`RestoreError::ApplyFailure` → `die()`) rather than guessing
+   which prefix is still trustworthy — happening before serving starts, per
+   this repo's standing rule, dying is the honest move.
+3. **Hint-vs-cell drift cannot happen** because both are patched from the
+   *same* decoded record in the same loop iteration, via the same
+   `server_patch_hint` call the live `apply_block` path uses — replay is not
+   a second implementation of "how a block changes the database", it is the
+   same fold-and-patch step already measured against a real `IkpirServer`
+   oracle (ADR-0004's `batched_equals_per_mutation`), now driven by a decoded
+   `BlockDelta` instead of a fresh mutation-log drain.
+4. **A restore is never trusted silently.** `--journal-restore` is off by
+   default; off, the journal only ever gets *scanned*, and the loud report
+   line is the mechanism for building confidence in a specific deployment's
+   journal before flipping the flag — the soak period ADR-0025's authors did
+   not have when they wrote "revisit only if the save duration itself becomes
+   the problem." (It has: at the complete mainnet set a full save is minutes
+   long and costs ~1.7 TB/day of writes at the default interval — the
+   motivating problem this ADR exists to relieve, once the operator trusts
+   the soak evidence enough to raise `--save-interval` to hours.)
+
+**The `H`-churn argument (why a journal buys anything at all):** `server_patch_hint`'s
+documented contract makes `H` a *deterministic function of the delta stream* —
+replaying the same `BlockDelta`s reproduces the identical hint bytes a live
+server would have, bit for bit (this is exactly what
+`journal_replay_matches_live_apply` pins). So nothing is lost by persisting
+the ~15–30 KB/block *semantic* delta instead of the ~25–40 MB/block of literal
+`H` + cell-array byte churn a periodic full save re-writes wholesale — the
+journal is not a compression trick over the full save, it is the observation
+that most of what a full save re-writes did not need writing again at all.
+
+**`num_items_after` rides on the wire because replay cannot derive it.** A
+delete and an insert both look like "some cells changed" to the fold step —
+nothing in a `BlockDelta` distinguishes "this row went from occupied to
+empty" from "this row's fingerprint changed" without re-deriving the whole
+cuckoo placement logic during replay. Carrying the true post-block count
+avoids that duplication entirely and sidesteps whatever validation
+`Segmented3aryCuckooKVStore::from_cells` might someday grow: **verified in
+the local RisePIR checkout that today it performs none** — `num_items` is
+"not validated against `cells`; trust-on-restore" (`store.rs`'s own doc
+comment) — so the true count is not required for `from_cells` to succeed, but
+it is required for `num_items()` to *report the truth* afterward, which this
+repo's balance-correctness posture demands regardless of what any one
+version of the store happens to check.
+
+**Rotation ordering is load-bearing, and is a known, accepted residual, not a
+hidden gap:** the base save's rename is the commit point; journal rotation
+(`JournalWriter::create` against the *new* digest) runs strictly after. A
+crash in the narrow window between them leaves `(new base, old journal)` —
+digests that do not match — which a restart's loader detects
+(`header.base_digest != loaded.digest`) and ignores loudly, falling back to
+the base alone. The window is real but its failure mode is exactly
+"journaling degrades to the previous save's cadence for one cycle," never a
+wrong answer.
+
+**Adoption rules (when an existing on-disk journal is trusted to keep
+appending, versus left untouched):** an appender is only ever adopted in two
+shapes — restart-time (either restore mode) once a journal's header is
+confirmed to match the loaded base — and freshly `create`d right after a
+snapshot bootstrap's own first save. With `--journal-restore` off and the
+journal *ahead* of the loaded base (the base file records block B, the
+journal's last valid record is beyond B — the ordinary state after any
+kill -9 between autosaves), the journal is deliberately left **untouched**:
+adopting it would set the writer's continuity state past B, and the very
+next live append (B+1) would then look like a gap to a writer that thinks it
+is already past B+1 — so this run journals nothing until the next save's
+rotation starts a fresh file at whatever height that save lands on. The file
+itself is never deleted or overwritten in this state — it is someone's
+recovery data until `--journal-restore` says otherwise.
+
+**Evidence.** Unit-level (`crates/risepir-rpc/src/journal.rs`, 14 tests):
+header corruption/checksum mismatch, base mismatch, torn tail, mid-file bit
+flip, height gap, oversized length (both the absolute `MAX_RECORD_BYTES` cap
+and the independent remaining-file-size bound), an empty (header-only)
+journal, `append`'s own gap refusal, `adopt`'s tail-truncation-and-resume.
+Integration-level (`crates/risepir-rpc/tests/journal.rs`, 7 tests):
+`journal_replay_matches_live_apply` — the load-bearing one — replays a real
+journal (written by a real `JournalWriter` fed real `NodeState::apply_block`
+deltas, including a genuine delete and a withdrawal credit) through the real
+`state::load_with_journal_restore` path and asserts byte-exact cells, encoded
+setup (hints + params + block), `num_items()`, and individual balances
+(the deleted account reading back `None`, the credited one matching); the
+other six pin torn-tail recovery via `adopt`, corruption stopping replay
+exactly there, base mismatch falling back to a plain load, a hand-enforced
+gap, tail-deltas seeding `NodeState::seed_history` in the right order and
+count, and `u32::MAX`-length hostility never allocating. Fuzz:
+`fuzz/fuzz_targets/journal_scan.rs` mirrors `state_load.rs` against arbitrary
+bytes. Smoke, on this Mac against real mainnet (`--partial`,
+2026-07-27): one autosave + several more blocks applied and journaled, then
+`kill -9`; a restart with `--journal-restore` logged
+`journal replayed: 11 block(s) in 0.3s — resuming at block 25620745 (base was
+25620734)` — 11 blocks recovered that a plain restart would have replayed
+from the network instead; a second restart without the flag logged
+`journal intact: 13 records to block 25620747 (--journal-restore to use)`
+against the same (now further-advanced) journal, correctly identified it as
+ahead of the reloaded base, and left it untouched; a final `Ctrl-C` produced
+the ordinary graceful shutdown save and rotated the journal to the new
+height, ending at a clean, empty (header-only) file — exactly the documented
+behavior in every branch, not just the happy path.
+
+**Staged posture, restated plainly:** the payoff configuration is a long
+`--save-interval` (hours) plus `--journal-restore` — ~150 MB/day of journal
+writes recovering to within seconds of the last applied block, instead of
+~1.7 TB/day buying minutes. Nothing here forces that combination; the
+default (`--journal-restore` off, `--save-interval` unchanged) is
+byte-for-byte today's behavior plus a sidecar file and a report line, which
+is the point — the feature must be free to ignore before it is trusted to
+lean on.

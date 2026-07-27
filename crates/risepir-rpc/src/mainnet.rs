@@ -49,11 +49,12 @@ use risepir_client::RisePirClient;
 use risepir_feed::rpc::{FetchedBlock, RpcClient, RpcFeed};
 use risepir_feed::snapshot;
 use risepir_http::{NodeState, PirHttpClient};
-use risepir_proto::{keccak256, Backend, Geometry, ValueCodec};
+use risepir_proto::{keccak256, Backend, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::Segmented3aryCuckooKVStore;
 
 use crate::autosave::StateSaver;
+use crate::journal::{self, JournalWriter, ScanStop};
 use crate::private_eth::PrivateEth;
 use crate::state;
 
@@ -123,6 +124,14 @@ pub struct MainnetConfig {
     /// with [`Self::state`]. See ADR-0025 for why the save runs inside
     /// the follow loop rather than on its own timer task.
     pub save_interval_secs: u64,
+    /// `--journal-restore` (default `false`): when a `--state` file and
+    /// its `.journal` sidecar both exist and the journal's header matches
+    /// the file's digest, replay the journal onto the loaded state before
+    /// serving starts, resuming above the base file's own height instead
+    /// of at it. Off by default: with it off, the journal is only
+    /// *scanned* (report-only — `docs/adr/README.md` ADR-0026) so an
+    /// operator can watch it accumulate real evidence before trusting it.
+    pub journal_restore: bool,
     /// Bootstrap empty at the current finalized block (see module docs).
     pub partial: bool,
     /// Geometry capacity for `--partial` (accounts). ~600 distinct
@@ -168,6 +177,7 @@ impl Default for MainnetConfig {
             // duration, so a kill -9 costs minutes of replay instead of
             // hours (ADR-0025 has the arithmetic and the disk-write cost).
             save_interval_secs: 1800,
+            journal_restore: false,
             partial: false,
             partial_capacity: 4_000_000,
             proxy_upstream: None,
@@ -210,6 +220,33 @@ fn die(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
+/// What the bootstrap arm ("state file > snapshot > partial") produces,
+/// beyond the server itself — the extra plumbing state-save/journal
+/// wiring needs (ADR-0025 / ADR-0026).
+struct Bootstrap {
+    /// The reassembled or freshly built server.
+    server: state::Server,
+    /// Whether it serves the complete nonzero-balance set.
+    complete: bool,
+    /// Height actually persisted at `cfg.state`'s path right now, if any
+    /// — seeds [`StateSaver`]'s skip-if-unchanged check (ADR-0025).
+    /// Distinct from the in-memory server's own height whenever
+    /// `--journal-restore` replayed the file forward without yet
+    /// re-saving it: the file on disk still holds the *base* height.
+    on_disk_height: Option<u64>,
+    /// The journal appender to hand [`StateSaver::new`], if one is
+    /// already safe to resume this run (ADR-0026) — an adopted restart,
+    /// or a fresh one created right after a snapshot bootstrap's first
+    /// save. `None` is entirely normal (e.g. partial bootstrap, or a
+    /// restart with `--journal-restore` off and the journal ahead of the
+    /// base) — the next successful save's rotation starts one.
+    initial_journal: Option<JournalWriter>,
+    /// Deltas a `--journal-restore` replay produced, to seed the fresh
+    /// [`NodeState`]'s delta index with ([`NodeState::seed_history`]) —
+    /// empty whenever nothing was replayed.
+    tail_deltas: Vec<BlockDelta>,
+}
+
 /// Build and spawn the whole mainnet stack. Returns once the PIR
 /// transport, JSON-RPC front end, and follow loop are all running.
 pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
@@ -232,10 +269,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     );
 
     // ── Bootstrap: state file > snapshot > partial ─────────────────────
-    // The third tuple element records whether `--state`'s file already
-    // holds the server's current height — it seeds the autosaver's
-    // skip-if-unchanged check (ADR-0025).
-    let (server, complete, state_file_current) = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
+    let bootstrap: Bootstrap = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
         if !cfg.snapshot.is_empty() {
             eprintln!(
                 "risepir-rpc mainnet: note: state file {} exists; --snapshot is ignored \
@@ -243,20 +277,163 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 path.display()
             );
         }
-        eprintln!("risepir-rpc mainnet: loading state from {} ...", path.display());
-        let started = std::time::Instant::now();
-        match state::load(path, backend_config.clone(), &codec) {
-            Ok(state::LoadedState { server, complete }) => {
+        let journal_path = journal::journal_path_for(path);
+
+        if cfg.journal_restore {
+            // ── --journal-restore ON: replay onto raw parts before the
+            // store is built, so the fresh server starts at the
+            // journal's height instead of the base file's own. ──
+            eprintln!("risepir-rpc mainnet: loading state (--journal-restore) from {} ...", path.display());
+            let started = std::time::Instant::now();
+            let restored = state::load_with_journal_restore(path, backend_config.clone(), &codec, cfg.ring_capacity)
+                .unwrap_or_else(|e| die(format!("loading {} with journal restore: {e}", path.display())));
+            let state::RestoredState {
+                loaded: state::LoadedState { server, complete, .. },
+                replayed,
+                base_block,
+                tail_deltas,
+                adopt_at,
+                scan_stop,
+            } = restored;
+            let plaintext_bits = server.params().plaintext_bits;
+
+            eprintln!(
+                "risepir-rpc mainnet: state loaded in {:.1}s — block {}, {} accounts, {}",
+                started.elapsed().as_secs_f64(),
+                server.block(),
+                server.num_items(),
+                if complete { "complete set" } else { "PARTIAL set" },
+            );
+            if let Some(ScanStop::Invalid { offset, reason }) = &scan_stop {
                 eprintln!(
-                    "risepir-rpc mainnet: state loaded in {:.1}s — block {}, {} accounts, {}",
+                    "risepir-rpc mainnet: WARNING: journal replay stopped at byte {offset} ({reason}) — \
+                     the follow loop will fetch the remainder over the network"
+                );
+            }
+            if replayed > 0 {
+                eprintln!(
+                    "risepir-rpc mainnet: journal replayed: {replayed} block(s) in {:.1}s — resuming at block {} (base was {base_block})",
                     started.elapsed().as_secs_f64(),
                     server.block(),
-                    server.num_items(),
-                    if complete { "complete set" } else { "PARTIAL set" },
                 );
-                (server, complete, true)
+            } else if adopt_at.is_some() {
+                eprintln!("risepir-rpc mainnet: journal matched the base but had nothing new to replay");
+            } else {
+                eprintln!("risepir-rpc mainnet: no usable journal found; serving from the base state file alone");
             }
-            Err(e) => die(format!("loading {}: {e}", path.display())),
+
+            let initial_journal = adopt_at.and_then(|(end_offset, end_height)| {
+                match JournalWriter::adopt(&journal_path, plaintext_bits, end_offset, end_height) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        eprintln!("risepir-rpc mainnet: WARNING: could not adopt the journal for continued appending: {e}");
+                        None
+                    }
+                }
+            });
+
+            Bootstrap {
+                server,
+                complete,
+                on_disk_height: Some(base_block),
+                initial_journal,
+                tail_deltas,
+            }
+        } else {
+            // ── --journal-restore OFF (default): load the base exactly
+            // as before, but scan the journal read-only and report what
+            // it would have done — the soak signal (ADR-0026). ──
+            eprintln!("risepir-rpc mainnet: loading state from {} ...", path.display());
+            let started = std::time::Instant::now();
+            let state::LoadedState { server, complete, digest } = state::load(path, backend_config.clone(), &codec)
+                .unwrap_or_else(|e| die(format!("loading {}: {e}", path.display())));
+            eprintln!(
+                "risepir-rpc mainnet: state loaded in {:.1}s — block {}, {} accounts, {}",
+                started.elapsed().as_secs_f64(),
+                server.block(),
+                server.num_items(),
+                if complete { "complete set" } else { "PARTIAL set" },
+            );
+
+            let plaintext_bits = server.params().plaintext_bits;
+            let arity = server.params().arity() as u32;
+            let b = server.block();
+            let initial_journal = match digest {
+                None => {
+                    if journal_path.exists() {
+                        eprintln!(
+                            "risepir-rpc mainnet: journal present but this is a legacy RPST1 state file \
+                             (no digest to bind it to) — ignoring it until the next save upgrades the state file"
+                        );
+                    }
+                    None
+                }
+                Some(digest) => match journal::scan_report_only(&journal_path, digest, plaintext_bits, arity) {
+                    Ok(Some(report)) => {
+                        match &report.stop {
+                            ScanStop::Eof => eprintln!(
+                                "risepir-rpc mainnet: journal intact: {} records to block {} (--journal-restore to use)",
+                                report.count, report.end_height
+                            ),
+                            ScanStop::Invalid { offset, reason } => eprintln!(
+                                "risepir-rpc mainnet: journal corrupt at byte {offset} ({reason}); usable prefix: \
+                                 {} records to block {} (--journal-restore to use)",
+                                report.count, report.end_height
+                            ),
+                        }
+                        // Adopt ONLY if the journal exactly matches this
+                        // base and ends at height B — i.e. it was never
+                        // ahead. Ahead means appending now would gap
+                        // (the next real append is B+1, which the
+                        // journal already has a record for); leave that
+                        // file untouched (it is someone's recovery data)
+                        // and let the next save's rotation start fresh.
+                        if report.end_height == b {
+                            match JournalWriter::adopt(&journal_path, plaintext_bits, report.end_offset, report.end_height) {
+                                Ok(w) => Some(w),
+                                Err(e) => {
+                                    eprintln!("risepir-rpc mainnet: WARNING: could not adopt journal: {e}");
+                                    None
+                                }
+                            }
+                        } else {
+                            eprintln!(
+                                "risepir-rpc mainnet: journal is ahead of the loaded base (block {b}) — leaving it \
+                                 untouched; journaling starts fresh at the next save"
+                            );
+                            None
+                        }
+                    }
+                    Ok(None) => {
+                        // Absent is the normal quiet case; present-but-
+                        // unusable (corrupt header, or bound to a
+                        // different save — e.g. a crash landed between a
+                        // base save and its journal rotation) deserves a
+                        // line: silently ignoring a file the operator may
+                        // be counting on is how soak evidence gets lost.
+                        if journal_path.exists() {
+                            eprintln!(
+                                "risepir-rpc mainnet: journal present but unusable for this base (corrupt \
+                                 header, or bound to a different save) — ignoring it; the next save starts \
+                                 a fresh one"
+                            );
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("risepir-rpc mainnet: WARNING: could not scan journal {}: {e}", journal_path.display());
+                        None
+                    }
+                },
+            };
+
+            Bootstrap {
+                server,
+                complete,
+                on_disk_height: Some(b),
+                initial_journal,
+                tail_deltas: Vec::new(),
+            }
         }
     } else if !cfg.snapshot.is_empty() {
         let snapshot_block = cfg
@@ -323,25 +500,41 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             started.elapsed().as_secs_f64()
         );
 
-        let mut saved = false;
+        let mut on_disk_height = None;
+        let mut initial_journal = None;
         if let Some(path) = &cfg.state {
             eprintln!("risepir-rpc mainnet: saving state to {} ...", path.display());
             let started = std::time::Instant::now();
             match state::save(&server, &codec, true, path) {
-                Ok(bytes) => {
+                Ok(state::SaveReport { bytes, digest }) => {
                     eprintln!(
                         "risepir-rpc mainnet: state saved: block {snapshot_block}, {:.2} GB in {:.1}s",
                         bytes as f64 / 1e9,
                         started.elapsed().as_secs_f64(),
                     );
-                    saved = true;
+                    on_disk_height = Some(snapshot_block);
+                    // The very first journal for this deployment: bound
+                    // to the save that just landed, so the follow loop's
+                    // next append (snapshot_block + 1) is contiguous
+                    // from the start.
+                    let journal_path = journal::journal_path_for(path);
+                    match JournalWriter::create(&journal_path, digest, snapshot_block, server.params().plaintext_bits) {
+                        Ok(w) => initial_journal = Some(w),
+                        Err(e) => eprintln!("risepir-rpc mainnet: WARNING: could not create the initial journal: {e}"),
+                    }
                 }
                 // Non-fatal: the server is correct in memory; only restart
                 // speed is lost. Say so and continue.
                 Err(e) => eprintln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"),
             }
         }
-        (server, true, saved)
+        Bootstrap {
+            server,
+            complete: true,
+            on_disk_height,
+            initial_journal,
+            tail_deltas: Vec::new(),
+        }
     } else if cfg.partial {
         let fin = match feed.finalized().await {
             Ok(f) => f,
@@ -364,27 +557,63 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         eprintln!(
             "risepir-rpc mainnet: partial mode serves only accounts touched from here on; everything else ERRORS (never 0x0)."
         );
-        (RisePirServer::new(store, backend_config.clone(), codec, fin), false, false)
+        Bootstrap {
+            server: RisePirServer::new(store, backend_config.clone(), codec, fin),
+            complete: false,
+            on_disk_height: None,
+            initial_journal: None,
+            tail_deltas: Vec::new(),
+        }
     } else {
         die("need a data source: --snapshot <csv[.gz]> --snapshot-block <N> (complete), or --state <file> (restart), or --partial (demo)");
     };
 
+    let Bootstrap {
+        server,
+        complete,
+        on_disk_height,
+        initial_journal,
+        tail_deltas,
+    } = bootstrap;
     let head_at_start = server.block();
+    let plaintext_bits = server.params().plaintext_bits;
     let node = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), complete));
+    if !tail_deltas.is_empty() {
+        // Restore-mode only (module docs, `NodeState::seed_history`):
+        // these are exactly the deltas just replayed into this same
+        // head, so `GET /delta`/`GET /sync` cover them immediately
+        // instead of waiting for the follow loop to re-derive that
+        // history one live block at a time.
+        node.seed_history(tail_deltas).await;
+    }
 
-    // ── State autosave (ADR-0025) ──────────────────────────────────────
+    // ── State autosave (ADR-0025) + delta journal (ADR-0026) ───────────
     // One saver per `--state` path, shared between the follow loop (the
     // periodic trigger) and main's Ctrl-C path (the final save) so the
-    // two can never write `<path>.tmp` concurrently.
+    // two can never write `<path>.tmp` concurrently; it also owns the
+    // current journal appender end to end (rotation on every successful
+    // save, appends from the follow loop).
     let saver = cfg.state.as_ref().map(|path| {
         Arc::new(StateSaver::new(
             path.clone(),
             codec,
             complete,
             Duration::from_secs(cfg.save_interval_secs),
-            state_file_current.then_some(head_at_start),
+            on_disk_height,
+            plaintext_bits,
+            initial_journal,
         ))
     });
+    if let Some(path) = &cfg.state {
+        // Whatever a state-file-exists restart already reported above
+        // (journal intact / corrupt / ahead / nothing to report) stands;
+        // this is the one summary line every bootstrap path prints.
+        eprintln!(
+            "risepir-rpc mainnet: journal: writing to {} (--journal-restore {})",
+            journal::journal_path_for(path).display(),
+            if cfg.journal_restore { "ON" } else { "OFF" }
+        );
+    }
 
     // ── PIR HTTP transport ─────────────────────────────────────────────
     // Loaded before binding anything: a missing or unreadable asset is a
@@ -561,13 +790,23 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 update.credits = kept;
             }
 
-            if let Err(e) = node.apply_block(&update).await {
-                critical(&format!(
-                    "apply_block({n}) failed: {e} — serving stays at block {last}; re-bootstrap required"
-                ));
-                return;
-            }
+            let delta = match node.apply_block(&update).await {
+                Ok(d) => d,
+                Err(e) => {
+                    critical(&format!(
+                        "apply_block({n}) failed: {e} — serving stays at block {last}; re-bootstrap required"
+                    ));
+                    return;
+                }
+            };
             last = n;
+
+            // Delta journal (ADR-0026): one append per applied block,
+            // outside any lock this loop holds (it holds none here).
+            if let Some(saver) = &cfg.saver {
+                let n_items = node.with_server(|s| s.num_items()).await;
+                saver.append_delta(&delta, n_items).await;
+            }
 
             // Feed `GET /recent` (ADR-0019). Only *after* a successful
             // apply: an address is offered to the front end as queryable

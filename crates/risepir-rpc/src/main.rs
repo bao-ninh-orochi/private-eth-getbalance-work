@@ -239,6 +239,10 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--snapshot-accounts" => cfg.snapshot_accounts = Some(parse_next(args, &mut i, "--snapshot-accounts")),
             "--state" => cfg.state = Some(next_value(args, &mut i, "--state").into()),
             "--save-interval" => cfg.save_interval_secs = parse_next(args, &mut i, "--save-interval"),
+            "--journal-restore" => {
+                cfg.journal_restore = true;
+                i += 1;
+            }
             "--partial" => {
                 cfg.partial = true;
                 i += 1;
@@ -303,7 +307,8 @@ fn print_usage() {
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--web <dir>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
-    eprintln!("                      [--state <file>] [--save-interval <secs>] [--partial] [--partial-capacity <N>]");
+    eprintln!("                      [--state <file>] [--save-interval <secs>] [--journal-restore]");
+    eprintln!("                      [--partial] [--partial-capacity <N>]");
     eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
@@ -314,6 +319,9 @@ fn print_usage() {
     eprintln!("--save-interval (default 1800, 0 = off) bounds how far the --state file can fall behind");
     eprintln!("the running server: the follow loop rewrites it that many seconds after the previous");
     eprintln!("save finished, so an ungraceful kill replays minutes, not the whole uptime (ADR-0025).");
+    eprintln!("--state also always writes a <state>.journal delta sidecar once a first full save exists");
+    eprintln!("(ADR-0026). --journal-restore (default off) replays it at startup, resuming above the");
+    eprintln!("last full save instead of at it; off, it is only scanned and reported (soak signal).");
     eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
     eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
     eprintln!("--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind");
@@ -416,6 +424,19 @@ mod tests {
             parse_mainnet(&args(&["--partial", "--save-interval", "0"])).save_interval_secs,
             0
         );
+    }
+
+    /// `--journal-restore` is a bare flag, default off (ADR-0026): the
+    /// soak posture — an operator opts in only once the report-only scan
+    /// has shown a healthy journal for a while.
+    #[test]
+    fn journal_restore_is_a_bare_flag_defaulting_off() {
+        assert!(!parse_mainnet(&args(&["--partial"])).journal_restore);
+        assert!(parse_mainnet(&args(&["--partial", "--journal-restore"])).journal_restore);
+        // Must not consume a following value as its own argument.
+        let cfg = parse_mainnet(&args(&["--journal-restore", "--partial-capacity", "42"]));
+        assert!(cfg.journal_restore);
+        assert_eq!(cfg.partial_capacity, 42);
     }
 
     /// The repeatable flag must not have disturbed its neighbours.

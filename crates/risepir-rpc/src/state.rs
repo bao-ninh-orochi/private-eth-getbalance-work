@@ -44,11 +44,13 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use ikpir_common::SimplePirBackend;
+use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend, SimplePirBackend};
 use risepir_http::wire;
-use risepir_proto::ValueCodec;
+use risepir_proto::{BlockDelta, ValueCodec};
 use risepir_server::{RisePirServer, SetupBundle};
-use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
+use segmented_cuckoo::{CuckooParams, Segmented3aryCuckooKVStore, Segmented3aryScheme};
+
+use crate::journal::{self, JournalReader, ScanStop};
 
 const MAGIC_V1: &[u8; 5] = b"RPST1";
 const MAGIC: &[u8; 5] = b"RPST2";
@@ -68,6 +70,13 @@ pub struct LoadedState {
     pub server: Server,
     /// Whether the persisted set was complete (snapshot-bootstrapped).
     pub complete: bool,
+    /// The file's trailing whole-file xxh3 digest — `Some` for `RPST2`
+    /// (the verified checksum every current save produces), `None` for a
+    /// legacy `RPST1` file (no such checksum exists to report). A delta
+    /// journal (`docs/adr/README.md` ADR-0026) binds itself to this
+    /// digest, so `None` here means any journal sitting beside this file
+    /// is unusable until the next save upgrades it to `RPST2`.
+    pub digest: Option<u64>,
 }
 
 /// Errors from [`save`] / [`load`]. Strings carry enough context to
@@ -145,14 +154,29 @@ impl<R: Read> Read for HashingReader<R> {
     }
 }
 
+/// What [`save`] produced: the file's total byte size and its trailing
+/// `RPST2` checksum. The checksum is what
+/// [`crate::journal::JournalWriter::create`] binds a fresh journal to at
+/// rotation (`docs/adr/README.md` ADR-0026), so a journal can never
+/// silently extend the wrong base file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveReport {
+    /// Total byte size of the file written.
+    pub bytes: u64,
+    /// The trailing whole-file xxh3 digest [`save`] computed while
+    /// streaming the write — identical to what a subsequent [`load`]
+    /// would verify.
+    pub digest: u64,
+}
+
 /// Serialize `server` (+ the completeness marker) to `path`, atomically
 /// (`<path>.tmp` + rename, with the data fsynced *before* the rename so a
 /// power cut cannot replace the previous good file with one whose bytes
 /// never reached the disk). Always writes the current (`RPST2`,
-/// checksummed) format. Returns the byte size of the file produced.
-pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) -> Result<u64, StateError> {
+/// checksummed) format.
+pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) -> Result<SaveReport, StateError> {
     let tmp = path.with_extension("tmp");
-    let total = {
+    let (total, digest) = {
         let file = File::create(&tmp).map_err(io_err)?;
         let mut w = HashingWriter {
             inner: BufWriter::new(file),
@@ -198,10 +222,24 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
         // lottery ticket.)
         let file = w.inner.into_inner().map_err(io_err)?;
         file.sync_all().map_err(io_err)?;
-        w.written + 8
+        (w.written + 8, digest)
     };
     std::fs::rename(&tmp, path).map_err(io_err)?;
-    Ok(total)
+    Ok(SaveReport { bytes: total, digest })
+}
+
+/// Crate-visible raw materials behind a loaded state file, from *before*
+/// store reconstruction — what [`load_with_journal_restore`] needs to
+/// mutate (cells, hints, `num_items`, `block`) prior to the store/server
+/// being built from them. Not `pub`: nothing outside this crate needs a
+/// state file's insides this raw; [`load`] / [`load_bytes`] still return
+/// the fully assembled [`LoadedState`] they always have.
+pub(crate) struct RawState {
+    pub(crate) cells: Vec<u32>,
+    pub(crate) setup: SetupBundle<SimplePirBackend>,
+    pub(crate) num_items: u64,
+    pub(crate) complete: bool,
+    pub(crate) digest: Option<u64>,
 }
 
 /// Read a state file back into a running server. `config` must be the
@@ -222,13 +260,23 @@ pub fn load_bytes(bytes: &[u8], config: ikpir_common::SimpleConfig, codec: &Valu
     load_from(bytes, bytes.len() as u64, config, codec)
 }
 
-/// The single decode path behind [`load`] / [`load_bytes`]. `total_len`
-/// is the input's real size, used to bound every header-declared length
-/// *before* it sizes an allocation — a corrupt or hostile file must
-/// produce a clean [`StateError`], never an OOM (the repo's
-/// validate-every-length rule applies to state files too, not just the
-/// network).
-fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+/// Crate-visible twin of [`load`] that stops short of store
+/// reconstruction — the entry point [`load_with_journal_restore`] uses so
+/// it can mutate the raw cells/hints before any store exists.
+pub(crate) fn load_raw(path: &Path, codec: &ValueCodec) -> Result<RawState, StateError> {
+    let file = File::open(path).map_err(io_err)?;
+    let total_len = file.metadata().map_err(io_err)?.len();
+    parse_raw(BufReader::new(file), total_len, codec)
+}
+
+/// The single decode path behind [`load`] / [`load_bytes`] / [`load_raw`].
+/// `total_len` is the input's real size, used to bound every
+/// header-declared length *before* it sizes an allocation — a corrupt or
+/// hostile file must produce a clean [`StateError`], never an OOM (the
+/// repo's validate-every-length rule applies to state files too, not just
+/// the network). Stops short of store reconstruction — see [`RawState`]
+/// and [`assemble`].
+fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<RawState, StateError> {
     let mut r = HashingReader {
         inner: reader,
         hasher: xxhash_rust::xxh3::Xxh3::new(),
@@ -285,12 +333,8 @@ fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConf
     let setup_len = usize::try_from(setup_len).map_err(|_| StateError::Corrupt("setup_len overflow".to_string()))?;
     let mut setup_bytes = vec![0u8; setup_len];
     r.read_exact(&mut setup_bytes).map_err(io_err)?;
-    let SetupBundle {
-        params,
-        backend_params,
-        hints,
-        block,
-    } = wire::decode_setup(&setup_bytes).map_err(|e| StateError::Corrupt(format!("setup section: {e}")))?;
+    let setup = wire::decode_setup(&setup_bytes).map_err(|e| StateError::Corrupt(format!("setup section: {e}")))?;
+    let params = setup.params;
 
     let cells_len = read_u64(&mut r)?;
     let cells_len = usize::try_from(cells_len).map_err(|_| StateError::Corrupt("cells_len overflow".to_string()))?;
@@ -314,7 +358,7 @@ fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConf
         filled += take;
     }
 
-    if checksummed {
+    let digest = if checksummed {
         // v2: the whole-file xxh3 covers every byte read so far. Read the
         // stored digest *unhashed* (it cannot cover itself) and compare.
         let computed = r.hasher.digest();
@@ -327,7 +371,10 @@ fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConf
                  the file is corrupt; restore from backup or re-bootstrap"
             )));
         }
-    }
+        Some(computed)
+    } else {
+        None
+    };
 
     // Anything after the cells (+ v2 checksum) is corruption, same
     // posture as the wire codecs' TrailingBytes.
@@ -338,10 +385,237 @@ fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConf
         Err(e) => return Err(io_err(e)),
     }
 
-    let store = Segmented3aryCuckooKVStore::from_cells(cells, params, num_items)
+    Ok(RawState {
+        cells,
+        setup,
+        num_items,
+        complete,
+        digest,
+    })
+}
+
+/// Assembles a [`LoadedState`] from [`RawState`]'s parts: reconstructs the
+/// store via `Segmented3aryCuckooKVStore::from_cells` and the server via
+/// [`Server::from_parts`]. Shared by the plain load path ([`load_from`])
+/// and the journal-restore path ([`load_with_journal_restore`]), which
+/// mutates `cells` / `setup.hints` / `num_items` / `setup.block` in place
+/// before calling this.
+pub(crate) fn assemble(raw: RawState, config: ikpir_common::SimpleConfig, codec: ValueCodec) -> Result<LoadedState, StateError> {
+    let store = Segmented3aryCuckooKVStore::from_cells(raw.cells, raw.setup.params, raw.num_items)
         .map_err(|e| StateError::Corrupt(format!("store reconstruction: {e:?}")))?;
-    let server = Server::from_parts(store, config, *codec, backend_params, hints, block);
-    Ok(LoadedState { server, complete })
+    let server = Server::from_parts(store, config, codec, raw.setup.backend_params, raw.setup.hints, raw.setup.block);
+    Ok(LoadedState {
+        server,
+        complete: raw.complete,
+        digest: raw.digest,
+    })
+}
+
+fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+    let raw = parse_raw(reader, total_len, codec)?;
+    assemble(raw, config, *codec)
+}
+
+/// Errors from [`load_with_journal_restore`] — distinguishes the two
+/// failure classes `docs/adr/README.md` ADR-0026 requires.
+#[derive(Debug)]
+pub enum RestoreError {
+    /// The base state file itself failed to load — identical to a plain
+    /// [`load`] failure; the journal was never reached.
+    State(StateError),
+    /// Every *pre-apply* check on a journal record passed (it decoded
+    /// cleanly, its checksum matched, its height was contiguous) but
+    /// actually **applying** it — the `0 <= cell + delta < p` bound, or a
+    /// geometry mismatch this base's segments cannot even index — failed.
+    /// Deliberately not treated as "stop and use the good prefix": the
+    /// in-memory cells this replay was mutating are now torn mid-block,
+    /// and there is no good prefix to fall back to from inside this
+    /// function. The caller (`mainnet.rs`) runs this before serving
+    /// starts, so refusing to proceed at all is the honest response —
+    /// never serve from it (ADR-0026 rule 3).
+    ApplyFailure(String),
+}
+
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::State(e) => write!(f, "{e}"),
+            Self::ApplyFailure(m) => write!(f, "journal replay apply-time failure: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+impl From<StateError> for RestoreError {
+    fn from(e: StateError) -> Self {
+        Self::State(e)
+    }
+}
+
+/// What a successful [`load_with_journal_restore`] produced, beyond the
+/// assembled [`LoadedState`] itself.
+pub struct RestoredState {
+    /// The assembled server: at the journal's final replayed height, or
+    /// the base's own height if nothing was replayed.
+    pub loaded: LoadedState,
+    /// How many journal records were successfully replayed (`0` if there
+    /// was no journal, it did not match this base, or its header was
+    /// corrupt — all of which degrade gracefully to the base alone).
+    pub replayed: u64,
+    /// The base height *before* replay — for the startup log line's
+    /// "(base was B)".
+    pub base_block: u64,
+    /// The most recent replayed deltas, oldest first, capped at the
+    /// caller's `ring_capacity` — exactly what
+    /// [`risepir_http::NodeState::seed_history`] needs so `GET /delta` and
+    /// `GET /sync` cover the replayed tail immediately.
+    pub tail_deltas: Vec<BlockDelta>,
+    /// `Some((valid_end_offset, last_valid_height))` a fresh
+    /// [`crate::journal::JournalWriter::adopt`] call should resume from —
+    /// `None` when no journal was actually consulted (nothing to adopt;
+    /// the next save's rotation starts a fresh one).
+    pub adopt_at: Option<(u64, u64)>,
+    /// Why the journal scan stopped, if a journal was consulted at all.
+    pub scan_stop: Option<ScanStop>,
+}
+
+/// Applies one block's per-segment cell deltas directly to a flat cell
+/// array, enforcing `0 <= cell + delta < p` per cell (`p = 2^plaintext_bits`)
+/// — the same bound `docs/adr/README.md` ADR-0005 licenses for the wire
+/// codec, checked here because replay mutates cells directly rather than
+/// going through the store's own key-addressed ops.
+fn apply_delta_in_place(cells: &mut [u32], params: &CuckooParams, delta: &BlockDelta) -> Result<(), String> {
+    let segment_size = params.segment_size();
+    let row_width = params.bucket_size * params.cells_per_slot();
+    let seg_cells = segment_size as usize * row_width as usize;
+    let modulus: i64 = 1i64 << params.plaintext_bits;
+
+    for (j, seg_deltas) in delta.per_segment.iter().enumerate() {
+        if seg_deltas.is_empty() {
+            continue;
+        }
+        let start = j * seg_cells;
+        let end = start + seg_cells;
+        let Some(slice) = cells.get_mut(start..end) else {
+            return Err(format!("segment {j} is out of bounds for this base's geometry"));
+        };
+        for (row, edits) in seg_deltas {
+            let row_base = *row as usize * row_width as usize;
+            for (offset, cell_delta) in edits {
+                let idx = row_base + *offset as usize;
+                let Some(cell) = slice.get_mut(idx) else {
+                    return Err(format!("cell index {idx} is out of bounds within segment {j}"));
+                };
+                let updated = i64::from(*cell) + *cell_delta;
+                if updated < 0 || updated >= modulus {
+                    return Err(format!(
+                        "applying delta {cell_delta} to a cell valued {cell} in segment {j} row {row} \
+                         violates 0 <= cell < 2^{} — the in-memory state is now torn mid-block",
+                        params.plaintext_bits
+                    ));
+                }
+                *cell = updated as u32;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Loads `path` and, if its journal (`crate::journal::journal_path_for(path)`)
+/// exists and its header matches this base's digest, replays every valid
+/// record onto the raw cells/hints *before* the store is constructed —
+/// the `--journal-restore` path (`docs/adr/README.md` ADR-0026). A
+/// missing/non-matching/header-corrupt journal, or a legacy (digest-less)
+/// base file, degrades to exactly [`load`]'s result (`replayed: 0`,
+/// `tail_deltas` empty, `adopt_at: None`) — restoring is opportunistic,
+/// never a hard requirement of loading successfully.
+///
+/// # Errors
+///
+/// [`RestoreError::State`] wraps any plain load failure (identical to
+/// calling [`load`] directly — the journal is never reached).
+/// [`RestoreError::ApplyFailure`] if a record that passed every pre-apply
+/// check (decode, checksum, height continuity) then failed to actually
+/// apply — see that variant's docs; this is the one failure this function
+/// cannot itself recover from, by design.
+pub fn load_with_journal_restore(
+    path: &Path,
+    config: ikpir_common::SimpleConfig,
+    codec: &ValueCodec,
+    ring_capacity: usize,
+) -> Result<RestoredState, RestoreError> {
+    let mut raw = load_raw(path, codec)?;
+    let base_block = raw.setup.block;
+    let journal_path = journal::journal_path_for(path);
+
+    let plaintext_bits = raw.setup.params.plaintext_bits;
+    let arity = raw.setup.params.arity() as u32;
+    // Collapses every "nothing to replay" case (legacy digest-less base,
+    // missing journal, corrupt header, or a header that names a
+    // different base) into one `None` — all handled identically below.
+    let opened = raw.digest.and_then(|base_digest| {
+        let file = File::open(&journal_path).ok()?;
+        let total_len = file.metadata().ok()?.len();
+        let (header, reader) = JournalReader::open(BufReader::new(file), total_len, plaintext_bits, arity).ok()?;
+        (header.base_digest == base_digest).then_some(reader)
+    });
+
+    let Some(mut reader) = opened else {
+        let loaded = assemble(raw, config, *codec)?;
+        return Ok(RestoredState {
+            loaded,
+            replayed: 0,
+            base_block,
+            tail_deltas: Vec::new(),
+            adopt_at: None,
+            scan_stop: None,
+        });
+    };
+
+    let material: Vec<_> = raw
+        .setup
+        .backend_params
+        .iter()
+        .map(SimplePirBackend::expand_hint_material)
+        .collect();
+
+    let mut tail: std::collections::VecDeque<BlockDelta> = std::collections::VecDeque::new();
+    let mut replayed = 0u64;
+
+    for rec in reader.by_ref() {
+        apply_delta_in_place(&mut raw.cells, &raw.setup.params, &rec.delta).map_err(RestoreError::ApplyFailure)?;
+        for (j, seg_deltas) in rec.delta.per_segment.iter().enumerate() {
+            if !seg_deltas.is_empty() {
+                SimplePirBackend::server_patch_hint(
+                    &raw.setup.backend_params[j],
+                    &material[j],
+                    &mut raw.setup.hints[j],
+                    seg_deltas,
+                    HintPatchMode::EntryLevel,
+                );
+            }
+        }
+        raw.num_items = rec.num_items_after;
+        raw.setup.block = rec.delta.block;
+        replayed += 1;
+        tail.push_back(rec.delta);
+        while tail.len() > ring_capacity {
+            tail.pop_front();
+        }
+    }
+
+    let scan_stop = reader.stop().cloned();
+    let adopt_at = Some((reader.valid_end_offset(), reader.last_valid_height()));
+    let loaded = assemble(raw, config, *codec)?;
+    Ok(RestoredState {
+        loaded,
+        replayed,
+        base_block,
+        tail_deltas: tail.into_iter().collect(),
+        adopt_at,
+        scan_stop,
+    })
 }
 
 fn read_u32(r: &mut impl Read) -> Result<u32, StateError> {
@@ -404,7 +678,7 @@ mod tests {
         let before = server.setup();
         let path = tmp("roundtrip.bin");
         save(&server, &codec(), true, &path).unwrap();
-        let LoadedState { server: mut reloaded, complete } = load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
+        let LoadedState { server: mut reloaded, complete, .. } = load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
         std::fs::remove_file(&path).unwrap();
 
         assert!(complete);

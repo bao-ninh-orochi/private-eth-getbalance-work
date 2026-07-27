@@ -63,5 +63,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "journal_scan"
+path = "fuzz_targets/journal_scan.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

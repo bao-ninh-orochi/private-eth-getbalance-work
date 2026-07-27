@@ -186,24 +186,63 @@ impl NodeState {
     /// retention exactly in sync with the ring's, with no separate
     /// capacity constant to drift out of agreement.
     ///
+    /// # Returns
+    ///
+    /// The [`BlockDelta`] this block produced (one extra clone of the
+    /// small delta beyond what the ring/`per_block` bookkeeping already
+    /// needed) — the caller (`risepir-rpc`'s mainnet follow loop) hands it
+    /// straight to the state-journal appender (`docs/adr/README.md`
+    /// ADR-0026) without having to re-derive it.
+    ///
     /// # Errors
     ///
     /// Whatever [`RisePirServer::apply_block`] returns — see
     /// [`ServerError`]. On `Err`, nothing is pushed to the ring or
     /// `per_block` (matching that method's own "no partial delta leaks"
     /// guarantee).
-    pub async fn apply_block(&self, update: &BlockUpdate) -> Result<(), ServerError> {
+    pub async fn apply_block(&self, update: &BlockUpdate) -> Result<BlockDelta, ServerError> {
         let mut inner = self.inner.write().await;
         let delta = inner.server.apply_block(update)?;
         inner.ring.push(delta.clone());
-        inner.per_block.insert(delta.block, delta);
+        inner.per_block.insert(delta.block, delta.clone());
         if let Some(oldest) = inner.ring.oldest() {
             let stale: Vec<u64> = inner.per_block.range(..oldest).map(|(b, _)| *b).collect();
             for b in stale {
                 inner.per_block.remove(&b);
             }
         }
-        Ok(())
+        Ok(delta)
+    }
+
+    /// Seeds the ring / per-block delta index from a journal-restore
+    /// replay (`docs/adr/README.md` ADR-0026), so `GET /delta/{block}`
+    /// and `GET /sync` cover the replayed tail immediately instead of
+    /// waiting for the follow loop to re-derive that history one live
+    /// block at a time.
+    ///
+    /// # Contract — restore-mode only
+    ///
+    /// `deltas` must already be in ascending block order and must all be
+    /// `<=` the server's current head — which holds by construction for a
+    /// journal-restore caller, since these are exactly the deltas that
+    /// were just replayed *into* that same head
+    /// (`crate::state::load_with_journal_restore`'s `tail_deltas`).
+    /// Calling this with deltas ahead of the head, out of order, or with a
+    /// gap would desynchronize the ring from the server it is meant to
+    /// describe; nothing here re-validates that, since the one caller this
+    /// method exists for cannot violate it.
+    pub async fn seed_history(&self, deltas: Vec<BlockDelta>) {
+        let mut inner = self.inner.write().await;
+        for delta in deltas {
+            inner.ring.push(delta.clone());
+            inner.per_block.insert(delta.block, delta);
+        }
+        if let Some(oldest) = inner.ring.oldest() {
+            let stale: Vec<u64> = inner.per_block.range(..oldest).map(|(b, _)| *b).collect();
+            for b in stale {
+                inner.per_block.remove(&b);
+            }
+        }
     }
 
     /// Verified read of the balance currently stored for `key`

@@ -147,6 +147,16 @@ While following, the server rewrites the state file every 30 min by default
 Ctrl-C replays at most the last interval, not the whole uptime. Every save
 logs a `state saved: block …, … GB in …s` completion line.
 
+Beside it sits `<state>.journal` (ADR-0026): one small per-block delta,
+appended and fsynced as each block applies, rotated to a fresh file at every
+save. Always written once a first save exists. Restoring from it needs
+`--journal-restore` (default off) — off, a restart only scans and reports it
+(`journal intact: N records to block X`), the soak signal before trusting it;
+on, a restart replays it and resumes above the last save's height instead of
+at it. The payoff is a long `--save-interval` (hours) once that report has
+looked healthy for a while, recovering to seconds instead of minutes at a
+fraction of the disk-write cost.
+
 The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
 signalling it never involves a wrapper shell. `--web web` is what serves the
 browser front end at all.

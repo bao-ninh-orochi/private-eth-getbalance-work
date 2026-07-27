@@ -21,7 +21,7 @@ use ikpir_common::{SimpleConfig, SimplePirBackend};
 use risepir_client::{Lookup, RisePirClient};
 use risepir_feed::{Feed, MockConfig, MockFeed};
 use risepir_http::{wire, NodeState};
-use risepir_proto::{AddressHash, Backend, Geometry, ValueCodec};
+use risepir_proto::{AddressHash, Backend, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::{Segmented3aryCuckooKVStore, Segmented3aryScheme};
 
@@ -267,4 +267,48 @@ async fn end_to_end_matches_ground_truth() {
             }
         }
     }
+}
+
+// ── seed_history (ADR-0026: journal-restore replay tail) ───────────────
+
+/// `NodeState::seed_history` is what a `--journal-restore` startup uses to
+/// make the just-replayed tail immediately servable, without waiting for
+/// the follow loop to re-derive that same history one live block at a
+/// time. A freshly built node has no delta history at all (`GET /head`
+/// is 0); seeding synthetic deltas for blocks 1..=3 must make `GET
+/// /delta/{block}` serve each one individually and `GET /sync` coalesce
+/// a range spanning them — exactly the contract `apply_block` itself
+/// gives, but driven from `seed_history` instead.
+#[tokio::test]
+async fn seed_history_makes_seeded_blocks_immediately_servable() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state.clone());
+
+    let (status, body) = get(&app, "/setup").await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle = wire::decode_setup(&body).expect("decode_setup");
+    let plaintext_bits = bundle.params.plaintext_bits;
+
+    // Synthetic deltas, shaped like real ones but not derived from any
+    // actual apply_block call — seed_history's contract does not care
+    // where they came from, only that they are contiguous and <= head.
+    let deltas: Vec<BlockDelta> = (1u64..=3)
+        .map(|b| BlockDelta {
+            block: b,
+            per_segment: vec![vec![(0, vec![(0, b as i64)])], vec![], vec![]],
+        })
+        .collect();
+    state.seed_history(deltas.clone()).await;
+
+    for d in &deltas {
+        let (status, body) = get(&app, &format!("/delta/{}", d.block)).await;
+        assert_eq!(status, StatusCode::OK, "seeded block {} must be servable", d.block);
+        let decoded = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY).expect("decode_block_delta");
+        assert_eq!(&decoded, d, "seeded block {} must round-trip byte-exact", d.block);
+    }
+
+    let (status, body) = get(&app, "/sync?from=0&to=3").await;
+    assert_eq!(status, StatusCode::OK, "a seeded range must be servable via /sync");
+    let coalesced = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY).expect("decode_block_delta");
+    assert_eq!(coalesced, BlockDelta::coalesce(&deltas).expect("contiguous by construction"));
 }

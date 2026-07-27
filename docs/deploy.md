@@ -270,6 +270,30 @@ replay is bounded by the interval: an ungraceful kill costs minutes of catch-up,
 not the whole uptime. `Ctrl-C` still saves the exact final state before exiting;
 each save logs a `state saved: block …, … GB in …s` completion line.
 
+Beside `--state` there is always a `<state>.journal` sidecar (ADR-0026, once a
+first full save exists): one small per-block delta, appended and fsynced as
+each block applies, rotated to a fresh file bound to the new digest right
+after every save. It is *written* unconditionally; *restoring* from it needs
+`--journal-restore` (default off). Off, a restart only *scans* it and logs
+`journal intact: N records to block X (--journal-restore to use)` — a
+soak signal, not a decision — then loads and replays exactly as above,
+unaffected. On, the restart replays the journal onto the loaded state before
+serving starts and logs `journal replayed: N block(s) in T s — resuming at
+block X (base was B)`, so a kill -9 between saves costs the journal's replay
+time (well under a second per block) instead of a network catch-up. The
+payoff configuration is a long `--save-interval` (hours) once the report line
+has looked healthy for a while, plus `--journal-restore` — recovery to within
+seconds of the last applied block at a small fraction of the disk-write cost
+a short interval alone would need.
+
+Journal-writing failures never risk correctness, only durability: a bad
+rotation logs a `WARNING` and leaves journaling off until the next successful
+save retries it; a continuity gap (should one ever occur) disables journaling
+for the rest of that run. Either way the periodic full save keeps happening
+on schedule — the worst case is falling back to the previous `--save-interval`
+behavior, never a wrong answer at replay time (see ADR-0026's two failure
+classes).
+
 ### 2.3 Hardware / cost
 
 **These numbers were revised upward on 2026-07-26**, when the gate query was
@@ -524,15 +548,26 @@ state file is atomic-by-rename and, as of `RPST2`, carries a whole-file
 xxh3 checksum, so a copy is a valid backup exactly when `load` accepts it.
 
 ```bash
-# back up (server running is fine — copy the *state* file, never the .tmp;
-# the autosave, ADR-0025, replaces it atomically by rename, so a copy taken
-# at any moment is a complete file — either the previous save or the new one):
-gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bin ~/risepir-state.bak'
+# back up (server running is fine — copy the *state* file and its *.journal*
+# sidecar together, never the .tmp; the autosave, ADR-0025, replaces the
+# state file atomically by rename, so a copy taken at any moment is a
+# complete file — either the previous save or the new one):
+gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bin ~/risepir-state.bak && cp ~/risepir-state.journal ~/risepir-state.journal.bak'
 # restore = stop server, put the backup in place, start; the server replays
 # saved_block+1..finalized from the feed — the backup's age only costs
 # replay time (~1–2 s/block), never correctness:
-gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bak ~/risepir-state.bin'
+gcloud --quiet compute ssh risepir --command='cp ~/risepir-state.bak ~/risepir-state.bin && cp ~/risepir-state.journal.bak ~/risepir-state.journal'
 ```
+
+The journal half of that copy is opportunistic, not required: a state file
+alone always loads and follows correctly (ADR-0026 is additive). But a
+`.journal` copied *separately in time* from its `.bin` is not necessarily
+useless — its header's `base_digest` either matches the restored `.bin` (in
+which case it is exactly as usable as it always was) or it does not, and a
+mismatch is refused loudly at load, never trusted partially. Copying them
+together is simply what guarantees a match every time, so backups restore
+with whatever replay-avoidance the journal was providing rather than losing
+it to a race between the two `cp`s.
 
 A corrupt file (including a single flipped bit — the checksum catches what
 structural checks cannot) is **rejected at load**; partial mode then

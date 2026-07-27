@@ -9,42 +9,119 @@
 import { connect, formatEth, PirError, StaleSetupError, STATUS } from "./pir.js";
 
 const $ = (id) => document.getElementById(id);
-const bootStatus = $("boot-status");
-const bootBar = $("boot-bar");
-const bootError = $("boot-error");
 
 let session = null;
+let booted = false;
 /// Server head observed over time, so a stalled deployment is detected
 /// locally — without asking any third party what the real chain head is,
 /// which would leak this page's existence to someone new.
 let headWatch = { block: null, since: Date.now() };
 
-// ── boot ────────────────────────────────────────────────────────────
+// ── boot: a staged, honest loading experience ───────────────────────
+//
+// Three stages, each advanced by something real rather than by a timer:
+// the wasm fetch, the /setup download (with byte-level progress), and the
+// local expansion + pin. `bootFetch` wraps fetch only to *observe* which
+// request is in flight — every byte still moves through pir.js.
+
+const STAGES = ["engine", "hint", "pin"];
+
+function setStage(active) {
+  const idx = active === "done" ? STAGES.length : STAGES.indexOf(active);
+  STAGES.forEach((name, i) => {
+    const el = $(`step-${name}`);
+    el.classList.toggle("is-done", i < idx);
+    el.classList.toggle("is-active", i === idx);
+  });
+}
+
+function bootFetch(input, init) {
+  if (!booted && String(input).includes("/setup")) {
+    setStage("hint");
+    $("boot-status-text").textContent =
+      "Downloading the hint — the one large transfer this page ever makes.";
+  }
+  return fetch(input, init);
+}
+
+// Rolling-window transfer rate, so the ETA reflects the link as it is
+// right now rather than the whole download's history.
+const samples = [];
+let lastPaintAt = 0;
+
+const fmtMB = (n) => (n / 1e6).toFixed(1);
+
+function fmtEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 90) return `about ${Math.max(1, Math.round(seconds))} s left`;
+  return `about ${Math.round(seconds / 60)} min left`;
+}
+
+function onProgress(done, total) {
+  const now = performance.now();
+  samples.push({ t: now, b: done });
+  while (samples.length > 2 && samples[0].t < now - 3000) samples.shift();
+
+  const finished = total > 0 && done >= total;
+  if (!finished && now - lastPaintAt < 80) return;
+  lastPaintAt = now;
+
+  if (total > 0) {
+    const pct = (done / total) * 100;
+    $("boot-bar").style.width = `${pct}%`;
+    $("boot-progress").setAttribute("aria-valuenow", String(Math.floor(pct)));
+    $("boot-pct").textContent = `${Math.floor(pct)}%`;
+    $("boot-mb").textContent = `${fmtMB(done)} MB of ${fmtMB(total)} MB`;
+  } else {
+    $("boot-mb").textContent = `${fmtMB(done)} MB`;
+  }
+
+  const span = samples[samples.length - 1].t - samples[0].t;
+  const bytes = samples[samples.length - 1].b - samples[0].b;
+  if (span > 300 && bytes > 0) {
+    const rate = bytes / (span / 1000);
+    $("boot-rate").textContent = `${(rate / 1e6).toFixed(1)} MB/s`;
+    $("boot-eta").textContent = finished ? "" : fmtEta((total - done) / rate);
+  }
+
+  if (finished) {
+    $("boot-eta").textContent = "";
+    setStage("pin");
+    // The expansion is synchronous wasm, so the page may not repaint again
+    // until it is over — say so *before* it starts, not after.
+    $("boot-status-text").textContent =
+      "Expanding the hint into memory and pinning it to a finalized block — " +
+      "this runs on your CPU and may pause the page for a moment.";
+  }
+}
 
 async function boot() {
   const t0 = performance.now();
   try {
     session = await connect(location.origin, {
       wasmUrl: "client.wasm",
-      onProgress: (done, total) => {
-        const pct = total ? (done / total) * 100 : 0;
-        bootBar.style.width = `${pct}%`;
-        bootStatus.textContent =
-          `Downloading the PIR hint — ${(done / 1e6).toFixed(1)} MB of ${(total / 1e6).toFixed(1)} MB`;
-      },
+      fetchImpl: bootFetch,
+      onProgress,
     });
   } catch (e) {
-    bootBar.style.width = "0";
-    bootStatus.textContent = "Could not start the private client.";
-    bootError.textContent = String(e.message ?? e);
-    bootError.classList.remove("hidden");
+    $("boot").classList.add("is-failed");
+    $("boot-status-text").textContent = "Could not start the private client.";
+    const err = $("boot-error");
+    err.textContent = `${String(e.message ?? e)} — reload the page to try again.`;
+    err.classList.remove("hidden");
     return;
   }
 
-  bootBar.style.width = "100%";
-  bootStatus.textContent =
-    `Ready in ${((performance.now() - t0) / 1000).toFixed(1)} s — ` +
-    `${(session.traffic.setupBytes / 1e6).toFixed(1)} MB of hint, pinned at block ${session.pinnedBlock}.`;
+  booted = true;
+  setStage("done");
+  $("boot-bar").style.width = "100%";
+  $("boot-progress").setAttribute("aria-valuenow", "100");
+
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  $("ready-note").textContent =
+    `Ready in ${secs} s — ${fmtMB(session.traffic.setupBytes)} MB of hint held locally, ` +
+    `pinned at finalized block ${session.pinnedBlock}.`;
+
   // Populate before revealing: the deployment's mode, head, and freshness
   // are the context an answer has to be read in, so they must never be
   // absent (or, worse, briefly blank) at the moment the query box appears.
@@ -62,15 +139,22 @@ async function boot() {
 // ── deployment state ────────────────────────────────────────────────
 
 function row(label, value, cls = "") {
-  const tr = document.createElement("tr");
-  const k = document.createElement("td");
+  const r = document.createElement("div");
+  r.className = cls ? `rrow is-${cls}` : "rrow";
+  const k = document.createElement("span");
+  k.className = "rk";
   k.textContent = label;
-  const v = document.createElement("td");
+  // The dot leader between label and value — presentational only, so it
+  // contributes nothing to the row's text (the tests read innerText).
+  const leader = document.createElement("span");
+  leader.className = "leader";
+  leader.setAttribute("aria-hidden", "true");
+  const v = document.createElement("span");
+  v.className = "rv";
   if (value instanceof Node) v.appendChild(value);
   else v.textContent = value;
-  if (cls) v.className = cls;
-  tr.append(k, v);
-  return tr;
+  r.append(k, leader, v);
+  return r;
 }
 
 function tag(text, cls) {
@@ -78,6 +162,27 @@ function tag(text, cls) {
   span.className = `tag ${cls}`;
   span.textContent = text;
   return span;
+}
+
+/// A value cell that leads with a badge and follows with plain words —
+/// the words carry the meaning, the badge only underlines it.
+function tagged(node, note) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(node);
+  const span = document.createElement("span");
+  span.className = "note";
+  span.textContent = note;
+  frag.appendChild(span);
+  const wrap = document.createElement("span");
+  wrap.appendChild(frag);
+  return wrap;
+}
+
+function setLivePill(state, text) {
+  const pill = $("live-pill");
+  pill.classList.remove("hidden", "is-ok", "is-warn", "is-err");
+  pill.classList.add(`is-${state}`);
+  $("live-text").textContent = text;
 }
 
 async function refreshState() {
@@ -101,14 +206,18 @@ async function refreshState() {
   // generous margin before calling it stalled rather than crying wolf.
   const stalled = reachable && stalledFor > 15 * 60;
 
+  if (!reachable) setLivePill("err", "server unreachable");
+  else if (stalled) setLivePill("warn", `stalled at block ${head}`);
+  else setLivePill("ok", `following · block ${head}`);
+
   const rows = $("state-rows");
   rows.replaceChildren();
   rows.append(
     row(
       "Data set",
       session.complete
-        ? tag("complete — absence means exactly 0", "tag-ok")
-        : tag("partial — absence means unknown", "tag-warn"),
+        ? tagged(tag("complete", "tag-ok"), " — absence means exactly 0")
+        : tagged(tag("partial", "tag-warn"), " — absence means unknown"),
     ),
     row("Server head", head === null ? "unreachable" : `block ${head}`, reachable ? "" : "error"),
     row("Hint pinned at", `block ${session.pinnedBlock}`),
@@ -157,6 +266,7 @@ async function loadSuggestions() {
     chip.title = addr;
     chip.addEventListener("click", () => {
       $("address").value = addr;
+      $("address").dispatchEvent(new Event("input"));
       $("form").requestSubmit();
     });
     list.appendChild(chip);
@@ -181,6 +291,32 @@ function errorBlock(title, detail) {
   return p;
 }
 
+function queryingNode() {
+  const p = document.createElement("p");
+  p.className = "querying";
+  const spin = document.createElement("span");
+  spin.className = "spinner";
+  spin.setAttribute("aria-hidden", "true");
+  p.append(
+    spin,
+    document.createTextNode("Querying privately — the server is computing over its entire set…"),
+  );
+  return p;
+}
+
+const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+
+/// Live hint, not a gate: shown once the input can no longer become a
+/// valid address (or is full-length and still wrong). Submission always
+/// goes through parseAddress in pir.js, which is the real check.
+function checkAddressInput() {
+  const v = $("address").value.trim();
+  const undecided = /^0(x[0-9a-fA-F]{0,40})?$/.test(v);
+  const bad = v.length > 0 && !ADDR_RE.test(v) && !undecided;
+  $("address").classList.toggle("is-invalid", bad);
+  $("addr-hint").classList.toggle("hidden", !bad);
+}
+
 async function lookup(event) {
   event.preventDefault();
   if (!session) return;
@@ -188,7 +324,7 @@ async function lookup(event) {
   const address = $("address").value.trim();
   const button = $("go");
   button.disabled = true;
-  showResult([Object.assign(document.createElement("p"), { className: "asof", textContent: "Querying privately…" })]);
+  showResult([queryingNode()]);
 
   const t0 = performance.now();
   let result;
@@ -275,12 +411,21 @@ function updateWirePanel(elapsedMs, atBlock) {
   const rows = $("wire-rows");
   rows.replaceChildren();
   const t = session.traffic;
+
+  const tail = document.createElement("code");
+  tail.className = "hexdump";
+  tail.textContent = session.lastQueryTail;
+
   rows.append(
     row("Sent", `POST /answer — ${t.queryBytes.toLocaleString()} bytes of LWE ciphertext`),
-    row("…its last 32 bytes", `${session.lastQueryTail} (fresh every query)`),
+    row("Its last 32 bytes", tagged(tail, " — fresh every query")),
     row("Received", `${t.responseBytes.toLocaleString()} bytes, answered at block ${atBlock}`),
     row("Public delta pulled", `${t.deltaBytes.toLocaleString()} bytes (identical for every client)`),
-    row("Addresses transmitted", tag("none", "tag-ok")),
+    row(
+      "Addresses transmitted",
+      tagged(tag("none", "tag-ok"), " — not hashed, not truncated, not encrypted-for-them"),
+      "hero",
+    ),
     row(
       "LWE secret",
       `sampled fresh for this query, from a CSPRNG seeded with ` +
@@ -292,4 +437,5 @@ function updateWirePanel(elapsedMs, atBlock) {
 }
 
 $("form").addEventListener("submit", lookup);
+$("address").addEventListener("input", checkAddressInput);
 boot();

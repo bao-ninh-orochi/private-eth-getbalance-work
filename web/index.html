@@ -3,121 +3,238 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Look up any Ethereum balance over private information retrieval — the server computes the answer without ever learning which address was asked."
+    />
     <title>Private eth_getBalance — RisePIR</title>
     <link rel="stylesheet" href="style.css" />
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><rect width='28' height='28' rx='6' fill='%23ffffff' stroke='%23c4c2ba'/><circle cx='9' cy='9' r='2' fill='%230c7285'/><circle cx='14' cy='9' r='2' fill='%230c7285'/><circle cx='19' cy='9' r='2' fill='%230c7285'/><circle cx='9' cy='14' r='2' fill='%230c7285'/><circle cx='14' cy='14' r='2' fill='%230c7285'/><circle cx='19' cy='14' r='2' fill='%230c7285'/><circle cx='9' cy='19' r='2' fill='%230c7285'/><circle cx='14' cy='19' r='2' fill='%230c7285'/><circle cx='20.2' cy='20.3' r='2' fill='%230c7285'/></svg>"
     />
   </head>
   <body>
-    <main>
-      <header>
-        <h1>Private <code>eth_getBalance</code></h1>
-        <p class="lede">
-          Look up an Ethereum balance from a server that <strong>cannot tell which account you
-          asked about</strong>. The query is built here, in your browser, as LWE ciphertext; the
-          address never leaves this page.
-        </p>
+    <div class="page">
+      <header class="masthead">
+        <div class="brand">
+          <!-- The mark is the construction: a lattice, with one point nudged
+               off the grid — LWE is exactly "a lattice, plus noise". -->
+          <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true">
+            <circle cx="9" cy="9" r="1.9" fill="currentColor" />
+            <circle cx="14" cy="9" r="1.9" fill="currentColor" />
+            <circle cx="19" cy="9" r="1.9" fill="currentColor" />
+            <circle cx="9" cy="14" r="1.9" fill="currentColor" />
+            <circle cx="14" cy="14" r="1.9" fill="currentColor" />
+            <circle cx="19" cy="14" r="1.9" fill="currentColor" />
+            <circle cx="9" cy="19" r="1.9" fill="currentColor" />
+            <circle cx="14" cy="19" r="1.9" fill="currentColor" />
+            <circle cx="20.4" cy="20.5" r="1.9" fill="currentColor" />
+          </svg>
+          <span class="brand-name">RisePIR</span>
+          <span class="brand-sub">private eth_getBalance</span>
+        </div>
+        <div id="live-pill" class="live-pill hidden">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="live-text"></span>
+        </div>
       </header>
 
-      <!-- Boot: the one-time client download. -->
-      <section id="boot" class="card">
-        <h2>Setting up the private client</h2>
-        <p id="boot-status">Loading…</p>
-        <div class="progress"><div id="boot-bar" class="progress-fill"></div></div>
-        <p class="fine">
-          This downloads the PIR <em>hint</em> — the preprocessed public matrix that lets your
-          browser decode an answer without telling anyone what it asked. It is the price of the
-          privacy: the alternative is a server that simply reads your address. It is downloaded
-          once per session and never sent back.
+      <section class="intro">
+        <p class="eyebrow">00 · Private information retrieval</p>
+        <h1>The server answers. It never learns the question.</h1>
+        <p class="lede">
+          A live <code>eth_getBalance</code> over lattice PIR: this page sends only LWE
+          ciphertext, the server computes over every account it holds, and the reply decrypts
+          only here. The address you type never leaves this page — in any form.
         </p>
-        <p id="boot-error" class="error hidden"></p>
-      </section>
 
-      <!-- Query. -->
-      <section id="query" class="card hidden">
-        <h2>Look up a balance</h2>
-        <form id="form" autocomplete="off">
-          <input
-            id="address"
-            type="text"
-            inputmode="latin"
-            spellcheck="false"
-            placeholder="0x0000000000000000000000000000000000000000"
-            aria-label="Ethereum address"
-          />
-          <button id="go" type="submit">Look up privately</button>
-        </form>
-        <div id="suggestions" class="suggestions hidden">
-          <p class="fine" id="suggestions-note"></p>
-          <div id="suggestion-list" class="chips"></div>
+        <div class="flow" role="img" aria-label="How a lookup works: encrypted here, computed blind on the server, decoded only here">
+          <div class="flow-node">
+            <span class="flow-k">Encrypted here</span>
+            <span class="flow-d">a fresh LWE secret per query; the ciphertext is the same size for every address</span>
+          </div>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node">
+            <span class="flow-k">Computed blind</span>
+            <span class="flow-d">the server must fold it over its entire account set to answer at all</span>
+          </div>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-node">
+            <span class="flow-k">Decoded here</span>
+            <span class="flow-d">the reply opens only with your secret, which never left this page</span>
+          </div>
         </div>
-
-        <div id="result" class="result hidden"></div>
       </section>
 
-      <!-- What actually crossed the wire. -->
-      <section id="wire" class="card hidden">
-        <h2>What the server saw</h2>
-        <table class="kv">
-          <tbody id="wire-rows"></tbody>
-        </table>
-        <p class="fine">
-          The address you typed is not in that list, in any form — not hashed, not truncated, not
-          encrypted-for-them. The server computed over every account it holds and returned a
-          result only your browser can read.
-        </p>
-      </section>
+      <main>
+        <noscript>
+          <p class="alert">
+            This tool runs entirely in your browser — JavaScript is required, and it is exactly
+            the code that keeps your address on this page.
+          </p>
+        </noscript>
 
-      <!-- Deployment state, stated rather than implied. -->
-      <section id="state" class="card hidden">
-        <h2>This deployment</h2>
-        <table class="kv">
-          <tbody id="state-rows"></tbody>
-        </table>
-      </section>
+        <!-- Boot: the one-time client download, staged and honest. -->
+        <section id="boot" class="panel" aria-labelledby="boot-h2">
+          <h2 class="sec" id="boot-h2"><span class="sec-n">01</span> One-time setup</h2>
 
-      <section class="card limits">
-        <h2>What this does <em>not</em> protect</h2>
-        <ul>
-          <li>
-            <strong>The code you are running.</strong> This page and its WebAssembly came from the
-            same server you are querying. PIR stops that server from learning your address
-            <em>if the client is honest</em> — but whoever serves the page chooses what the client
-            is. Over plain HTTP, so does anyone on the network path. For a stronger guarantee, run
-            the client yourself: <code>risepir-rpc client --pir-url …</code> puts the same rewind
-            client on your own machine, and the wasm here is built from that same Rust.
-          </li>
-          <li>
-            <strong>Who is asking.</strong> The cryptography hides <em>which account</em>, not
-            <em>who wants to know</em>. The server sees your IP address, the time, and how often
-            you ask. Use Tor (or any anonymising transport) if that matters to you; this client
-            works fine over one.
-          </li>
-          <li>
-            <strong>Freshness.</strong> Answers are as of the latest <em>finalized</em> block,
-            roughly 13 minutes behind what a block explorer shows. That is deliberate: finalized
-            blocks do not reorganise, so an answer cannot be quietly invalidated. A balance that
-            changed in the last few minutes will not appear yet.
-          </li>
-          <li id="limit-partial" class="hidden">
-            <strong>Partial data set.</strong> This server only tracks accounts that have been
-            touched since it started, so most addresses will return “not in the tracked set”.
-            That is an error, never <code>0</code> — for an untracked account, absence tells you
-            nothing about the balance, and answering zero would be a wrong answer.
-          </li>
-        </ul>
-      </section>
+          <ol class="boot-steps">
+            <li id="step-engine" class="step is-active">
+              <span class="step-mark" aria-hidden="true"></span>
+              <span class="step-body">
+                <span class="step-title">Cryptographic engine</span>
+                <span class="step-sub">WebAssembly, built from the same Rust as the CLI client</span>
+              </span>
+            </li>
+            <li id="step-hint" class="step">
+              <span class="step-mark" aria-hidden="true"></span>
+              <span class="step-body">
+                <span class="step-title">Hint download</span>
+                <span class="step-sub">one public matrix, identical for every visitor — it carries nothing about you</span>
+              </span>
+            </li>
+            <li id="step-pin" class="step">
+              <span class="step-mark" aria-hidden="true"></span>
+              <span class="step-body">
+                <span class="step-title">Pin to a finalized block</span>
+                <span class="step-sub">expanded locally, so every answer is labelled with the block it is as of</span>
+              </span>
+            </li>
+          </ol>
+
+          <div class="boot-progressbox">
+            <div class="boot-numbers">
+              <span id="boot-pct" class="boot-pct">0%</span>
+              <span id="boot-mb" class="boot-mb"></span>
+            </div>
+            <div
+              id="boot-progress"
+              class="progress"
+              role="progressbar"
+              aria-label="Hint download"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <div id="boot-bar" class="progress-fill"></div>
+            </div>
+            <div class="boot-meta">
+              <span id="boot-rate"></span>
+              <span id="boot-eta"></span>
+            </div>
+          </div>
+
+          <p class="boot-status" role="status">
+            <span id="boot-status-text">Fetching the cryptographic engine…</span><span
+              class="cursor"
+              aria-hidden="true"
+            ></span>
+          </p>
+
+          <aside class="why">
+            <strong>Why the download?</strong>
+            <p>
+              This download <em>is</em> the privacy. The hint is the server's database
+              preprocessed into a public matrix — the same bytes for every visitor, so holding it
+              says nothing about you. Once it is here, your browser decodes answers entirely
+              locally; without it, the only way to get a balance is to tell the server which one
+              you want. Fetched once per session, never sent back. Its size scales with the
+              account set — on a full-mainnet deployment it runs to hundreds of megabytes, and
+              that cost is exactly what buys the guarantee.
+            </p>
+          </aside>
+
+          <p id="boot-error" class="alert hidden"></p>
+        </section>
+
+        <!-- Query. -->
+        <section id="query" class="panel hidden">
+          <h2 class="sec"><span class="sec-n">01</span> Balance lookup</h2>
+          <p id="ready-note" class="ready-note"></p>
+          <form id="form" autocomplete="off" novalidate>
+            <label class="visually-hidden" for="address">Ethereum address</label>
+            <input
+              id="address"
+              type="text"
+              spellcheck="false"
+              autocapitalize="off"
+              maxlength="42"
+              placeholder="0x0000000000000000000000000000000000000000"
+            />
+            <button id="go" type="submit">Look up privately</button>
+          </form>
+          <p id="addr-hint" class="field-hint hidden">
+            An address is <code>0x</code> followed by exactly 40 hex characters.
+          </p>
+          <div id="suggestions" class="suggestions hidden">
+            <p class="fine" id="suggestions-note"></p>
+            <div id="suggestion-list" class="chips"></div>
+          </div>
+
+          <div id="result" class="result hidden" aria-live="polite"></div>
+        </section>
+
+        <!-- What actually crossed the wire. -->
+        <section id="wire" class="panel hidden">
+          <h2 class="sec"><span class="sec-n">02</span> What the server saw</h2>
+          <p class="panel-sub">The receipt for your last query — everything that crossed the wire.</p>
+          <div id="wire-rows" class="receipt"></div>
+          <p class="fine">
+            The server computed over every account it holds and returned a response only this page
+            can decrypt. It saw ciphertext, byte counts, and timing — and, like any web server,
+            the IP address it spoke to (see 04 below). The address you typed is not in the list
+            above, in any form.
+          </p>
+        </section>
+
+        <!-- Deployment state, stated rather than implied. -->
+        <section id="state" class="panel hidden">
+          <h2 class="sec"><span class="sec-n">03</span> This deployment</h2>
+          <div id="state-rows" class="receipt"></div>
+        </section>
+
+        <section class="panel limits">
+          <h2 class="sec"><span class="sec-n">04</span> What this does <em>not</em> protect</h2>
+          <ul>
+            <li>
+              <strong>The code you are running.</strong> This page and its WebAssembly came from
+              the same server you are querying. PIR stops that server from learning your address
+              <em>if the client is honest</em> — but whoever serves the page chooses what the
+              client is. For a stronger guarantee, run the client yourself:
+              <code>risepir-rpc client --pir-url …</code> puts the same rewind client on your own
+              machine, and the wasm here is built from that same Rust.
+            </li>
+            <li>
+              <strong>Who is asking.</strong> The cryptography hides <em>which account</em>, not
+              <em>who wants to know</em>. The server sees your IP address, the time, and how often
+              you ask. Use Tor (or any anonymising transport) if that matters to you; this client
+              works fine over one.
+            </li>
+            <li>
+              <strong>Freshness.</strong> Answers are as of the latest <em>finalized</em> block,
+              roughly 13 minutes behind what a block explorer shows. That is deliberate: finalized
+              blocks do not reorganise, so an answer cannot be quietly invalidated. A balance that
+              changed in the last few minutes will not appear yet.
+            </li>
+            <li id="limit-partial" class="hidden">
+              <strong>Partial data set.</strong> This server only tracks accounts that have been
+              touched since it started, so most addresses will return “not in the tracked set”.
+              That is an error, never <code>0</code> — for an untracked account, absence tells you
+              nothing about the balance, and answering zero would be a wrong answer.
+            </li>
+          </ul>
+        </section>
+      </main>
 
       <footer>
         <p class="fine">
-          RisePIR — LWE keyword-PIR over a Segmented Cuckoo Filter. The server folds each block's
-          changes into a ~5 ms hint patch instead of rebuilding preprocessing from scratch, which
-          is what makes per-block-fresh PIR possible at all.
+          RisePIR — LWE keyword-PIR over a Segmented Cuckoo Filter. Each block's changes fold
+          into the hint as a ~5&nbsp;ms patch instead of a rebuild, which is what makes
+          per-block-fresh PIR possible at all. Balances are exact wei, never rounded.
         </p>
       </footer>
-    </main>
+    </div>
 
     <script type="module" src="app.js"></script>
   </body>

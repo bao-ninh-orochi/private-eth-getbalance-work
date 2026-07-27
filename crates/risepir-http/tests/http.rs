@@ -141,7 +141,109 @@ async fn healthz_reports_ok_and_head() {
 
     let (status, body) = get(&app, "/healthz").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, b"ok 0", "fresh node: head is 0");
+    let text = String::from_utf8(body).expect("healthz body must be UTF-8 text");
+    // The compatibility guarantee (ADR-0027): the first line stays exactly
+    // `ok <head>`, byte for byte, regardless of whatever else the body now
+    // carries — any existing prefix/line probe must keep working unmodified.
+    assert_eq!(text.lines().next(), Some("ok 0"), "fresh node: head is 0");
+}
+
+/// `/healthz`'s reconcile fields must be present — not omitted — even for a
+/// deployment that never configured reconciliation (this test's `build_node`
+/// never calls `set_reconcile_configured`, exactly like `risepir-rpc demo`).
+/// An absent field would read as "healthy" to a monitor that does not know
+/// better; `reconcile_configured=0` says so explicitly instead. Every line
+/// after the first must parse cleanly as `key=value`.
+#[tokio::test]
+async fn healthz_reconcile_fields_present_and_explicit_when_unconfigured() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state);
+
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).expect("healthz body must be UTF-8 text");
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("ok 0"));
+
+    let fields: std::collections::HashMap<&str, &str> = lines
+        .map(|line| line.split_once('=').unwrap_or_else(|| panic!("line {line:?} is not a key=value pair")))
+        .collect();
+    assert_eq!(fields.get("reconcile_configured"), Some(&"0"), "never configured ⇒ must say so explicitly");
+    assert_eq!(fields.get("reconcile_halted"), Some(&"0"));
+    assert_eq!(fields.get("reconcile_consecutive_dark"), Some(&"0"));
+    assert_eq!(fields.get("reconcile_checkpoints_total"), Some(&"0"));
+    assert_eq!(fields.get("reconcile_comparisons_total"), Some(&"0"));
+    // Present (not omitted), even though nothing has ever run.
+    assert!(fields.contains_key("reconcile_last_checkpoint_block"));
+    assert!(fields.contains_key("reconcile_last_checkpoint_unix"));
+    assert!(fields.contains_key("reconcile_last_success_block"));
+    assert!(fields.contains_key("reconcile_last_success_unix"));
+}
+
+/// The failure mode this crate's half of ADR-0027 exists to fix: a
+/// checkpoint where every comparison attempt fails must be recorded as
+/// dark (never as a success) and increment the consecutive-dark counter;
+/// an interleaved *empty* checkpoint (no candidate accounts) must leave
+/// that counter unchanged rather than resetting or incrementing it; and a
+/// subsequent successful comparison must clear the streak and record the
+/// last-success block/timestamp. Exercises
+/// `NodeState::record_reconcile_checkpoint` directly — the same method the
+/// `risepir-rpc` follow loop calls — with no network involved, then checks
+/// `/healthz` reflects it.
+#[tokio::test]
+async fn healthz_reflects_recorded_reconcile_checkpoints() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state.clone());
+
+    state.set_reconcile_configured(true);
+
+    // Two dark checkpoints in a row: attempted-and-failed, not success.
+    let h1 = state.record_reconcile_checkpoint(10, 0, true);
+    assert_eq!(h1.consecutive_dark, 1);
+    assert_eq!(h1.last_success_block, 0, "a dark checkpoint must never be reported as a success");
+    assert_eq!(h1.last_success_unix, 0);
+
+    let h2 = state.record_reconcile_checkpoint(20, 0, true);
+    assert_eq!(h2.consecutive_dark, 2, "consecutive dark checkpoints must accumulate");
+
+    // An empty block (no candidates) must leave the dark streak exactly as
+    // it was — neither reset nor incremented.
+    let h3 = state.record_reconcile_checkpoint(25, 0, false);
+    assert_eq!(h3.consecutive_dark, 2, "an empty checkpoint must leave consecutive_dark unchanged");
+    assert_eq!(h3.checkpoints_total, 3, "an empty checkpoint still counts as a checkpoint that ran");
+
+    // A successful comparison clears the streak and records the success.
+    let h4 = state.record_reconcile_checkpoint(30, 3, false);
+    assert_eq!(h4.consecutive_dark, 0, "a successful checkpoint must clear the dark streak");
+    assert_eq!(h4.last_success_block, 30);
+    assert!(h4.last_success_unix > 0, "a real wall-clock timestamp must be recorded");
+    assert_eq!(h4.comparisons_total, 3);
+    assert_eq!(h4.checkpoints_total, 4);
+
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.starts_with("ok 0\n"));
+    assert!(text.contains("reconcile_configured=1"));
+    assert!(text.contains("reconcile_consecutive_dark=0"));
+    assert!(text.contains("reconcile_last_success_block=30"));
+    assert!(text.contains("reconcile_checkpoints_total=4"));
+    assert!(text.contains("reconcile_comparisons_total=3"));
+}
+
+/// A value mismatch halts the follow loop, not `/healthz` — but the probe
+/// must surface *why* nothing is advancing: `reconcile_halted=1`.
+#[tokio::test]
+async fn healthz_reports_halted_after_a_mismatch() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state.clone());
+
+    state.mark_reconcile_halted();
+
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("reconcile_halted=1"));
 }
 
 #[tokio::test]

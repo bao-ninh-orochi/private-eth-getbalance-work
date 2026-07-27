@@ -167,6 +167,26 @@ cross-validates trace parsing. Assumes feed and reconcile providers do not
 collude; sampled, so a targeted single-account poisoning can win the lottery
 between checkpoints.
 
+**Honest throughput:** at the defaults (`reconcile_every 30`,
+`reconcile_samples 8`) that is one checkpoint per ~6 min of chain time and up
+to 8 comparisons each — **~1,920 account comparisons per day** against a
+complete set of 200.5 M accounts. Say plainly what that is: not coverage, but
+a well-targeted smoke test, because the accounts it samples are exactly the
+ones the block just changed — precisely where a feed error would actually
+show up, not a uniform sample of the whole universe.
+
+**Observability of the check itself (ADR-0027):** the check can go dark —
+every fetch to the independent provider failing, e.g. a keyless tier refusing
+archive-depth reads during a catch-up — and the old code made that
+indistinguishable from "checked and exact": both logged nothing and both
+reported success. `GET /healthz` now reports the reconcile check's own health
+(configured or not, last checkpoint, last *successful* checkpoint, running
+totals, consecutive dark checkpoints), a dark checkpoint always logs a
+warning, and a prolonged dark streak escalates to `CRITICAL` without halting
+— halting the follow loop because a third party is unreachable would convert
+that party's outage into this deployment's, for zero additional wrong-answer
+prevention. A value mismatch still halts, unconditionally, exactly as above.
+
 **Planned strengthening (A3):** an N-provider quorum on each block's effects
 before apply — prevention rather than detection — extends the
 never-wrong-answer contract to ingest. Blocked today on the shortage of

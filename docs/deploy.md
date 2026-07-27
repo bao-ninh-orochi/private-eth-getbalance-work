@@ -730,6 +730,30 @@ threat model §4.2 and §8.
   following has stopped; serving continues at the last applied block. Fix =
   re-bootstrap from a fresh snapshot (delete/replace the state file). Never
   restart-and-hope into a drifted state.
+- **`GET /healthz` now also reports the reconcile check's own health**
+  (ADR-0027) — watch it, because the check can go completely dark (the
+  independent provider refusing every fetch) without a single mismatch ever
+  firing, and that looks like silence, not an alarm, unless something is
+  reading these fields. Example body:
+  ```text
+  ok 25617400
+  reconcile_configured=1
+  reconcile_last_checkpoint_block=25617400
+  reconcile_last_checkpoint_unix=1785079800
+  reconcile_last_success_block=25617400
+  reconcile_last_success_unix=1785079800
+  reconcile_comparisons_total=1848
+  reconcile_checkpoints_total=231
+  reconcile_consecutive_dark=0
+  reconcile_halted=0
+  ```
+  The first line is always exactly `ok <head>`, unchanged; everything below
+  it is additive `key=value` lines. The signal to watch is a climbing
+  `reconcile_consecutive_dark` alongside a `reconcile_last_success_unix` that
+  stops advancing — the log itself already escalates to `CRITICAL` at 20
+  consecutive dark checkpoints (~2h, `mainnet.rs`'s
+  `DARK_ESCALATION_THRESHOLD`), so this need not be polled continuously, but
+  a dashboard on these fields catches it sooner.
 - **Transient feed errors** (rate limits, truncated bodies) retry the same block
   forever and are routine on keyless tiers; only evidence of *drift* halts.
 - **Replay safety**: tx-derived changes are absolute post-state values, so

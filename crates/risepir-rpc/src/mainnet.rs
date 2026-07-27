@@ -36,6 +36,19 @@
 //!   the operator re-bootstraps. Reconciliation *fetch* failures merely
 //!   skip that sample (an unreachable reference provider must not take
 //!   the service down; only evidence of drift may).
+//! - The reconcile check's own health is now observable rather than
+//!   inferred (ADR-0027): every checkpoint is classified as empty (no
+//!   candidate accounts — nothing to check), successful (≥1 comparison
+//!   completed), or **dark** (≥1 attempted, all failed) and recorded into
+//!   [`risepir_http::NodeState`]'s [`risepir_http::ReconcileHealth`], which
+//!   `GET /healthz` reports. A prolonged dark streak escalates to a
+//!   `CRITICAL` log (after `DARK_ESCALATION_THRESHOLD` consecutive dark
+//!   checkpoints — this module's own private constant) but **never halts** —
+//!   only a value mismatch does that. Halting because a *third-party*
+//!   reference provider is unreachable would convert someone else's outage
+//!   into this deployment's outage while preventing exactly zero wrong
+//!   answers (the feed — and therefore what gets served — is untouched by
+//!   whether the reconcile provider answers).
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -70,6 +83,22 @@ const FINGERPRINT_BITS: u32 = 32;
 const POLL_INTERVAL: Duration = Duration::from_secs(6);
 /// Pause between retries after a transient feed error.
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
+/// After how many **consecutive dark** reconcile checkpoints (`reconcile`
+/// attempted ≥1 comparison and every attempt failed) to escalate to a
+/// `CRITICAL` log line — without halting the follow loop; see the module
+/// docs and ADR-0027 for why only a value mismatch halts.
+///
+/// Chosen from the actual cadence, not a round number picked in the air:
+/// at the default `reconcile_every` (30 blocks) and mainnet's ~12 s block
+/// time, one checkpoint runs every 30 × 12 s = 360 s = **6 min** of chain
+/// time. `20` consecutive dark checkpoints is therefore 20 × 6 min =
+/// **120 min (~2 h)** — comfortably past a single transient hiccup at the
+/// reference provider, and matching the ~2-hour completely-dark catch-up
+/// this repo actually hit on 2026-07-26 (`docs/deploy.md` §5.3), which is
+/// the incident this constant exists to make loud the *next* time it
+/// happens instead of the operator finding out afterward from the log.
+const DARK_ESCALATION_THRESHOLD: u64 = 20;
 
 pub(crate) fn value_codec() -> ValueCodec {
     ValueCodec {
@@ -615,6 +644,23 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         );
     }
 
+    // Set before anything starts serving (see the method's docs): a probe
+    // must never observe a transient "not configured" for a deployment
+    // that actually does reconcile.
+    node.set_reconcile_configured(cfg.reconcile_every > 0);
+    if cfg.reconcile_every > 0 {
+        eprintln!(
+            "risepir-rpc mainnet: reconcile: every {} block(s), {} sample(s) per checkpoint against {} — \
+             GET /healthz reports this check's own health (reconcile_* fields, ADR-0027)",
+            cfg.reconcile_every, cfg.reconcile_samples, cfg.confirm_url
+        );
+    } else {
+        eprintln!(
+            "risepir-rpc mainnet: reconcile: DISABLED (--reconcile-every 0) — no cross-provider integrity \
+             check will run; GET /healthz reports reconcile_configured=0"
+        );
+    }
+
     // ── PIR HTTP transport ─────────────────────────────────────────────
     // Loaded before binding anything: a missing or unreadable asset is a
     // startup failure, not a 404 the first visitor discovers.
@@ -815,11 +861,21 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             // data, and the same list for every caller.
             node.note_recent(changed.iter().map(|(addr, _)| *addr)).await;
 
-            if cfg.reconcile_every > 0
-                && n.is_multiple_of(cfg.reconcile_every)
-                && !reconcile(&confirm, &node, n, &changed, &credited, cfg.complete, cfg.reconcile_samples).await
-            {
-                return; // reconcile() already logged CRITICAL
+            if cfg.reconcile_every > 0 && n.is_multiple_of(cfg.reconcile_every) {
+                let outcome = reconcile(
+                    &confirm,
+                    &node,
+                    n,
+                    &changed,
+                    &credited,
+                    cfg.complete,
+                    cfg.reconcile_samples,
+                    cfg.reconcile_every,
+                )
+                .await;
+                if matches!(outcome, ReconcileOutcome::Halted) {
+                    return; // reconcile() already logged CRITICAL and marked the health record halted
+                }
             }
         }
 
@@ -827,10 +883,112 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
     }
 }
 
+/// One sampled address's comparison outcome against the independent
+/// provider — the atom [`classify_checkpoint`] reduces over. A value
+/// *mismatch* never becomes a `SampleResult`: [`reconcile`] returns
+/// [`ReconcileOutcome::Halted`] the instant it sees one, before the rest of
+/// the sample set is even classified — a mismatch is always CRITICAL,
+/// independent of how the remaining samples would otherwise classify.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleResult {
+    /// The independent provider answered and its balance matched ours.
+    Matched,
+    /// The independent-provider fetch itself failed (timeout, rate limit,
+    /// a refused archive-depth read, ...) — not a mismatch, just no answer.
+    FetchFailed,
+}
+
+/// What one reconciliation checkpoint amounted to, decided purely from its
+/// sample outcomes — no network inside this function, which is what makes
+/// it unit-testable with no live dependency. This classification is the
+/// core of ADR-0027: the old code's `if checked > 0` shortcut could not
+/// tell "this block touched nothing worth sampling" apart from "every
+/// fetch failed" — both are `checked == 0` — which is exactly the blind
+/// spot `docs/deploy.md` records for the 2026-07-26 catch-up (685
+/// checkpoints, the independent provider refusing every archive-depth
+/// fetch, zero log lines, the old `reconcile` still returning `true`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointOutcome {
+    /// The block had no candidate accounts to sample at all — nothing was
+    /// there to check, which is not evidence of anything failing.
+    Empty,
+    /// At least one comparison completed and every completed comparison
+    /// matched (a mismatch would already have short-circuited `reconcile`
+    /// before classification ever runs).
+    Success {
+        /// Comparisons completed this checkpoint.
+        checked: usize,
+    },
+    /// At least one comparison was attempted and *all* of them failed to
+    /// fetch from the independent provider.
+    Dark {
+        /// Fetches attempted (== failed, by construction of this variant).
+        attempted: usize,
+    },
+}
+
+/// Classify a checkpoint from its sample outcomes.
+///
+/// `candidates` is the number of accounts the block actually touched
+/// (before the `samples` cap), passed *separately* from `results.len()` so
+/// "no candidates" (an empty block) and "candidates present but none
+/// attempted" are never conflated even in principle — see
+/// [`CheckpointOutcome::Empty`]'s docs. In practice `results` is only ever
+/// empty here because `candidates` was zero: a positive sample cap always
+/// attempts at least one candidate when one exists.
+fn classify_checkpoint(candidates: usize, results: &[SampleResult]) -> CheckpointOutcome {
+    if candidates == 0 {
+        return CheckpointOutcome::Empty;
+    }
+    let checked = results.iter().filter(|r| **r == SampleResult::Matched).count();
+    if checked > 0 {
+        CheckpointOutcome::Success { checked }
+    } else {
+        CheckpointOutcome::Dark { attempted: results.len() }
+    }
+}
+
+/// Whether `consecutive_dark` just crossed a multiple of
+/// [`DARK_ESCALATION_THRESHOLD`] — `true` at exactly the threshold, twice
+/// it, three times it, ... so a prolonged outage keeps re-paging the
+/// operator rather than paging once and going quiet, but no single
+/// checkpoint between multiples re-fires the same line (do not spam a log
+/// line every ~6 min forever).
+fn should_escalate(consecutive_dark: u64) -> bool {
+    consecutive_dark > 0 && consecutive_dark.is_multiple_of(DARK_ESCALATION_THRESHOLD)
+}
+
+/// What one [`reconcile`] call amounted to. The follow loop only ever
+/// stops on `Halted` — everything else, including a fully dark checkpoint,
+/// lets following continue; see the module docs and ADR-0027 for why.
+enum ReconcileOutcome {
+    /// Following continues. The checkpoint's classification has already
+    /// been recorded into `node`'s [`risepir_http::ReconcileHealth`] and
+    /// logged — including, if applicable, an escalating `CRITICAL` for a
+    /// prolonged dark streak.
+    Continued,
+    /// A value mismatch or a verified-read error. `reconcile` has already
+    /// logged `CRITICAL` and marked the health record halted; the follow
+    /// loop must stop.
+    Halted,
+}
+
 /// Diff up to `samples` of block `n`'s own touched accounts against the
-/// independent provider at height `n`. Fetch failures skip the sample
-/// (warn); a value mismatch is CRITICAL and returns `false` (stop
-/// following, keep serving the last good block).
+/// independent provider at height `n`, classify the checkpoint
+/// ([`classify_checkpoint`]), record it into `node`'s reconcile health
+/// ([`risepir_http::NodeState::record_reconcile_checkpoint`]), and log it —
+/// every checkpoint, including a dark one.
+///
+/// A fetch failure is not evidence of anything wrong with *this*
+/// deployment; it only marks that sample [`SampleResult::FetchFailed`]. A
+/// value **mismatch** is CRITICAL and returns [`ReconcileOutcome::Halted`]
+/// — stop following, keep serving the last good block — exactly as before
+/// this change. Everything else, including a checkpoint that is *entirely*
+/// dark, returns [`ReconcileOutcome::Continued`]: see the module docs for
+/// why halting on a third party's unavailability is the wrong trade. A
+/// prolonged dark streak instead escalates to a `CRITICAL` log at
+/// [`DARK_ESCALATION_THRESHOLD`] — loud, but not fatal.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile(
     confirm: &RpcClient,
     node: &Arc<NodeState>,
@@ -839,7 +997,8 @@ async fn reconcile(
     credited: &[([u8; 20], u128)],
     complete: bool,
     samples: usize,
-) -> bool {
+    reconcile_every: u64,
+) -> ReconcileOutcome {
     // Tx-changed accounts are exact in both modes; credited recipients
     // are only guaranteed tracked in complete mode.
     let mut candidates: Vec<[u8; 20]> = changed.iter().map(|(a, _)| *a).collect();
@@ -847,8 +1006,10 @@ async fn reconcile(
         candidates.extend(credited.iter().map(|(a, _)| *a));
     }
     candidates.dedup();
+    let candidate_count = candidates.len();
 
     let mut checked = 0usize;
+    let mut results: Vec<SampleResult> = Vec::new();
     for addr in candidates {
         if checked >= samples {
             break;
@@ -860,30 +1021,91 @@ async fn reconcile(
                     "risepir-rpc mainnet: reconcile: fetch for 0x{} at {n} failed ({e}); skipping sample",
                     hex20(&addr)
                 );
+                results.push(SampleResult::FetchFailed);
                 continue;
             }
         };
         let ours = match node.balance_of(&keccak256(&addr)).await {
             Ok(v) => v.unwrap_or(0),
             Err(e) => {
+                node.mark_reconcile_halted();
                 critical(&format!("verified read during reconcile failed: {e}"));
-                return false;
+                return ReconcileOutcome::Halted;
             }
         };
         if ours != reference {
+            node.mark_reconcile_halted();
             critical(&format!(
                 "reconcile MISMATCH at block {n} for 0x{}: store says {ours} wei, independent provider says {reference} wei — \
                  the feed has drifted; serving stays at the last applied block; re-bootstrap required",
                 hex20(&addr)
             ));
-            return false;
+            return ReconcileOutcome::Halted;
         }
+        results.push(SampleResult::Matched);
         checked += 1;
     }
-    if checked > 0 {
-        eprintln!("risepir-rpc mainnet: reconcile at block {n}: {checked} account(s) exact vs independent provider");
+
+    let outcome = classify_checkpoint(candidate_count, &results);
+    let (record_checked, dark) = match outcome {
+        CheckpointOutcome::Empty => (0, false),
+        CheckpointOutcome::Success { checked } => (checked, false),
+        CheckpointOutcome::Dark { .. } => (0, true),
+    };
+    let health = node.record_reconcile_checkpoint(n, record_checked, dark);
+
+    match outcome {
+        CheckpointOutcome::Empty => {
+            eprintln!("risepir-rpc mainnet: reconcile at block {n}: no candidate accounts to check (empty block)");
+        }
+        CheckpointOutcome::Success { checked } => {
+            eprintln!("risepir-rpc mainnet: reconcile at block {n}: {checked} account(s) exact vs independent provider");
+        }
+        CheckpointOutcome::Dark { attempted } => {
+            let since_success = if health.last_success_unix == 0 {
+                "no successful comparison yet this run".to_string()
+            } else {
+                let elapsed = unix_now().saturating_sub(health.last_success_unix);
+                format!("{} since the last one, at block {}", format_duration_secs(elapsed), health.last_success_block)
+            };
+            eprintln!(
+                "risepir-rpc mainnet: reconcile: WARNING: block {n}: {attempted} fetch(es) attempted against the \
+                 independent provider, {attempted} failed (dark checkpoint #{} in a row); {since_success}",
+                health.consecutive_dark
+            );
+            if should_escalate(health.consecutive_dark) {
+                let blocks_dark = health.consecutive_dark.saturating_mul(reconcile_every);
+                critical(&format!(
+                    "the reconcile integrity backstop has been dark for {} checkpoint(s) (~{blocks_dark} blocks) — \
+                     no cross-provider comparison has succeeded since block {} — the independent reconcile provider \
+                     appears unavailable; following continues regardless (a third-party outage must not become \
+                     this deployment's outage), but the ingest path is running unverified until this clears",
+                    health.consecutive_dark, health.last_success_block
+                ));
+            }
+        }
     }
-    true
+
+    ReconcileOutcome::Continued
+}
+
+/// `Hh`/`Mm`/`Ss`-style duration for log lines — this module's only
+/// consumer is the dark-checkpoint warning above.
+fn format_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn critical(msg: &str) {
@@ -892,4 +1114,96 @@ fn critical(msg: &str) {
 
 fn hex20(bytes: &[u8; 20]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure, network-free tests for the reconcile checkpoint's own
+    //! classification and escalation logic (ADR-0027) — no `RpcClient`, no
+    //! `NodeState`, no tokio runtime: just the decision functions
+    //! `reconcile` itself delegates to. This is deliberately the shape
+    //! `docs/deploy.md`'s "silently unavailable" incident calls for: the
+    //! bug was in the *classification*, and classification is exactly what
+    //! is exercised here without needing a live network dependency in
+    //! `cargo test`.
+    use super::*;
+
+    // ── classify_checkpoint ──────────────────────────────────────────────
+
+    /// The failure mode this whole change exists to catch: every attempted
+    /// comparison failed. Must classify as `Dark`, never `Success` — the
+    /// old `if checked > 0` gate silently treated this the same as "nothing
+    /// to check".
+    #[test]
+    fn all_fetches_failed_classifies_as_dark_not_success() {
+        let results = [SampleResult::FetchFailed, SampleResult::FetchFailed, SampleResult::FetchFailed];
+        let outcome = classify_checkpoint(3, &results);
+        assert_eq!(outcome, CheckpointOutcome::Dark { attempted: 3 });
+    }
+
+    /// A block with no candidate accounts at all (nothing touched worth
+    /// sampling) must classify as `Empty`, never `Dark` — an empty block is
+    /// not evidence that anything failed.
+    #[test]
+    fn no_candidates_classifies_as_empty() {
+        let outcome = classify_checkpoint(0, &[]);
+        assert_eq!(outcome, CheckpointOutcome::Empty);
+    }
+
+    /// `Empty` is decided from the candidate count, not from whether any
+    /// `results` happen to be present — a checkpoint that genuinely had
+    /// zero candidates can never produce a non-empty `results` slice in
+    /// practice, but the function must not accidentally key off
+    /// `results.is_empty()` instead of `candidates == 0` (that would make
+    /// "candidates present but a misconfigured zero sample cap attempted
+    /// none" silently read as `Empty` too — still not `Dark`, but for the
+    /// wrong reason. Pin the actual contract: candidate count decides.
+    #[test]
+    fn empty_classification_is_keyed_on_candidate_count() {
+        assert_eq!(classify_checkpoint(0, &[SampleResult::Matched]), CheckpointOutcome::Empty);
+    }
+
+    /// At least one completed comparison, even amid failures, is `Success`
+    /// — a mismatch (which never becomes a `SampleResult`) would already
+    /// have short-circuited `reconcile` before classification runs, so any
+    /// `Matched` here is trustworthy.
+    #[test]
+    fn one_match_among_failures_is_success_with_exact_count() {
+        let results = [SampleResult::FetchFailed, SampleResult::Matched, SampleResult::FetchFailed, SampleResult::Matched];
+        let outcome = classify_checkpoint(4, &results);
+        assert_eq!(outcome, CheckpointOutcome::Success { checked: 2 });
+    }
+
+    // ── should_escalate ──────────────────────────────────────────────────
+
+    /// No escalation below the threshold, ever.
+    #[test]
+    fn escalation_does_not_fire_before_threshold() {
+        for n in 0..DARK_ESCALATION_THRESHOLD {
+            assert!(!should_escalate(n), "must not escalate at consecutive_dark={n}");
+        }
+    }
+
+    /// Fires at exactly the threshold.
+    #[test]
+    fn escalation_fires_at_threshold() {
+        assert!(should_escalate(DARK_ESCALATION_THRESHOLD));
+    }
+
+    /// Re-fires at every further multiple (the operator keeps getting
+    /// paged through a prolonged outage) but not on the checkpoints in
+    /// between — a single log line at the threshold and then silence
+    /// forever would under-alert; one every checkpoint would spam.
+    #[test]
+    fn escalation_repeats_periodically_not_on_every_checkpoint() {
+        assert!(should_escalate(2 * DARK_ESCALATION_THRESHOLD));
+        assert!(should_escalate(3 * DARK_ESCALATION_THRESHOLD));
+        for offset in 1..DARK_ESCALATION_THRESHOLD {
+            assert!(
+                !should_escalate(DARK_ESCALATION_THRESHOLD + offset),
+                "must not re-fire at consecutive_dark={}",
+                DARK_ESCALATION_THRESHOLD + offset
+            );
+        }
+    }
 }

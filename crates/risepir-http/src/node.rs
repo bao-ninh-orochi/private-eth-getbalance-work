@@ -5,9 +5,9 @@
 //! `/answer` path).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
@@ -57,6 +57,70 @@ pub const SETUP_MAX_CONCURRENT: usize = 2;
 /// something you can actually ask about" affordance for the browser front
 /// end in a partial deployment, not a chain index.
 pub const RECENT_CAPACITY: usize = 128;
+
+/// Point-in-time snapshot of the cross-provider reconciliation check's own
+/// health — what `GET /healthz` reports (see that handler's doc comment for
+/// the wire format) and what the follow loop in `risepir-rpc` updates after
+/// every checkpoint via [`NodeState::record_reconcile_checkpoint`].
+///
+/// # Why this exists
+///
+/// The integrity backstop (`docs/threat-model.md` §6) is *sampled*
+/// cross-provider comparison, not prevention, and it can itself go dark: on
+/// 2026-07-26 it ran with zero completed comparisons for ~2 hours during a
+/// catch-up (the independent provider refuses archive-depth fetches), and
+/// nothing surfaced it — not `/healthz`, not `/mode`, not the startup
+/// banner. The old code's summary line was gated on `checked > 0`, so a
+/// checkpoint that compared several accounts and found them exact was
+/// indistinguishable, to any monitor, from a checkpoint where every fetch
+/// failed: both logged nothing and both left the caller reporting success.
+/// This type exists so that distinction is observable instead of inferred
+/// (ADR-0027).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReconcileHealth {
+    /// Whether reconciliation runs at all (`reconcile_every > 0`). `false`
+    /// for any deployment that never calls
+    /// [`NodeState::set_reconcile_configured`] — mock/demo included — and
+    /// deliberately not inferred from any other field: an unconfigured
+    /// deployment must read as "not configured", never silently as
+    /// "healthy" just because every counter happens to be zero.
+    pub configured: bool,
+    /// Block number of the most recent checkpoint attempted (dark, empty,
+    /// or successful) — `0` if none has run yet this process.
+    pub last_checkpoint_block: u64,
+    /// Unix timestamp (seconds) of the most recent checkpoint attempted —
+    /// `0` if none has run yet this process.
+    pub last_checkpoint_unix: u64,
+    /// Block number of the most recent checkpoint with at least one
+    /// completed comparison — `0` if none has ever succeeded this process.
+    pub last_success_block: u64,
+    /// Unix timestamp (seconds) of the most recent checkpoint with at least
+    /// one completed comparison — `0` if none has ever succeeded this
+    /// process.
+    pub last_success_unix: u64,
+    /// Total individual account comparisons completed, summed across every
+    /// checkpoint this process has run.
+    pub comparisons_total: u64,
+    /// Total checkpoints attempted (dark, empty, or successful) this
+    /// process.
+    pub checkpoints_total: u64,
+    /// Consecutive checkpoints that attempted at least one comparison and
+    /// had *every* attempt fail. A checkpoint with no candidate accounts at
+    /// all (an empty block — nothing was there to check) leaves this
+    /// unchanged rather than incrementing it; any checkpoint with at least
+    /// one completed comparison resets it to `0`. See
+    /// [`NodeState::record_reconcile_checkpoint`].
+    pub consecutive_dark: u64,
+    /// Whether a value mismatch has permanently halted the follow loop.
+    /// Serving continues at the last good block regardless (never-wrong-
+    /// answer, not never-stale) — this field only reports that the
+    /// integrity backstop is the reason nothing new is being applied.
+    pub halted: bool,
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 
 /// Everything the lock guards: the PIR server, its sliding delta-ring
 /// window, and a bounded per-block delta index for immutable
@@ -123,6 +187,18 @@ pub struct NodeState {
     /// driver and read by `/recent`, neither of which should ever wait on
     /// the PIR server's own lock.
     recent: RwLock<VecDeque<[u8; 20]>>,
+    /// Cross-provider reconciliation health — see [`ReconcileHealth`].
+    ///
+    /// Same reasoning as `recent`'s own lock, one step further: a
+    /// `std::sync::Mutex` rather than the async `tokio::sync::RwLock`
+    /// `recent` uses, because every critical section here is a handful of
+    /// field writes/reads with no `.await` inside it (tokio's own guidance
+    /// is that a `std` mutex held only that briefly is the right tool, not
+    /// the async one). Written by the follow loop in `risepir-rpc` after
+    /// every checkpoint; read by `GET /healthz`. Never inside `inner`'s
+    /// lock — a `/healthz` probe must not queue behind `/answer` traffic
+    /// just to report a handful of counters.
+    reconcile: Mutex<ReconcileHealth>,
 }
 
 impl NodeState {
@@ -148,6 +224,7 @@ impl NodeState {
             backend_params,
             complete,
             recent: RwLock::new(VecDeque::new()),
+            reconcile: Mutex::new(ReconcileHealth::default()),
         }
     }
 
@@ -171,6 +248,84 @@ impl NodeState {
                 recent.pop_front();
             }
         }
+    }
+
+    /// Declare whether this deployment reconciles at all
+    /// (`reconcile_every > 0`). Called once at startup — before the PIR
+    /// listener starts accepting requests, so `GET /healthz` never has a
+    /// window where it could observe a stale "not configured" for a
+    /// deployment that actually does reconcile.
+    ///
+    /// A mock/demo deployment (`risepir-rpc demo`) never calls this, which
+    /// is the honest state: it never reconciles, and `/healthz` must say so
+    /// explicitly (`reconcile_configured=0`) rather than have the field
+    /// silently absent — an absent field reads as "healthy" to a monitor
+    /// that does not know better, exactly the failure this type exists to
+    /// close (ADR-0027).
+    pub fn set_reconcile_configured(&self, configured: bool) {
+        self.reconcile_lock().configured = configured;
+    }
+
+    /// Record one reconciliation checkpoint's outcome — called by the
+    /// follow loop in `risepir-rpc` after every `reconcile_every`-th block
+    /// — and return the freshly updated snapshot, so the caller can decide
+    /// whether to escalate without a second lock acquisition.
+    ///
+    /// `checked` is the number of comparisons that actually completed this
+    /// checkpoint; `dark` is whether at least one comparison was attempted
+    /// and *every* attempt failed. **A checkpoint with no candidate
+    /// accounts at all must pass `checked = 0, dark = false`** — that is
+    /// what leaves [`ReconcileHealth::consecutive_dark`] unchanged rather
+    /// than incrementing it. Conflating "nothing to check" with "checked
+    /// and every attempt failed" was the root cause of the 2026-07-26 blind
+    /// spot this type exists to close — see the struct's docs.
+    ///
+    /// Any checkpoint with `checked > 0` resets `consecutive_dark` to `0`
+    /// and advances `last_success_block`/`last_success_unix`, regardless of
+    /// `dark` (the two are mutually exclusive in practice, but `checked > 0`
+    /// wins if a caller ever passed both).
+    pub fn record_reconcile_checkpoint(&self, block: u64, checked: usize, dark: bool) -> ReconcileHealth {
+        let now = unix_now();
+        let mut h = self.reconcile_lock();
+        h.last_checkpoint_block = block;
+        h.last_checkpoint_unix = now;
+        h.checkpoints_total += 1;
+        h.comparisons_total += checked as u64;
+        if checked > 0 {
+            h.last_success_block = block;
+            h.last_success_unix = now;
+            h.consecutive_dark = 0;
+        } else if dark {
+            h.consecutive_dark += 1;
+        }
+        // else: an empty-block checkpoint — `consecutive_dark` is left
+        // exactly as it was; see the field's docs.
+        *h
+    }
+
+    /// Record that a value mismatch (or a verified-read error) has
+    /// permanently halted the follow loop. Surfaced via `/healthz`
+    /// (`reconcile_halted=1`) even though the PIR server keeps serving its
+    /// last good block — never-wrong-answer, not never-stale.
+    pub fn mark_reconcile_halted(&self) {
+        self.reconcile_lock().halted = true;
+    }
+
+    /// Snapshot of the current reconciliation health — what `GET /healthz`
+    /// reports.
+    pub fn reconcile_health(&self) -> ReconcileHealth {
+        *self.reconcile_lock()
+    }
+
+    /// Locks `reconcile`, recovering the inner value on poison rather than
+    /// panicking. Every critical section behind this lock is a handful of
+    /// infallible field updates, so poisoning is not expected in practice —
+    /// but `GET /healthz` is a liveness probe, and a probe handler must
+    /// never itself panic (this crate's panic-free discipline applies here
+    /// too, not just to adversarial wire input): best-effort stale-but-safe
+    /// counters beat failing the request.
+    fn reconcile_lock(&self) -> std::sync::MutexGuard<'_, ReconcileHealth> {
+        self.reconcile.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Apply one block: the sole writer path. Applies to the server,
@@ -424,18 +579,73 @@ async fn recent(State(state): State<Arc<NodeState>>) -> Response {
     resp
 }
 
-/// `GET /healthz`: liveness + readiness in one — `200` with the plain-text
-/// body `ok <head-block>` (e.g. `ok 19123456`). Taking the read lock is
-/// deliberate: a server wedged behind a stuck writer fails this probe via
-/// the request timeout instead of reporting healthy while unable to
-/// answer. For monitors, a stalling head number is the block-lag signal
-/// (roadmap C7); anything beyond that belongs to real metrics, not a
-/// health probe.
+/// `GET /healthz`: liveness + readiness, plus the reconcile check's own
+/// health (ADR-0027), as plain text — `200` with one value/line per line:
+///
+/// ```text
+/// ok <head-block>
+/// reconcile_configured=<0|1>
+/// reconcile_last_checkpoint_block=<u64>
+/// reconcile_last_checkpoint_unix=<u64>
+/// reconcile_last_success_block=<u64>
+/// reconcile_last_success_unix=<u64>
+/// reconcile_comparisons_total=<u64>
+/// reconcile_checkpoints_total=<u64>
+/// reconcile_consecutive_dark=<u64>
+/// reconcile_halted=<0|1>
+/// ```
+///
+/// e.g. `ok 19123456` followed by nine `reconcile_*=…` lines.
+///
+/// # Compatibility guarantee
+///
+/// The **first line is, byte for byte, exactly what it always was:
+/// `ok <head-block>` and nothing else on that line.** Any existing monitor
+/// that checks a status-line prefix or reads only the first line keeps
+/// working unmodified. Every `reconcile_*` line is a pure addition below
+/// it, one `key=value` pair per line, in the fixed order above. A field is
+/// always present, never omitted — a deployment that does not reconcile at
+/// all (mock/demo, or `mainnet --reconcile-every 0`) still emits every
+/// line, with `reconcile_configured=0`: an *absent* field would read as
+/// "healthy" to a monitor that does not know better, which is precisely
+/// the blind spot this endpoint exists to close. This stays plain text
+/// (not JSON) deliberately — `/healthz` was already this crate's one
+/// text-format exception to the binary-everywhere-else rule (`docs/plan.md`
+/// ADR-0006), and a handful of counters does not earn a second format.
+///
+/// Taking the read lock for the head number is deliberate: a server wedged
+/// behind a stuck writer fails this probe via the request timeout instead
+/// of reporting healthy while unable to answer. For monitors, a stalling
+/// head number is the block-lag signal (roadmap C7); the reconcile fields
+/// are the integrity-check-lag signal — anything beyond that belongs to
+/// real metrics, not a health probe.
 async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
     let inner = state.inner.read().await;
     let h = inner.server.block();
     drop(inner);
-    (StatusCode::OK, format!("ok {h}")).into_response()
+    let rh = state.reconcile_health();
+    let body = format!(
+        "ok {h}\n\
+         reconcile_configured={}\n\
+         reconcile_last_checkpoint_block={}\n\
+         reconcile_last_checkpoint_unix={}\n\
+         reconcile_last_success_block={}\n\
+         reconcile_last_success_unix={}\n\
+         reconcile_comparisons_total={}\n\
+         reconcile_checkpoints_total={}\n\
+         reconcile_consecutive_dark={}\n\
+         reconcile_halted={}\n",
+        u8::from(rh.configured),
+        rh.last_checkpoint_block,
+        rh.last_checkpoint_unix,
+        rh.last_success_block,
+        rh.last_success_unix,
+        rh.comparisons_total,
+        rh.checkpoints_total,
+        rh.consecutive_dark,
+        u8::from(rh.halted),
+    );
+    (StatusCode::OK, body).into_response()
 }
 
 // ─── small helpers ────────────────────────────────────────────────────

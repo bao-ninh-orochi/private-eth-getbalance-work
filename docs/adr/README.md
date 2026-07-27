@@ -876,3 +876,66 @@ default (`--journal-restore` off, `--save-interval` unchanged) is
 byte-for-byte today's behavior plus a sidecar file and a report line, which
 is the point — the feature must be free to ignore before it is trusted to
 lean on.
+### ADR-0027 — Make the reconcile check's own health observable; escalate on prolonged darkness, never halt on it **[NEW]**
+
+**Chosen:** track the cross-provider reconciliation check's own health —
+`ReconcileHealth` on `risepir-http`'s `NodeState`, guarded by its own
+`std::sync::Mutex` on the `recent` field's pattern (never inside the PIR
+server's lock). `reconcile` classifies every checkpoint before logging or
+recording it: `Empty` (no candidate accounts — the block touched nothing
+worth sampling, not a failure of anything), `Success{checked}`, or
+`Dark{attempted}` (≥1 comparison attempted, all failed) — and logs all three,
+where a dark checkpoint always warns with the attempt/fail count and time
+since the last success. `consecutive_dark` increments only on `Dark`, resets
+only on `Success`, and is left **unchanged** by `Empty` — an empty block is
+not evidence of anything failing and must not be conflated with "checked and
+every attempt failed", which is the distinction this whole ADR exists to
+make. After `DARK_ESCALATION_THRESHOLD` (20) consecutive dark checkpoints —
+~2 h at the default cadence — the crate's `critical(...)` line fires, then
+re-fires every further 20 rather than once. `GET /healthz` grows `key=value`
+lines for all of the above, with the **first line kept byte-identical to
+today's `ok <head>`** so an existing prefix/line probe never breaks, and an
+unconfigured deployment (mock/demo, or `--reconcile-every 0`) reports
+`reconcile_configured=0` explicitly rather than omitting the fields. A value
+mismatch still halts following exactly as before — nothing here touches that
+path.
+
+**Rejected:** (a) halting the follow loop after prolonged darkness — the
+naive reading of "detection is now blind, so stop." Reconciliation checks an
+*independent third party*; halting because that party is unreachable
+converts publicnode's outage into this deployment's outage while preventing
+exactly zero wrong answers (the feed, and therefore every served balance, is
+untouched by whether the reconcile provider happens to answer). (b) a
+separate `GET /reconcile` endpoint — a second thing to discover, poll, and
+keep in sync with `/healthz`'s own liveness semantics, for data that costs
+nothing to fold into the one probe that already exists. (c) JSON on
+`/healthz` — every other endpoint in this crate is a deliberately binary
+wire format (`docs/plan.md` ADR-0006); `/healthz` is already the one
+plain-text exception, and a handful of counters does not justify a second
+text format on top of it.
+
+**Why:** the 2026-07-26 complete-set catch-up ran this exact check dark for
+~2 hours straight — publicnode's keyless tier refuses archive-depth
+`eth_getBalance`, so all 685 checkpoints during the snapshot→head replay
+logged a per-sample fetch failure and nothing else (`docs/deploy.md` §5.3,
+"silently unavailable"). The old code's summary line was gated on
+`if checked > 0`, so a checkpoint with zero completed comparisons — whether
+because the block touched nothing (routine) or because every fetch failed
+(the actual incident) — produced no log line, and `reconcile` returned `true`
+either way. Nothing downstream (`/healthz`, `/mode`, the startup banner, the
+page) could tell "checked and exact" apart from "not checked at all". Closing
+that blind spot is the entire point; making the follow loop *halt* on it was
+never on the table, because that would hand a stranger's uptime the power to
+stop this deployment.
+
+**Cost — say the sampling rate honestly:** at the defaults (`reconcile_every
+30`, `reconcile_samples 8`) reconciliation runs ~1,920 account comparisons a
+day against a complete set of 200.5 M accounts. That is not coverage, and
+this ADR does not claim it is — it is a well-targeted smoke test, sampling
+exactly the accounts the block just changed, which is where a feed error
+would actually show up. `docs/threat-model.md` §6 now states this rate
+plainly instead of leaving "sampled" to imply more than it does.
+
+**Follow-up, deliberately deferred:** surfacing any of this on the browser
+front end (`web/`) is left to the front-end redesign already in flight on
+another branch — out of scope here.

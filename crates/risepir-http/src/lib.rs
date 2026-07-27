@@ -80,7 +80,7 @@ pub mod wire;
 #[cfg(feature = "client")]
 pub use client::{ClientError, PirHttpClient};
 #[cfg(feature = "server")]
-pub use node::{NodeState, MAX_ANSWER_BODY_BYTES};
+pub use node::{NodeState, ReconcileHealth, MAX_ANSWER_BODY_BYTES};
 #[cfg(feature = "server")]
 pub use web::WebAssets;
 pub use wire::WireError;

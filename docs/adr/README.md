@@ -447,7 +447,10 @@ guess). That mechanism *is* sound enough to cache against — a re-bootstrapped 
 starts an empty ring, so a stale-lineage hint gets a `409` rather than a wrong answer —
 but it is one more correctness argument standing between a user and a balance, for a
 UX win that a local deployment does not need. Not built; the requirement for building
-it safely is recorded here.
+it safely is recorded here. (ADR-0028 later built the *server*-side half of this idea —
+one shared, cached `/setup` encode reused across requests, on this same
+DeltaRing-bridgeability argument; a client-side persistent cache across browser visits
+remains deferred.)
 
 **`GET /recent` (new endpoint).** A partial deployment only knows accounts touched
 since bootstrap, so a visitor typing an arbitrary address gets an honest error and
@@ -939,3 +942,96 @@ plainly instead of leaving "sampled" to imply more than it does.
 **Follow-up, deliberately deferred:** surfacing any of this on the browser
 front end (`web/`) is left to the front-end redesign already in flight on
 another branch — out of scope here.
+### ADR-0028 — Cache one shared `/setup` encode; the per-route concurrency cap never earned its keep **[NEW]**
+
+**Chosen:** `NodeState` caches one already-encoded `GET /setup` response
+(`bytes::Bytes`, refcounted) behind its own `tokio::sync::Mutex`, regenerated
+only once the server's head has advanced more than **half** the `DeltaRing`'s
+capacity past the block the cache is pinned at. Every `/setup` caller now gets
+a clone of that one shared buffer — a refcount bump, not a copy — so
+live-buffer memory for this route is **O(1)** in the number of concurrent
+downloads instead of **O(N)**. The route's `ConcurrencyLimitLayer` (2 permits)
+is removed outright and `SETUP_MAX_CONCURRENT` deleted with it, not renamed or
+retuned. `GET /setup` also now sets `ETag`/`Cache-Control` and answers a
+matching `If-None-Match` with `304`, and `wire::encode_setup` pre-sizes its
+output buffer from the bundle's own geometry instead of growing it.
+
+**Rejected:** holding the permit across the body transfer instead of just the
+handler (reintroduces the exact throughput ceiling this change removes — see
+the second measurement below); streaming `/setup` from a borrowed hint instead
+of caching an encoded copy (does not remove per-connection response
+buffering at the layer below this crate, and complicates the wire format for
+a saving the cache already gets for free); a long `Cache-Control: max-age`
+instead of `no-cache` (a browser could then keep reusing a bundle whose block
+has since aged out of the ring and loop on a `409` from `/sync` forever — the
+same "silently stranded" failure mode the half-window rule below exists to
+rule out).
+
+**Why:** measured against the real binary — **partial mode, a 16 GB laptop,
+never at the complete mainnet set's 200 M-account scale**, flagged explicitly
+so these numbers are never mistaken for a production measurement:
+
+- **The concurrency cap never bounded what its own doc comment claimed.**
+  `tower`'s `ConcurrencyLimit` holds its permit in the *response future*
+  (`tower-0.5.3/src/limit/concurrency/future.rs`), and this handler always
+  returned a fully-materialized body, so the permit was released the instant
+  the handler returned — before a single byte reached a slow client, not
+  after the last one did. With 2 curl readers throttled to 20 kB/s
+  mid-transfer of a 1.77 MB mock `/setup`, a 3rd and 4th request each
+  completed in ~1.5 ms carrying the *full* body; repeated in partial mode
+  (a 48,960,201-byte `/setup`) with 20 throttled readers already in flight, a
+  21st request still returned the complete body, with a 22 ms
+  time-to-first-byte. The task brief that prompted this work claimed a slow
+  reader "can occupy a slot indefinitely" and that two slots cap the
+  deployment at "~15 new clients/hour" — **both claims are false**, which is
+  worth saying plainly rather than silently fixing alongside everything else.
+- **The real hazard was the mirror image, and was bounded by nothing.**
+  Because the permit released before transfer while each request's own
+  encoded body stayed alive for that response's whole lifetime, the number of
+  live ~831 MB buffers had no bound at all. RSS climbed monotonically with
+  concurrent throttled readers in partial mode (baseline ~100–110 MB),
+  reaching **631 MB with 40 readers in flight**. Allocator retention makes
+  any single per-reader figure noisy, so only the observed totals are
+  recorded here, never a derived per-reader constant.
+- **Half the ring, not all of it.** A client that bootstraps from a bundle
+  pinned at block `B` must reach `GET /sync?from=B&to=head` before `B` ages
+  out of the `DeltaRing`'s retention window, or it is stranded on a `409`
+  with no recourse but a full `/setup` re-download (`DeltaRing::range` is
+  strict by design — ADR-0006/0015's "never silently omit part of the
+  requested range" applied to the retention window). Reusing the cache for
+  the ring's *entire* window would let it serve a bundle that is already too
+  stale to finish syncing the moment the download completes: an 831 MB
+  transfer took ~8 minutes measured end to end, and the ring's capacity is
+  sized in blocks, not in wall-clock slack for a slow client. Capping reuse
+  at half the window — at the deployed 600-block ring, ~1 hour of chain time
+  — reserves the rest for exactly that download-plus-catch-up, while still
+  amortizing the encode over roughly half the ring instead of every block.
+  [`DeltaRing`] gained a `pub const fn capacity(&self)` accessor so this
+  arithmetic never has to duplicate the constructor's argument.
+- **`ETag` / `304`, honestly caveated.** `GET /setup` sets
+  `ETag: "setup-<block>"` and `Cache-Control: no-cache` (always revalidate,
+  never "don't store"); a matching `If-None-Match` gets `304 Not Modified`
+  with no body. Checked against the same freshness decision that already
+  gates the `200` path rather than a second, separately-maintained check, a
+  `304` is therefore only ever returned for a bundle the ring can still
+  bridge forward — correct by construction, not by a second proof. Browsers
+  cap how large a single disk-cache entry they will store, so an 831 MB
+  response may simply never be cached client-side at the complete-mainnet
+  scale, and the `304` path may only pay off for smaller deployments. It
+  costs nothing either way, so it stays.
+- **`wire::encode_setup` now pre-sizes its buffer.** At ~277 MB per segment,
+  the doubling-growth reallocations `Vec::new()` + repeated
+  `extend_from_slice` used to pay would copy hundreds of MB and transiently
+  hold two buffers alive at once. The exact final length is now computed up
+  front from `bundle.backend_params` alone (never `bundle.hints`, never a
+  hardcoded constant), with a `debug_assert_eq!` against the length actually
+  written — which doubles as an invariant check that every hint's real
+  length still matches `lwe_dim * reshape_row_width`. This is paid at most
+  once per cache regeneration now, rather than once per request.
+
+Bandwidth exhaustion from many legitimate-*looking* `/setup` fetches is still
+a real concern for a public deployment; that defense belongs entirely to the
+reverse proxy already in front of this server (Caddy, `docs/deploy.md` §3.7)
+or a CDN (roadmap C3/C5) — layers that can meter bytes actually on the wire,
+which is the one thing an in-process concurrency limiter on a
+fully-materialized-body handler could never do.

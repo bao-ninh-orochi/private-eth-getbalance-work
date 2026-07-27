@@ -238,7 +238,16 @@ pub fn encode_setup(bundle: &SetupBundle<SimplePirBackend>) -> Vec<u8> {
         "encode_setup: arity {arity} does not fit the u8 scheme byte"
     );
 
-    let mut out = Vec::new();
+    // Pre-size from the bundle's own geometry (see `setup_encoded_len`'s
+    // docs) instead of growing `out` by repeated `extend_from_slice`: at
+    // the deployed complete-mainnet scale a single segment's hint is
+    // ~277 MB, and `Vec`'s doubling growth would otherwise copy hundreds
+    // of MB per reallocation while transiently holding both the old and
+    // new buffers alive at once (ADR-0028, motivated by the `/setup`
+    // response cache this crate now keeps — this sizing fix pays off on
+    // every cache regeneration, not just once).
+    let capacity = setup_encoded_len(bundle);
+    let mut out = Vec::with_capacity(capacity);
     out.extend_from_slice(&SETUP_MAGIC);
     out.push(arity as u8);
     out.extend_from_slice(&bundle.params.num_buckets.to_le_bytes());
@@ -262,7 +271,62 @@ pub fn encode_setup(bundle: &SetupBundle<SimplePirBackend>) -> Vec<u8> {
     for hint in &bundle.hints {
         out.extend_from_slice(&codec::encode_u32s(&hint.data));
     }
+    debug_assert_eq!(
+        out.len(),
+        capacity,
+        "encode_setup: final length drifted from setup_encoded_len's up-front computation — \
+         the two walk the same fields and must stay in step"
+    );
     out
+}
+
+/// Exact byte length [`encode_setup`] will produce for `bundle`, derived
+/// field by field from the bundle itself and never from a hardcoded
+/// constant. This is what lets [`encode_setup`] `Vec::with_capacity` the
+/// exact final size instead of paying doubling-growth reallocation (see
+/// that function's docs).
+///
+/// The per-segment hint contribution is measured from `hint.data.len()`
+/// rather than derived from `lwe_dim * reshape_row_width`. Those two agree
+/// for every bundle a server actually produces — it is the same invariant
+/// [`decode_setup`] enforces on the way in — but deriving the *encoder's*
+/// buffer size from the geometry would quietly make `encode_setup` a
+/// validity check on its input, and it is not one: this crate's own
+/// decoder tests legitimately encode hand-built bundles whose hints do not
+/// match their geometry, precisely so the decoder can be seen to reject
+/// them. Measuring what will actually be written keeps the reservation
+/// exact for every input, and leaves rejecting a malformed bundle where it
+/// belongs — in [`decode_setup`].
+fn setup_encoded_len(bundle: &SetupBundle<SimplePirBackend>) -> usize {
+    // magic(4) + scheme:u8(1) + num_buckets/bucket_size/fingerprint_bits/
+    // value_bits/plaintext_bits: 5 × u32 (20) + block:u64(8) = 33.
+    let mut total: u64 = 33;
+    // Per segment: lwe_dim:u32(4) + plaintext_bits:u32(4) + sigma:f64(8) +
+    // seed:[u8;16](16) + n_rows:u32(4) + row_width:u32(4) + k:u32(4) +
+    // reshape_rows:u32(4) + reshape_row_width:u32(4) = 52, all fixed-width.
+    total += 52 * bundle.backend_params.len() as u64;
+    for hint in &bundle.hints {
+        let hint_len = hint.data.len() as u64;
+        total += uvarint_len(hint_len) as u64 + hint_len * 4;
+    }
+    usize::try_from(total).expect("setup_encoded_len: encoded length overflows usize")
+}
+
+/// Byte length of [`codec::encode_u32s`]'s LEB128 element-count prefix for
+/// `value` elements. Mirrors `risepir_proto::codec`'s own private
+/// `uvarint_len` — not exported from that crate, and this module already
+/// keeps its own fixed-size field readers (`read_u32`/`read_u64`/… above)
+/// separate from that module's internals for the same reason, so
+/// reimplementing this five-line function locally keeps the change
+/// contained to this crate instead of widening a sibling crate's public
+/// surface for one caller.
+fn uvarint_len(mut value: u64) -> usize {
+    let mut n = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        n += 1;
+    }
+    n
 }
 
 /// Inverse of [`encode_setup`].

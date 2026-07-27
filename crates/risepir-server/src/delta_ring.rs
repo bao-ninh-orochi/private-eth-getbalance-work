@@ -109,6 +109,18 @@ impl DeltaRing {
         BlockDelta::coalesce(&selected).ok()
     }
 
+    /// Maximum number of blocks this ring retains — the value [`Self::new`]
+    /// was constructed with, fixed for the ring's lifetime ([`Self::push`]
+    /// evicts to keep the live count at or under this bound; nothing grows
+    /// or shrinks it afterward). Lets a caller reason about how much of the
+    /// retention window remains without keeping its own separately-tracked
+    /// copy of the constructor argument — e.g. a `/setup` response cache
+    /// deciding how long its pinned block stays safe to serve
+    /// (`risepir-http`'s `NodeState::setup_bytes`, ADR-0028).
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Oldest block currently retained, or `None` if the ring is empty.
     pub fn oldest(&self) -> Option<u64> {
         self.buf.front().map(|d| d.block)

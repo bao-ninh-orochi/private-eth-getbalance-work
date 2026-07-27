@@ -705,12 +705,17 @@ Zero cash beyond the VM hours: DuckDNS, Let's Encrypt and Caddy are free, no
 static IP is reserved, and a handful of visitors is well under a gigabyte of
 egress.
 
-It is sized for **a link sent to a few colleagues**, not for public traffic:
-`SETUP_MAX_CONCURRENT = 2` means only two cold visitors bootstrap at once and
-the rest are shed with a clean `408` after `REQUEST_TIMEOUT`, at ~49 MB each;
-there is no rate limiting beyond that cap (threat model §3 names volumetric DoS
-as undefended). `/setup` behind a CDN plus per-IP quotas is roadmap C5/C3 — do
-that before sharing the link wider.
+It is sized for **a link sent to a few colleagues**, not for public traffic.
+Cold visitors now share a single cached `/setup` encode and get a refcounted
+clone of it rather than one encode and one buffer each (ADR-0028), so
+concurrent bootstraps cost bandwidth rather than multiplying memory — the
+per-route `SETUP_MAX_CONCURRENT = 2` cap that used to sit here is gone, having
+been measured not to bound what it claimed (tower released its permit when the
+handler returned, not when the transfer finished). What remains undefended is
+unchanged and is the part that matters: there is **no rate limiting at all**,
+and the egress of an 830.73 MB bundle per cold visitor is still entirely real
+(threat model §3 names volumetric DoS as undefended). `/setup` behind a CDN
+plus per-IP quotas is roadmap C5/C3 — do that before sharing the link wider.
 
 **Certificate renewal needs the VM up occasionally.** Caddy renews from ~30 days
 before expiry over `:80`. Since this VM is stopped between demos, a gap longer

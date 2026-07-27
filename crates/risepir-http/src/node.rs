@@ -5,18 +5,26 @@
 //! `/answer` path).
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::sync::RwLock;
-use tower::limit::ConcurrencyLimitLayer;
+// This file holds both kinds of mutex, on purpose, and the distinction is
+// load-bearing enough to be visible at every use site rather than inferred
+// from an import list. Bare `Mutex` is `std`'s, for critical sections that
+// are a few field accesses with no `.await` in them (`reconcile`);
+// `AsyncMutex` is tokio's, for a guard that *is* held across an await
+// point (`setup_cache`, which awaits `inner.read()` inside it). Getting
+// these the wrong way round is either a needlessly async lock or a
+// blocking one held across a yield — the second stalls the executor.
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tower_http::timeout::TimeoutLayer;
 
 use ikpir_common::backend::simple::SimpleServerParams;
@@ -38,19 +46,16 @@ pub const MAX_ANSWER_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 /// and a handler stuck behind the write lock; expiry is a clean `408`,
 /// never a hung connection held open indefinitely (threat model §3). The
 /// response *body* transfer is not under this clock — every response here
-/// is fully materialized before it is sent, so a slow download only
-/// occupies a socket, not a handler.
+/// is fully materialized (or, for `/setup`, refcount-cloned from
+/// [`NodeState`]'s cache — ADR-0028) before it is sent, so a slow download
+/// only occupies a socket, not a handler. That is still true of a `/setup`
+/// cache *regeneration*, the one handler on this router that now does
+/// nontrivial work: encoding a fresh bundle is bounded, in-memory work that
+/// finishes long before this clock could matter. It is the multi-minute
+/// wire transfer to a slow client — measured 7m46s for the real
+/// complete-mainnet bundle — that never touches this timeout at all, on
+/// purpose, because it happens entirely after the handler has returned.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Maximum concurrent `GET /setup` responses. `/setup` is by far the
-/// largest response this server produces (~47 MB at 1M accounts — the
-/// whole per-segment hint set), which makes it the cheapest
-/// bandwidth-exhaustion lever an attacker has (roadmap C3). A small cap
-/// queues the excess instead of fanning out gigabytes; queued requests
-/// that outlive [`REQUEST_TIMEOUT`] are shed with a clean `408`. Honest
-/// clients fetch `/setup` once per bootstrap, so contention on this
-/// semaphore is a non-event outside an attack.
-pub const SETUP_MAX_CONCURRENT: usize = 2;
 
 /// How many recently-touched addresses `GET /recent` retains
 /// ([`NodeState::note_recent`]). Small on purpose: this is a "here is
@@ -136,6 +141,21 @@ struct Inner {
     per_block: BTreeMap<u64, BlockDelta>,
 }
 
+/// One fully wire-encoded `GET /setup` response, cached by the block its
+/// [`risepir_server::SetupBundle`] was pinned at (ADR-0028). `bytes` is
+/// exactly what [`wire::encode_setup`] produced — cloning it (`bytes::Bytes`,
+/// re-exported as [`axum::body::Bytes`]) is a refcount bump, never a copy,
+/// which is what makes handing every concurrent `/setup` caller its own
+/// clone O(1) in the number of callers instead of O(N) in encoded bytes.
+struct CachedSetup {
+    /// The block this bundle was pinned at when it was encoded — compared
+    /// against the server's *current* head to decide whether the bytes are
+    /// still safe to serve (see [`NodeState::setup_bytes`]).
+    block: u64,
+    /// The full `GET /setup` response body.
+    bytes: Bytes,
+}
+
 /// Shared server state behind `Arc` (ADR-0010).
 pub struct NodeState {
     inner: RwLock<Inner>,
@@ -187,6 +207,7 @@ pub struct NodeState {
     /// driver and read by `/recent`, neither of which should ever wait on
     /// the PIR server's own lock.
     recent: RwLock<VecDeque<[u8; 20]>>,
+
     /// Cross-provider reconciliation health — see [`ReconcileHealth`].
     ///
     /// Same reasoning as `recent`'s own lock, one step further: a
@@ -199,6 +220,31 @@ pub struct NodeState {
     /// lock — a `/healthz` probe must not queue behind `/answer` traffic
     /// just to report a handful of counters.
     reconcile: Mutex<ReconcileHealth>,
+
+    /// The shared `GET /setup` response cache (ADR-0028) — `None` until the
+    /// first `/setup` request populates it. A **separate** lock from
+    /// `inner`, same reasoning as `recent` above, with one addition: lock
+    /// *order* matters here, because regenerating the cache needs both
+    /// locks at once. [`Self::setup_bytes`] always takes `setup_cache`
+    /// first and `inner` second, and nothing in this crate ever acquires
+    /// them the other way round — reversing that order on some future
+    /// caller would be a deadlock waiting to happen.
+    ///
+    /// A mutex, not another `RwLock`: every caller that finds the cache
+    /// stale must serialize behind whichever caller is already
+    /// regenerating it (two concurrent regenerations would just waste a
+    /// second ~831 MB encode), so there is no useful read/write distinction
+    /// to preserve the way there is for `inner`. And tokio's rather than
+    /// `std`'s — unlike `reconcile` above, this guard is held across an
+    /// `.await` (the `inner.read()` inside [`Self::setup_bytes`]), which a
+    /// blocking mutex must never be.
+    setup_cache: AsyncMutex<Option<CachedSetup>>,
+
+    /// How many times [`Self::setup_bytes`] has actually (re)encoded a
+    /// bundle, as opposed to serving an existing cache hit. Test-only
+    /// instrumentation (see [`Self::setup_generation`]); nothing in this
+    /// crate's own request handling reads it.
+    setup_generation: AtomicUsize,
 }
 
 impl NodeState {
@@ -225,6 +271,8 @@ impl NodeState {
             complete,
             recent: RwLock::new(VecDeque::new()),
             reconcile: Mutex::new(ReconcileHealth::default()),
+            setup_cache: AsyncMutex::new(None),
+            setup_generation: AtomicUsize::new(0),
         }
     }
 
@@ -422,6 +470,84 @@ impl NodeState {
         f(&self.inner.read().await.server)
     }
 
+    /// The current `GET /setup` response: a cache hit if what is stored is
+    /// still safe to serve, a fresh encode otherwise (ADR-0028). Returns
+    /// the shared [`Bytes`] (cloning it is a refcount bump, never a copy)
+    /// together with the block it is pinned at, so the caller can build an
+    /// `ETag` without re-decoding the body.
+    ///
+    /// # The freshness rule
+    ///
+    /// A bundle pinned at block `B` is only safe to serve while a client
+    /// that bootstraps from it can still catch up via
+    /// `GET /sync?from=B&to=<head>` — which needs every block in
+    /// `B+1..=head` retained in the ring (see [`DeltaRing::range`]). This
+    /// reuses the cached bytes only while
+    /// `server.block() - cached.block <= ring.capacity() / 2` — **half**
+    /// the ring, not all of it, deliberately: a client that just spent
+    /// several minutes downloading an ~831 MB bundle over a slow link
+    /// (~8 minutes measured end to end) still needs the *rest* of the
+    /// window in front of it to call `/sync` and catch up before its own
+    /// starting block ages out from under it. At the deployed 600-block
+    /// ring, half reserves ~1 hour of chain time for exactly that — far
+    /// more than any realistic download — while still amortizing the
+    /// encode over roughly half the ring instead of regenerating on every
+    /// block.
+    ///
+    /// # Locking
+    ///
+    /// Takes `setup_cache` **then** `inner`, never the other order — see
+    /// that field's docs. Holds `setup_cache` for the whole call,
+    /// including a stale/absent cache's full regeneration: this is
+    /// double-checked locking applied to a single mutex rather than a
+    /// fast/slow pair of locks. A second caller that arrives while a
+    /// regeneration is already in flight simply waits its turn on
+    /// `setup_cache`; once it gets in, its own freshness check finds the
+    /// bundle the first caller just produced and returns immediately
+    /// instead of encoding a second time. Concurrent `/setup` callers
+    /// blocking behind one encode is the intended trade — they then all
+    /// get the fresh bytes rather than each paying their own ~831 MB clone
+    /// plus encode.
+    async fn setup_bytes(&self) -> (Bytes, u64) {
+        let mut cache = self.setup_cache.lock().await;
+
+        let inner = self.inner.read().await;
+        let head = inner.server.block();
+        let half_window = inner.ring.capacity() as u64 / 2;
+
+        if let Some(cached) = cache.as_ref() {
+            if head.saturating_sub(cached.block) <= half_window {
+                let bytes = cached.bytes.clone();
+                let block = cached.block;
+                drop(inner);
+                return (bytes, block);
+            }
+        }
+
+        // Absent or stale: regenerate now, still holding both locks — see
+        // this method's docs for why that is the intended trade rather
+        // than a bug.
+        let bundle = inner.server.setup();
+        drop(inner);
+        let bytes = Bytes::from(wire::encode_setup(&bundle));
+        let block = bundle.block;
+        self.setup_generation.fetch_add(1, Ordering::SeqCst);
+        *cache = Some(CachedSetup { block, bytes: bytes.clone() });
+        (bytes, block)
+    }
+
+    /// Test-only: how many times [`Self::setup_bytes`] has actually
+    /// (re)encoded a bundle rather than served an existing cache hit — lets
+    /// a test assert "the encode ran exactly once" directly instead of
+    /// inferring it from timing. `#[doc(hidden)]` and not part of this
+    /// crate's public contract: kept `pub` only because integration tests
+    /// under `tests/` compile against this crate's public API like any
+    /// other dependent.
+    #[doc(hidden)]
+    pub fn setup_generation(&self) -> usize {
+        self.setup_generation.load(Ordering::SeqCst)
+    }
+
     /// Build the axum [`Router`] exposing every RisePIR HTTP endpoint over
     /// `state`. All routes are read-side (`/answer` takes the state's read
     /// lock, never the write lock) — [`Self::apply_block`] is driven
@@ -439,13 +565,35 @@ impl NodeState {
             .route("/answer", post(answer))
             .route("/delta/{block}", get(delta_by_block))
             .route("/sync", get(sync))
-            .route(
-                "/setup",
-                // Route-scoped cap — see `SETUP_MAX_CONCURRENT`. Applied
-                // via `route`'s method-router layer so no other endpoint
-                // shares the semaphore.
-                get(setup).layer(ConcurrencyLimitLayer::new(SETUP_MAX_CONCURRENT)),
-            )
+            // No concurrency cap on this route (ADR-0028 — a
+            // `tower::limit::ConcurrencyLimitLayer` used to sit here,
+            // `SETUP_MAX_CONCURRENT = 2`). Removed rather than tuned, for
+            // two measured reasons:
+            // (1) it never bounded what its doc comment claimed. tower's
+            //     `ConcurrencyLimit` holds its permit in the *response
+            //     future* (tower-0.5.3's `limit/concurrency/future.rs`),
+            //     and this handler always returns a fully-materialized
+            //     body, so the permit is released the instant the handler
+            //     returns — before a single byte reaches a slow client,
+            //     not after the last one does. Measured: 20 throttled
+            //     readers already mid-transfer did not stop a 21st request
+            //     from completing with the full body.
+            // (2) the actual hazard it was meant to bound — many
+            //     concurrent ~831 MB response buffers alive at once — is
+            //     now structurally impossible: every `/setup` caller gets
+            //     a refcounted clone of one shared, cached encode
+            //     (`NodeState::setup_bytes`), so live buffers are O(1) in
+            //     caller count, not O(N).
+            // Bandwidth exhaustion from many legitimate-*looking* `/setup`
+            // fetches is still a real concern for a public deployment;
+            // that defense now belongs entirely to the reverse proxy
+            // already in front of this server (Caddy, `docs/deploy.md`
+            // §3.7) or a CDN (roadmap C3/C5) — a layer that can meter
+            // bytes actually on the wire, which an in-process limiter on a
+            // fully-materialized-body handler never could. Do not re-add a
+            // cap that holds its permit across the transfer instead of
+            // just the handler: that reintroduces exactly this ceiling.
+            .route("/setup", get(setup))
             .route("/head", get(head))
             .route("/mode", get(mode))
             .route("/recent", get(recent))
@@ -532,12 +680,45 @@ async fn sync(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery) -> R
 }
 
 /// `GET /setup`: the full [`risepir_server::SetupBundle`] a fresh client
-/// bootstraps from. Read lock only.
-async fn setup(State(state): State<Arc<NodeState>>) -> Response {
-    let inner = state.inner.read().await;
-    let bundle = inner.server.setup();
-    drop(inner);
-    octet_response(StatusCode::OK, wire::encode_setup(&bundle))
+/// bootstraps from — served from a shared, refcounted cache rather than
+/// re-cloned and re-encoded per request (ADR-0028; see
+/// [`NodeState::setup_bytes`] for the cache/freshness mechanics).
+///
+/// Sets `ETag: "setup-<block>"` and `Cache-Control: no-cache` (always
+/// revalidate, *not* "never store") on every response. An `If-None-Match`
+/// that names the bundle currently being served gets `304 Not Modified`
+/// with no body instead. The `304` path is correct *by construction*: it is
+/// checked against the exact block [`NodeState::setup_bytes`] just decided
+/// is still safe to serve, which is exactly a block the ring can still
+/// bridge forward — there is no second, separately-maintained "is this
+/// still valid" check to drift out of sync with the one that already gates
+/// the `200` path.
+///
+/// `If-None-Match` is attacker-controlled request input: parsed defensively
+/// by [`if_none_match_hits`], never indexed blindly and never a panic on
+/// malformed bytes.
+async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Response {
+    let (bytes, block) = state.setup_bytes().await;
+    let etag = format!("\"setup-{block}\"");
+    // `block` is formatted as plain ASCII decimal digits, so this can
+    // never actually contain a byte a `HeaderValue` would reject.
+    let etag_header = HeaderValue::from_str(&etag).expect("etag: ascii digits and hyphens only, always a valid header value");
+
+    if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
+        if if_none_match_hits(inm, &etag) {
+            let mut resp = StatusCode::NOT_MODIFIED.into_response();
+            let h = resp.headers_mut();
+            h.insert(header::ETAG, etag_header);
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            return resp;
+        }
+    }
+
+    let mut resp = octet_response(StatusCode::OK, bytes);
+    let h = resp.headers_mut();
+    h.insert(header::ETAG, etag_header);
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    resp
 }
 
 /// `GET /head`: the server's current block, as an 8-byte little-endian
@@ -652,12 +833,34 @@ async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
 
 /// Builds a `200`-or-caller-chosen-`status` response with an explicit
 /// `application/octet-stream` content type — every successful response
-/// this crate returns is raw binary, never text or JSON.
-fn octet_response(status: StatusCode, body: Vec<u8>) -> Response {
+/// this crate returns is raw binary, never text or JSON. Generic over
+/// anything axum already knows how to turn into a body: `Vec<u8>` for most
+/// handlers, [`Bytes`] for `/setup` (ADR-0028) — so the cached, refcounted
+/// bytes reach the client without an extra copy back into an owned `Vec`.
+fn octet_response(status: StatusCode, body: impl IntoResponse) -> Response {
     let mut resp = (status, body).into_response();
     resp.headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
     resp
+}
+
+/// Whether the (attacker-controlled) raw `If-None-Match` header value `raw`
+/// matches `etag` — the standard comma-separated-list / `*` wildcard forms
+/// (RFC 9110 §13.1.2), tolerating an optional leading weak-validator `W/`
+/// prefix on any listed tag (this server only ever emits strong ETags
+/// itself, but a client or intermediary echoing one back with `W/`
+/// prepended should still be recognised rather than silently miss the
+/// match and pay for a full re-download).
+///
+/// Never panics or indexes blindly: a header value that is not valid UTF-8
+/// (`to_str` failing) simply does not match — malformed input degrades to
+/// "serve the full `200` body", the always-safe default, never a crash.
+fn if_none_match_hits(raw: &HeaderValue, etag: &str) -> bool {
+    let Ok(raw) = raw.to_str() else { return false };
+    raw.split(',').any(|tok| {
+        let tok = tok.trim();
+        tok == "*" || tok == etag || tok.strip_prefix("W/").map(str::trim) == Some(etag)
+    })
 }
 
 /// `400 Bad Request` with `err`'s `Display` text as the body — the uniform

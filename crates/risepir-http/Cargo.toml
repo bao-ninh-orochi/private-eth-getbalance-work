@@ -35,11 +35,13 @@ axum  = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"], optional = true }
 
 # Production hardening on the listener (threat model §3): a per-request
-# timeout (tower-http, returns a clean 408 instead of surfacing an error
-# type) and a concurrency cap on the huge-response `/setup` route (tower's
-# semaphore-based limit). Both are already in the dependency graph via
-# axum; the explicit entries only switch on the named features.
-tower      = { version = "0.5", features = ["limit"] }
+# timeout that returns a clean 408 instead of surfacing an error type.
+# Already in the dependency graph via axum; the explicit entry only
+# switches on the named feature. (A `tower::limit::ConcurrencyLimitLayer`
+# used to sit on the huge-response `/setup` route here too — removed in
+# ADR-0028, which found it never bounded body transfer at all and made the
+# memory hazard it targeted O(1) instead; see that ADR and
+# `risepir-http::node`'s route-building comment.)
 tower-http = { version = "0.6", features = ["timeout"] }
 
 # Stage 0.4: the async counterpart to this crate's own axum server —

@@ -1279,3 +1279,88 @@ before the quantization step even notices a higher target. So this is a
 correctness fix for the edges of the `(arity, bucket_size)` space and for
 account counts that quantize differently, not a space win for the set
 actually running today.
+
+### ADR-0032 — Browser pre-flight: measure the real cost per deployment, advise rather than block **[NEW]**
+
+**Chosen:** before `boot()` calls `connect()`, `app.js` issues a `HEAD
+/setup` and reads `Content-Length` — this deployment's exact hint size,
+paid for with headers only, never guessed — and estimates the peak
+resident cost at 2x that figure (hint plus the publicly-seeded matrix `A`,
+which the client expands locally to very nearly the hint's own size;
+docs/numbers.md §4c measures that ratio at ~2.00–2.03x across every
+deployment scale in its table, e.g. the live complete mainnet set: 830.73
+MB hint, 1.66 GB resident). It compares the estimate against half of
+whatever `navigator.deviceMemory` reports (`USABLE_MEMORY_FRACTION =
+0.5`, `web/pir.js`) and, only when the estimate clearly exceeds that
+budget, swaps the "01 One-time setup" panel for an explanation — the
+download size, the estimated resident cost, what the device reported, and
+a pointer at the CLI client (`risepir-rpc client --pir-url …`, which puts
+the identical rewind client outside the browser without changing the
+"address never leaves the machine" guarantee) — plus an explicit "Download
+anyway" that proceeds regardless. Where `deviceMemory` is unavailable
+(Safari, Firefox — it is a Chromium/Edge-only API), the pre-flight never
+refuses; at most it shows the same panel, softened, when a coarse-pointer
+or small-viewport signal suggests a phone or tablet *and* the estimate is
+large, and even then nothing is blocked, only flagged.
+
+**Rejected:** (a) hard-blocking on a `navigator.userAgent` sniff — a string
+match is trivially wrong in both directions (a spoofed UA, a legitimate
+desktop with an unusual UA, a phone with generous RAM) and gives the
+person being turned away no real numbers, where `deviceMemory` and a
+measured hint size are actual quantities the page can show; (b)
+hardcoding the 831 MB figure — the hint size is a property of *this*
+deployment (`mock` ships ~1.77 MB, `--partial-capacity 1000000` ships ~49
+MB, the complete mainnet set ships 830.73 MB), and a constant threshold
+would either fire on every demo or silently stop protecting anyone once
+the account count grows past whatever got typed in; (c) doing nothing —
+the status quo is not "unavailable at the complete set", it is `boot()`
+calling `connect()` unconditionally, downloading hundreds of megabytes on
+a device that cannot expand them, and dying mid-expansion with no
+explanation at all, which is exactly the silently-wrong-outcome shape
+this project's binding rules exist to close off (CLAUDE.md: "when in
+doubt, fail loudly" — here, failing loudly means saying so *before*
+spending the download, not after).
+
+**Why advise instead of refuse:** a false refusal on a device that could
+have handled the download is worse than the status quo it replaces — the
+CLI client already runs this deployment comfortably, so a wrongly-turned-away
+browser visitor is worse off than one simply allowed to try and, rarely,
+fail. `deviceMemory` itself is Chromium/Edge-only, so treating its absence
+as grounds to refuse would mean refusing by browser identity, not by any
+measured property of the device — the same UA-sniffing failure mode
+rejected above, reached from the other direction. `USABLE_MEMORY_FRACTION`
+is chosen with this in mind: Chrome/Edge cap `deviceMemory` at 8 regardless
+of real installed RAM, and 8 * 0.5 = 4 GB still clears the complete set's
+1.66 GB estimate with room to spare, so the fraction itself is never the
+reason a capable desktop is turned away. The pre-flight therefore only
+ever refuses against a real number that clearly does not fit, and even
+then "refuse" is one click from proceeding.
+
+**Scope: pre-flight only.** `web/pir.js`'s `connect`/`PirSession` methods,
+the four-step lookup, and every never-a-wrong-answer path (`UNTRACKED`,
+`DECODE_FAILED`, the strict-partial rule) are untouched — this decision
+runs *before* any protocol call, never inside one. A `warn`/`refuse`
+verdict changes what the page shows; it never changes what it answers.
+
+**Where the decision lives.** `assessCapacity` is a pure function — no
+DOM, no `navigator`, no `fetch` — precisely so `web/test/e2e.mjs` can call
+it directly under plain Node. It would ordinarily be its own file
+(`web/capacity.js`, mirroring the existing app.js/pir.js split), and a
+small pure decision like this is exactly what that separation is for —
+but every file the browser can fetch has to be named in
+`crates/risepir-http/src/web.rs`'s fixed asset `MANIFEST`, a deliberately
+closed list with no directory-serving fallback to ride a new file in on
+(ADR-0019: "no request-path-to-filesystem-path translation, ever"). This
+work's brief rules out touching any Rust crate to add one more route, so
+`assessCapacity` is hosted in `web/pir.js` instead: already served,
+already free of DOM/navigator/fetch, already imported by both `app.js`
+and the test file. The decision itself did not change; only which
+already-served file it lives in did.
+
+**A no-op on `mock` by construction, not by a special case.** The gate
+compares an estimated *byte count* against a budget; it has no notion of
+"mock". `mock`'s ~1.77 MB hint estimates to ~3.5 MB resident, which clears
+essentially any device's budget (even a 2 GB phone's 1 GB, at
+`USABLE_MEMORY_FRACTION`) — so `web/test/browser.mjs`, which only ever
+runs against `mock`, exercises the same `boot()` path it always has, with
+one cheap `HEAD` round trip ahead of it.

@@ -75,6 +75,30 @@
           </p>
         </noscript>
 
+        <!-- Capacity pre-flight (ADR-0032): shown instead of "01 One-time
+             setup" only when this deployment's hint clearly outsizes what
+             the device says it can hold. Hidden by default — on a no-op
+             deployment (mock, or any modest one) this never becomes
+             visible and #boot runs exactly as it always has. -->
+        <section id="capacity-gate" class="panel hidden" aria-labelledby="capacity-gate-h2">
+          <h2 class="sec" id="capacity-gate-h2"><span class="sec-n">01</span> Before this downloads</h2>
+
+          <p id="capacity-gate-lede" class="capacity-gate-lede"></p>
+
+          <div id="capacity-gate-rows" class="receipt"></div>
+
+          <p class="fine">
+            <code>risepir-rpc client --pir-url …</code> runs the identical rewind client outside
+            the browser, on the machine you run it from — the address still never leaves that
+            machine, which is the whole point; it just does not have to hold the hint in a browser
+            tab to do it.
+          </p>
+
+          <div class="capacity-gate-actions">
+            <button id="capacity-continue" type="button">Download anyway</button>
+          </div>
+        </section>
+
         <!-- Boot: the one-time client download, staged and honest. -->
         <section id="boot" class="panel" aria-labelledby="boot-h2">
           <h2 class="sec" id="boot-h2"><span class="sec-n">01</span> One-time setup</h2>

@@ -495,6 +495,33 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+/* ── capacity gate (ADR-0032) ─────────────────────────────────────── */
+
+.capacity-gate-lede {
+  margin: 0 0 1.2rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  max-width: 42rem;
+}
+
+.capacity-gate-actions {
+  margin-top: 1.3rem;
+}
+
+/* Deliberately the quieter of the page's two buttons: proceeding past a
+   size warning is the exception, not the recommended path, so it should
+   not read as the confident, filled call-to-action "Look up privately" is. */
+#capacity-continue {
+  color: var(--accent);
+  background: transparent;
+}
+
+#capacity-continue:hover:not(:disabled) {
+  background: var(--accent-soft);
+  filter: none;
+}
+
 /* ── query form ───────────────────────────────────────────────────── */
 
 .ready-note {

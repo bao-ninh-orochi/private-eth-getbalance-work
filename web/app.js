@@ -6,7 +6,7 @@
 // tracked set", or a `0` rendered for an answer the system does not
 // actually have, would be a wrong answer with a nice font.
 
-import { connect, formatEth, PirError, StaleSetupError, STATUS } from "./pir.js";
+import { connect, formatEth, PirError, StaleSetupError, STATUS, assessCapacity, CAPACITY_VERDICT } from "./pir.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -134,6 +134,96 @@ async function boot() {
   $("state").classList.remove("hidden");
   setInterval(refreshState, 12_000);
   $("address").focus();
+}
+
+// ── capacity pre-flight (ADR-0032) ───────────────────────────────────
+//
+// Runs once, before boot() ever touches the network for real work. The
+// download that buys this page's privacy (see the "Why the download?"
+// aside) is also the one thing that can crash a phone's tab before it
+// gets the chance to explain itself: at the live complete-mainnet set it
+// is 830.73 MB downloaded and ~1.66 GB resident once the public matrix A
+// is expanded (docs/numbers.md §4c). assessCapacity (pir.js) makes the
+// actual call; everything here just gathers its inputs from a cheap HEAD
+// probe and whatever the device is willing to say about itself, and
+// renders whichever of its three verdicts comes back.
+
+const GB = 1_000_000_000;
+const fmtGB = (n) => (n / GB).toFixed(2);
+
+/// `HEAD /setup`'s `Content-Length` — this deployment's exact hint size,
+/// read without paying for the download it describes. `null` on anything
+/// short of a clean positive number: a failed or ambiguous probe falls
+/// straight through to today's unconditional boot(), never manufactures a
+/// refusal (ADR-0032, point 1).
+async function probeHintBytes() {
+  try {
+    const resp = await fetch(`${location.origin}/setup`, { method: "HEAD" });
+    if (!resp.ok) return null;
+    const len = Number(resp.headers.get("content-length"));
+    return Number.isFinite(len) && len > 0 ? len : null;
+  } catch {
+    return null;
+  }
+}
+
+/// The two `navigator`-level touch signals `assessCapacity` accepts as one
+/// merged boolean; the viewport is passed separately so the pure function
+/// can apply its own threshold to it.
+function coarsePointerSignal() {
+  const touch = typeof navigator !== "undefined" && navigator.maxTouchPoints > 0;
+  const coarse = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+  return touch || coarse;
+}
+
+/// Swap the "01 One-time setup" panel for an explanation of what it would
+/// cost, instead of spending the visitor's data to find that out the hard
+/// way. Never a dead end: "Download anyway" leads to the exact same
+/// boot() a capable device runs unconditionally.
+function renderCapacityGate(v) {
+  $("capacity-gate-lede").textContent =
+    v.verdict === CAPACITY_VERDICT.REFUSE
+      ? "This deployment's hint is bigger than this device says it can comfortably hold in one " +
+        "browser tab. Downloading it anyway may work — or may run out of memory partway through, " +
+        "after the download is already spent."
+      : "This device did not report how much memory it has, but it looks like a small-screen or " +
+        "touch device, and this deployment's hint is a large download. This is a guess, not a " +
+        "measurement — it may be entirely fine.";
+
+  const rows = $("capacity-gate-rows");
+  rows.replaceChildren(
+    row("Hint to download", `${fmtMB(v.hintBytes)} MB`),
+    row("Estimated peak memory", `${fmtGB(v.estimatedPeakBytes)} GB — the hint plus the expanded public matrix`),
+    row(
+      "Your device reports",
+      v.deviceMemoryGb != null
+        ? `${v.deviceMemoryGb} GB of memory`
+        : "no memory figure — Safari and Firefox do not expose one",
+    ),
+  );
+
+  $("boot").classList.add("hidden");
+  $("capacity-gate").classList.remove("hidden");
+}
+
+/// Gate boot() behind a cheap cost check. Anything that leaves the true
+/// cost unknown (the HEAD probe failing) or clearly affordable (a verdict
+/// of "ok") falls straight through to boot() with no DOM touched first —
+/// which is what makes this a no-op on `mock`, and on every deployment
+/// small enough not to matter.
+async function preflight() {
+  const hintBytes = await probeHintBytes();
+  if (hintBytes === null) return boot();
+
+  const verdict = assessCapacity({
+    hintBytes,
+    deviceMemoryGb: typeof navigator !== "undefined" ? navigator.deviceMemory : undefined,
+    coarsePointer: coarsePointerSignal(),
+    viewportWidth: typeof window !== "undefined" ? window.innerWidth : undefined,
+  });
+
+  if (verdict.verdict === CAPACITY_VERDICT.OK) return boot();
+  renderCapacityGate(verdict);
 }
 
 // ── deployment state ────────────────────────────────────────────────
@@ -438,4 +528,9 @@ function updateWirePanel(elapsedMs, atBlock) {
 
 $("form").addEventListener("submit", lookup);
 $("address").addEventListener("input", checkAddressInput);
-boot();
+$("capacity-continue").addEventListener("click", () => {
+  $("capacity-gate").classList.add("hidden");
+  $("boot").classList.remove("hidden");
+  boot();
+});
+preflight();

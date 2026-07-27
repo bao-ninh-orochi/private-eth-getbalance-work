@@ -373,3 +373,138 @@ export function formatEth(wei) {
   const frac = (v % 1_000_000_000_000_000_000n).toString().padStart(18, "0").replace(/0+$/, "");
   return `${neg ? "-" : ""}${whole.toLocaleString("en-US")}${frac ? `.${frac}` : ""}`;
 }
+
+// ── capacity pre-flight (ADR-0032) ──────────────────────────────────────
+//
+// A pure decision, deliberately free of DOM/`navigator`/`fetch` — exactly
+// the discipline the rest of this file already keeps, and for the same
+// reason: `web/test/e2e.mjs` needs to drive it directly under plain Node,
+// no browser and no server involved.
+//
+// This would ordinarily be its own file (`web/capacity.js`, mirroring the
+// app.js/pir.js split) — a small pure function like this is exactly what
+// that separation is for. It lives here instead because every file the
+// browser can fetch has to be named in `crates/risepir-http/src/web.rs`'s
+// fixed asset `MANIFEST`: that module maps a *fixed* set of routes to a
+// fixed set of filenames read once at startup, on purpose ("no request-
+// path-to-filesystem-path translation, ever" — ADR-0019), with no
+// directory-listing fallback to ride a new file in on. Adding one more
+// route is a one-line, non-behavioral change, but it is a change to a Rust
+// crate, and this task's brief rules that out categorically. Hosting the
+// decision here instead — already served, already DOM/navigator/fetch-free,
+// already imported by both `app.js` and `web/test/e2e.mjs` — gets every
+// property the separate-module design was actually for (pure, testable
+// under plain Node, one source of truth) without a new server route.
+// `app.js` gathers `HEAD /setup`, `navigator`, and the viewport; this
+// function never touches any of them directly.
+
+/// What `assessCapacity` can decide. `warn` and `refuse` both leave the
+/// download exactly one click away (`app.js`'s "Download anyway") — this
+/// is advice, never a lock-out.
+export const CAPACITY_VERDICT = Object.freeze({ OK: "ok", WARN: "warn", REFUSE: "refuse" });
+
+/// A client holds the downloaded hint *and* the publicly-seeded matrix `A`,
+/// which it expands locally to (very nearly) the hint's own size.
+/// docs/numbers.md §4c measures client memory (`A` + hint) at ~2.00-2.03x
+/// the hint across every deployment scale in that table — e.g. the live
+/// complete mainnet set: 830.73 MB hint, 1.66 GB resident. This constant is
+/// that *ratio*, not a copy of either figure: the hint size itself is never
+/// hardcoded here, or anywhere in this file — it is read fresh, per
+/// deployment, from `HEAD /setup`'s `Content-Length` (ADR-0032, point 1).
+export const ESTIMATED_PEAK_MULTIPLE = 2;
+
+/// The share of the device's *total* memory one browser tab may reasonably
+/// claim. A tab shares the device with the OS, the browser's own overhead,
+/// and — on a phone — every other app running, so this can never be close
+/// to 1. Chosen so the number a comfortably-capable desktop actually
+/// reports still clears the complete set's cost: `navigator.deviceMemory`
+/// is capped at 8 regardless of real installed RAM (rounded down for
+/// privacy — a 32 GB machine reports the same 8 a device with exactly 8
+/// GB does), and 8 * 0.5 = 4 GB comfortably exceeds the 1.66 GB complete-set
+/// estimate — so this fraction is never *itself* the reason a real desktop
+/// gets turned away. At the other end, a real 2 GB phone's budget (1 GB) is
+/// genuinely, and correctly, below that same 1.66 GB.
+export const USABLE_MEMORY_FRACTION = 0.5;
+
+/// Below this estimated peak, a `deviceMemory`-less visitor (Safari,
+/// Firefox — see below) is never even offered the softer coarse-signal
+/// warning — comfortably above every demo-scale deployment this repo ships
+/// (49 MB at `--partial-capacity 1000000`, ~1.77 MB for `mock`) and
+/// comfortably below the real complete-set hint, so only a deployment
+/// actually built at that scale can ever reach it.
+export const COARSE_SIGNAL_WARN_PEAK_BYTES = 200_000_000;
+
+/// A viewport this narrow reads as a phone/small-tablet layout — one of the
+/// coarse fallback signals consulted only when `deviceMemory` is
+/// unavailable.
+export const SMALL_VIEWPORT_WIDTH_PX = 600;
+
+const BYTES_PER_GB = 1_000_000_000;
+
+/// Decide whether to auto-start the hint download, given this deployment's
+/// true cost and whatever the device is willing to say about itself. Pure:
+/// every input is a plain value `app.js` already gathered from `fetch` /
+/// `navigator` / the viewport, and this function touches none of them
+/// directly — which is what lets `web/test/e2e.mjs` call it straight under
+/// plain Node, no browser and no server.
+///
+///  - `hintBytes` — the exact `Content-Length` of `GET /setup` for *this*
+///    deployment (a `HEAD` request reads it without paying for the
+///    transfer itself). The caller is expected to skip calling this
+///    function at all when the probe failed or omitted the header (point 1
+///    of ADR-0032); passing a missing/zero value through anyway still
+///    degrades to `ok` rather than manufacturing a refusal.
+///  - `deviceMemoryGb` — `navigator.deviceMemory`, or `null`/`undefined`
+///    exactly where the browser does not expose it (Safari, Firefox) —
+///    never guessed at, never defaulted to a number.
+///  - `coarsePointer` — `true` if the device looks touch-primary
+///    (`navigator.maxTouchPoints > 0`, or a `(pointer: coarse)` media
+///    match); only ever consulted when `deviceMemoryGb` is unavailable.
+///  - `viewportWidth` — `window.innerWidth`, or `null`/`undefined`; same
+///    caveat.
+///
+/// Returns `{ verdict, hintBytes, estimatedPeakBytes, deviceMemoryGb,
+/// budgetBytes, coarseSignal, basis }` — the verdict plus every number that
+/// went into it, so `app.js` can render the real figures instead of
+/// re-deriving them.
+export function assessCapacity({ hintBytes, deviceMemoryGb, coarsePointer, viewportWidth } = {}) {
+  const hint = Number(hintBytes);
+  const estimatedPeakBytes = (Number.isFinite(hint) && hint > 0 ? hint : 0) * ESTIMATED_PEAK_MULTIPLE;
+
+  const haveDeviceMemory =
+    typeof deviceMemoryGb === "number" && Number.isFinite(deviceMemoryGb) && deviceMemoryGb > 0;
+
+  if (haveDeviceMemory) {
+    const budgetBytes = deviceMemoryGb * BYTES_PER_GB * USABLE_MEMORY_FRACTION;
+    return {
+      verdict: estimatedPeakBytes > budgetBytes ? CAPACITY_VERDICT.REFUSE : CAPACITY_VERDICT.OK,
+      hintBytes: hint,
+      estimatedPeakBytes,
+      deviceMemoryGb,
+      budgetBytes,
+      coarseSignal: false,
+      basis: "device-memory",
+    };
+  }
+
+  // No real number to compare against: a missing deviceMemory must never
+  // become a refusal (point 4 of ADR-0032) — REFUSE simply does not appear
+  // as a possible outcome of this branch. Only a strong-enough coarse
+  // signal, on a deployment large enough to matter, downgrades "ok" to a
+  // soft "warn"; everything else — including every desktop browser that
+  // simply does not implement deviceMemory at all (Firefox, at any window
+  // size) — is indistinguishable from today's unconditional connect.
+  const coarseSignal =
+    Boolean(coarsePointer) ||
+    (typeof viewportWidth === "number" && viewportWidth > 0 && viewportWidth < SMALL_VIEWPORT_WIDTH_PX);
+  const warrantsWarning = coarseSignal && estimatedPeakBytes > COARSE_SIGNAL_WARN_PEAK_BYTES;
+  return {
+    verdict: warrantsWarning ? CAPACITY_VERDICT.WARN : CAPACITY_VERDICT.OK,
+    hintBytes: hint,
+    estimatedPeakBytes,
+    deviceMemoryGb: null,
+    budgetBytes: null,
+    coarseSignal,
+    basis: coarseSignal ? "coarse-signal" : "no-signal",
+  };
+}

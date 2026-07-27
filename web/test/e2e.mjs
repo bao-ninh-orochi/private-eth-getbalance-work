@@ -24,7 +24,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { connect, formatEth, parseAddress, PirError, STATUS } from "../pir.js";
+import { connect, formatEth, parseAddress, PirError, STATUS, assessCapacity, CAPACITY_VERDICT } from "../pir.js";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8645";
 const wasmPath = fileURLToPath(new URL("../client.wasm", import.meta.url));
@@ -57,7 +57,86 @@ const wasmBytes = readFileSync(wasmPath);
   );
 }
 
-// ── 2. bring up a session ─────────────────────────────────────────────
+// ── 2. the capacity pre-flight is a pure, deterministic decision ─────
+//
+// assessCapacity (web/pir.js) never touches the network, `navigator`, or
+// the DOM, so it is exercised directly here, under plain Node — no
+// browser, no server, no wasm. See ADR-0032 for why this pure function
+// lives in pir.js rather than its own web/capacity.js: every file the
+// browser can fetch has to be named in crates/risepir-http/src/web.rs's
+// fixed asset MANIFEST, and this repo's static-asset routing has no
+// path-mapping fallback to ride a new file in on (ADR-0019).
+{
+  const COMPLETE_SET_HINT_BYTES = 830_728_800; // docs/numbers.md §4c, measured
+  const MOCK_HINT_BYTES = 1_770_000; // ~1.77 MB — this repo's own mock deployment
+
+  const tinyDevice = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 2 });
+  check(
+    "a complete-set-sized hint refuses to auto-start on a 2 GB device",
+    tinyDevice.verdict === CAPACITY_VERDICT.REFUSE,
+    JSON.stringify(tinyDevice),
+  );
+
+  const bigDevice = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 32 });
+  check(
+    "the identical hint is fine on a 32 GB device",
+    bigDevice.verdict === CAPACITY_VERDICT.OK,
+    JSON.stringify(bigDevice),
+  );
+
+  const mockOnTinyDevice = assessCapacity({ hintBytes: MOCK_HINT_BYTES, deviceMemoryGb: 2 });
+  check(
+    "a mock-sized hint never gates even a 2 GB device (the no-op property the browser gate relies on)",
+    mockOnTinyDevice.verdict === CAPACITY_VERDICT.OK,
+    JSON.stringify(mockOnTinyDevice),
+  );
+
+  // No deviceMemory number at all (Safari, Firefox) must never refuse,
+  // regardless of how large the hint is or how mobile-looking any coarse
+  // signal is — point 4 of ADR-0032. Both cases below reuse the same
+  // complete-set hint as the first case, so the only variable is whether a
+  // real number was ever available to compare against.
+  const unknownNoSignal = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: undefined });
+  const unknownCoarseSignal = assessCapacity({
+    hintBytes: COMPLETE_SET_HINT_BYTES,
+    deviceMemoryGb: undefined,
+    coarsePointer: true,
+    viewportWidth: 360,
+  });
+  check(
+    "unknown deviceMemory never refuses, even with no other signal",
+    unknownNoSignal.verdict !== CAPACITY_VERDICT.REFUSE,
+    JSON.stringify(unknownNoSignal),
+  );
+  check(
+    "unknown deviceMemory never refuses, even with a strong coarse-mobile signal",
+    unknownCoarseSignal.verdict !== CAPACITY_VERDICT.REFUSE,
+    JSON.stringify(unknownCoarseSignal),
+  );
+  check(
+    "...but never blocking a capable desktop still leaves room for a soft warning at that size",
+    unknownCoarseSignal.verdict === CAPACITY_VERDICT.WARN,
+    JSON.stringify(unknownCoarseSignal),
+  );
+  check(
+    "and with no coarse signal at all, an unknown-memory visit is a plain no-op",
+    unknownNoSignal.verdict === CAPACITY_VERDICT.OK,
+    JSON.stringify(unknownNoSignal),
+  );
+
+  // Sanity: the 2x peak-estimate multiple is chosen to match the measured
+  // ratio in docs/numbers.md §4c, not picked independently of it.
+  const measuredResidentBytes = 1_662_804_000;
+  const estimate = assessCapacity({ hintBytes: COMPLETE_SET_HINT_BYTES, deviceMemoryGb: 1000 }).estimatedPeakBytes;
+  const relErr = Math.abs(estimate - measuredResidentBytes) / measuredResidentBytes;
+  check(
+    "the 2x peak estimate tracks docs/numbers.md §4c's measured hint->resident ratio within 1%",
+    relErr < 0.01,
+    `estimate ${estimate}, measured ${measuredResidentBytes}, error ${(relErr * 100).toFixed(2)}%`,
+  );
+}
+
+// ── 3. bring up a session ─────────────────────────────────────────────
 
 console.log(`\nconnecting to ${base} ...`);
 let session;
@@ -78,7 +157,7 @@ console.log(
 check("entropy shim was called during setup or is ready", session.entropy.calls >= 0);
 check("pinned block is a real block", session.pinnedBlock >= 0n);
 
-// ── 3. a real lookup ──────────────────────────────────────────────────
+// ── 4. a real lookup ──────────────────────────────────────────────────
 
 const recent = await session.recent();
 check("GET /recent returned addresses", recent.length > 0, `${recent.length} addresses`);
@@ -115,7 +194,7 @@ console.log(
     `at block ${result.atBlock}`,
 );
 
-// ── 4. the never-a-wrong-answer surface ───────────────────────────────
+// ── 5. the never-a-wrong-answer surface ───────────────────────────────
 
 // An address that is certainly not in any set.
 const absent = "0x" + "de".repeat(20);
@@ -145,7 +224,7 @@ for (const bad of ["", "0x", "0xzz", "0x1234", "not an address", "0x" + "aa".rep
   check(`rejects malformed address ${JSON.stringify(bad)}`, threw);
 }
 
-// ── 5. fresh randomness per query, checked on the wire ────────────────
+// ── 6. fresh randomness per query, checked on the wire ────────────────
 //
 // Three lookups of the *same* address. The ciphertext must differ every
 // time (a reused LWE secret lets the server subtract A·s and read the
@@ -168,7 +247,7 @@ for (const bad of ["", "0x", "0xzz", "0x1234", "not an address", "0x" + "aa".rep
   check("repeated queries agree on the balance", answers.size === 1, `${[...answers]}`);
 }
 
-// ── 6. the client tracks the chain ────────────────────────────────────
+// ── 7. the client tracks the chain ────────────────────────────────────
 
 const headNow = await session.head();
 check("client synced up to the server head", session.pendingHead <= headNow);

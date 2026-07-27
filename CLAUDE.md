@@ -102,10 +102,11 @@ browser. Same origin as the PIR transport on purpose (no CORS, no mixed
 content, `connect-src 'self'` CSP). Assets are read once at startup — restart
 after editing `web/*`. First load is the whole product constraint: 46.51 MB at
 `--partial-capacity 1000000`, but **553.82 MB at the real complete mainnet set**
-(200,503,969 accounts, computed for the `(arity 2, bucket_size 4)` geometry
-deployed by ADR-0034 — was **830.73 MB**, measured 2026-07-26 at the `(arity 3,
-bucket_size 4)` geometry that deployment actually bootstrapped with; the
-"588 MB" once quoted here predates both, computed against an assumed ~130 M). A
+(200,503,969 accounts at the `(arity 2, bucket_size 4)` geometry of ADR-0034 —
+**measured on the wire 2026-07-27**, `/setup` = 553,819,345 B = that hint plus
+145 B of framing; was **830.73 MB** at the `(arity 3, bucket_size 4)` lineage
+this box ran until then; the "588 MB" once quoted here predates both, computed
+against an assumed ~130 M). A
 complete-set client now holds **1.11 GB** resident once `A` is expanded (was
 1.66 GB). That is where the CLI `client` takes over. Its residual trust — you
 trust whoever serves the page — is stated on the page itself, not just in the
@@ -126,13 +127,11 @@ is drivable non-interactively.
 
 Since **2026-07-26 it serves the COMPLETE mainnet set** — all 200,503,969
 nonzero accounts, `GET /mode` = 1 — not the partial demo. That is what the
-64 GB machine is for: the server DB alone is 35.43 GB (ADR-0023) at the
-`(arity 3, bucket_size 4)` geometry this box actually bootstrapped with. The
-code has since moved to `(arity 2, bucket_size 4)` at a higher target load
-(ADR-0034) — a fresh bootstrap computes to a 23.62 GB DB — but the live box
-keeps serving the old lineage until an operator re-bootstraps it: see the
-state-file trap below, since a plain restart no longer works across this
-change. It costs **~$8.60/day running**, so stop it when idle.
+64 GB machine is for. On **2026-07-27 it was re-bootstrapped onto ADR-0034's
+`(arity 2, bucket_size 4)`** (deploy.md §5.4): server DB **23.62 GB**, load
+0.747, state file **24,176,139,523 B (24.18 GB)**, whole bootstrap **16 min**
+— down from 35.43 GB / 36.26 GB / ~33 min on the `(arity 3, bucket_size 4)`
+lineage it ran before. It costs **~$8.60/day running**, so stop it when idle.
 
 It is **public** at <https://private-eth-getbalance.duckdns.org> (Caddy + Let's
 Encrypt in front of a loopback-only `:8645`; deploy.md §3.7). Only 80/443 are
@@ -174,8 +173,11 @@ prints a note and loads the file). That is the trap to know: leaving the old
 *partial* state file in place would have brought the server back up in PARTIAL
 mode while every flag on the command line said complete. Re-bootstrapping from
 the snapshot means moving the state file aside first — and at the complete set
-that costs a full **~33 min** (12 min ingest + 21 min PIR setup), so prefer the
-state file. `~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.
+that costs **~16 min** at the deployed `(2,4)` geometry (8 min ingest + ~6 min
+PIR setup + 2 min save; it was ~33 min at `(3,4)`), *plus* the snapshot→head
+replay, which is the part that actually hurts: ~1 s/block, so a day-old
+snapshot is another ~3 h. Prefer the state file.
+`~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.
 
 **A second, sharper trap since ADR-0034: a geometry change turns "restart"
 into "re-bootstrap."** The deployed geometry moved from `(arity 3, bucket_size
@@ -185,14 +187,12 @@ before the (multi-GB) cells section is even read (`STORE_ARITY` in
 `crates/risepir-rpc/src/state.rs`, ADR-0034 §6). A state file written by the
 old 3-ary binary is therefore *refused*, not silently loaded and not
 misreported as `Corrupt` — the error names the cause (a previous geometry
-lineage) and the fix (move `--state` aside, re-bootstrap). Concretely: the
-next time the new binary runs on the VM against the existing
-`~/risepir-state.bin`, it will **fail to start, on purpose**, until an
-operator moves that file aside and re-runs `~/bootstrap-complete.sh` — a plain
-restart no longer works once the binary and the state file disagree on arity.
-The live VM has not been re-bootstrapped yet, so today it is still serving
-`(3,4)`; deploying the new binary there without first moving the state file
-is exactly the scenario this check exists to catch.
+lineage) and the fix (move `--state` aside, re-bootstrap). This fired for real
+on 2026-07-27, exactly as designed — `exit 1` with that message, before any of
+the 36 GB was read — and the box was re-bootstrapped past it (deploy.md §5.4;
+the old file is kept as `~/risepir-state.bin.arity3-20260727`). Both lineages
+now agree on `(2,4)`, so a plain restart works again; the trap is live for the
+*next* geometry change, not for this one.
 
 (The external IP changes across stop/start — hence `duckdns-update.sh`, whose
 empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel
@@ -203,10 +203,10 @@ Stopping the meter — in this order:
 ```bash
 gcloud --quiet compute ssh risepir \
   --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 90 && tail -1 ~/server-complete.log'
-#   → wait for "state saved; exiting" — at the complete set this writes 36 GB
-#     today (the live `(3,4)` lineage; ≈24.2 GB once re-bootstrapped to the
-#     deployed `(2,4)` geometry, ADR-0034 — arithmetic, not yet measured),
-#     so allow well over the 20 s that sufficed in partial mode
+#   → wait for "state saved; exiting" — at the complete set this writes the
+#     24.18 GB state file (the `(2,4)` lineage live since 2026-07-27; the
+#     final save of the old 36.26 GB `(3,4)` file took ~2 min), so allow well
+#     over the 20 s that sufficed in partial mode
 gcloud compute instances stop risepir
 ```
 

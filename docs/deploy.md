@@ -907,16 +907,11 @@ exposed.
 > evidence, left exactly as recorded.** Every figure below — 35.43 GB,
 > `100663296` buckets, load 0.498, 1236.5 s setup, a 36.26 GB state file,
 > `arity=3 setup=830.73 MB` on the wire, ~1.66 GB in the browser — describes
-> the `(arity 3, bucket_size 4)` bootstrap **as it actually happened**, and is
-> **still what the live server is serving today**: the deployed geometry has
-> since moved to `(arity 2, bucket_size 4)` at a higher target load, but that
-> needs an operator to move `~/risepir-state.bin` aside and re-run
-> `~/bootstrap-complete.sh` (~33 min at the complete set), and that
-> re-bootstrap has not happened yet. A fresh bootstrap on the current code
-> computes to 23.62 GB / load 0.7469 / a 553.82 MB hint / ~1.11 GB in the
-> browser (§2.3, §1.5, ADR-0034) — those are the numbers a future reader
-> should size against; they are not yet what this section's live evidence
-> shows.
+> the `(arity 3, bucket_size 4)` bootstrap **as it actually happened**. It is
+> **no longer what the live server serves**: the box was re-bootstrapped onto
+> `(arity 2, bucket_size 4)` on 2026-07-27, and the measured numbers for that
+> are in **§5.4**. Read this section as the `(3,4)` baseline the ADR-0034
+> figures are compared against, not as the current deployment.
 
 **Stage 1.d, done.** The deployment at `https://private-eth-getbalance.duckdns.org`
 serves the complete nonzero-balance set — every one of mainnet's 200,503,969
@@ -992,6 +987,147 @@ archive depths, so every checkpoint logs a fetch failure rather than a
 comparison (685 of them in the first hour). No mismatch was ever reported, but
 "no mismatch" means "not checked" here, not "checked and agreed". The
 independent verification above exists precisely because that backstop was down.
+
+### 5.4 Re-bootstrapped onto `(arity 2, bucket_size 4)`, live (2026-07-27)
+
+The operation §5.3's note said had not happened yet, done on the live box, from
+the same 321 shards §5.3 used. Sequence: graceful `SIGINT` (state saved, 36 GB),
+`instances stop` → `TERMINATED`, `instances start`, `duckdns-update.sh` **first**
+(the external IP moved to `136.112.237.199`), then `git` `49052b3 → c274737`
+(16 commits), rebuild, move the old state file aside, `~/bootstrap-complete.sh`.
+
+**The refusal fires first, and by name.** Pointing the new binary at the existing
+36.26 GB state file, before touching anything else:
+
+```
+risepir-rpc mainnet: loading state from /home/admin/risepir-state.bin.arity3-20260727 ...
+risepir-rpc mainnet: fatal: loading …: state file rejected: state file geometry
+is arity 3 but this binary is compiled for arity 2 (ADR-0034) — this is not disk
+corruption, it is an intact state file from a previous geometry lineage; move the
+--state file aside and re-bootstrap from a fresh snapshot (do not restore from
+backup, the file itself is fine)
+```
+
+`exit 1`, immediately after the header decodes and before any of the multi-GB
+cells section is read (ADR-0034 §6). A restart across a geometry change fails
+loudly rather than serving the wrong lineage — verified, not assumed.
+
+**Bootstrap, end to end:**
+
+| step | `(3,4)` 2026-07-26 | `(2,4)` 2026-07-27 |
+|---|---|---|
+| geometry (printed before allocating) | `100663296` buckets, 35.43 GB, load 0.498 | **`67108864` buckets, 23.62 GB, load 0.747** |
+| snapshot ingest | 734 s | **483 s** |
+| PIR setup | 1236.5 s | **≈361 s** (derived) |
+| final save | — | **115.2 s** |
+| state file | 36,264,209,243 B | **24,176,139,523 B** |
+| whole bootstrap | ~33 min | **959 s (16 min)** |
+| peak RSS | ~37 GB | **~24.6 GB** of 62 GB |
+
+Ingest rows matched §5.3 to the byte — 200,503,969 rows, 200,503,969 nonzero,
+**0 zero skipped**, max balance 88,453,361,538,334,634,086,007,430 wei — which is
+the cheapest available check that the two lineages ingested the same set. Setup
+time is *derived* (bootstrap start → state-file mtime, minus logged ingest and
+save), not logged directly; the others are logged.
+
+**On the wire.** `GET /setup` = **553,819,345 B**: the computed 553,819,200 B
+hint (§4c) plus 145 B of framing, served in **0.208 s** on loopback — ADR-0028's
+single shared encoded response, not a per-client encode.
+
+**Both browser gates green against the public origin** (run from a Mac on Node 24;
+the VM's Node 18 is too old for them):
+
+- `e2e.mjs`: **0 failing checks**, reporting `mode=COMPLETE pinned=25613520
+  arity=2 setup=553.82 MB` — the computed §4c figure confirmed on the wire, at
+  the new arity. Also covers ADR-0033's lineage epoch being exposed, and
+  ADR-0032's capacity preflight admitting a `deviceMemory=4` phone at the
+  ADR-0034 hint size that the pre-ADR-0034 size refused.
+- `browser.mjs`: **11/11** in real headless Brave, no CSP violations, no uncaught
+  page errors.
+
+TLS verifies on the public origin after the stop/start, and `:8545`/`:8645` both
+still refuse connections from off-box (re-verified 2026-07-27).
+
+**Three things that were broken in §5.3 and are observably fixed here**, all in
+the same catch-up rather than in a test:
+
+1. **The co-located `:8545` front end no longer wedges.** §5.3's second failure
+   was fast replay outrunning the delta ring, leaving it unusable until
+   restarted. It happened again — and ADR-0029 handled it:
+   `risepir-rpc: re-bootstrapped after falling out of the server's retained
+   delta window (pinned block 25614119 -> 25614998, mode complete)`. It answered
+   continuously across that, which is *how* the byte-exact checks above were
+   run through it.
+2. **The blind reconciler now says so.** publicnode still refuses archive
+   depths, so a catch-up from an old snapshot still cannot reconcile — but
+   ADR-0027 turns that from silence into
+   `reconcile: WARNING: … 236 failed (dark checkpoint #7 in a row); no
+   successful comparison yet this run`. "Not checked" no longer reads like
+   "checked and agreed".
+3. **State no longer depends on a clean shutdown.** ADR-0025's autosave ran on
+   schedule during the replay (`state saved (autosave): block 25616711,
+   24.18 GB in 123.4s (196 MB/s)`), and ADR-0026's journal sidecar is being
+   written at `~/risepir-state.journal` with `--journal-restore` OFF — the
+   soak configuration, reporting rather than restoring, exactly as intended
+   before that switch is trusted.
+
+#### The snapshot is not exact at its own boundary — and the replay is what fixes it
+
+Verifying byte-exactness against independent archive providers mid-catch-up
+turned up mismatches, and running them down produced a result worth recording,
+because it bears directly on the never-wrong-answer contract and it is a property
+of **the exported ground truth**, not of the PIR path. It applied identically to
+the `(3,4)` deployment; the geometry change did not cause it.
+
+Method: compare the exported CSV rows *themselves* — not the server — against
+`gateway.tenderly.co/public/mainnet` and `eth-mainnet.public.blastapi.io`
+(neither is the feed, dRPC/merkle, nor the in-loop reconciler, publicnode) **at
+the snapshot block 25,613,233**, whose timestamp is `2026-07-25T23:59:59Z`,
+exactly the export's dataset head. `rpc.flashbots.net`, used for this in §5.3,
+returned `504` all day and was unusable.
+
+- **Accounts drawn at random: 40/40 byte-exact.** For the overwhelmingly dormant
+  bulk of 200 M accounts, the export is right.
+- **Accounts active in the blocks immediately before the boundary: 6 of the 27
+  present were wrong**, by `−424.64`, `+33.72`, `−4.14`, `−2.78`, `−0.88` and
+  `−0.04` ETH. Sign varies, so this is not a uniformly-missing-credit story.
+- **One funded account was missing from the export outright** — from a separate
+  25-address draw of the same population, then confirmed by a clean single pass
+  over all 321 shards: `0x3b4d794a66304f130a4db8f2551b0070dfcf5ca7`, holding
+  **2,790.43 ETH** at the snapshot block, had no row at all. In a *complete* set
+  an absent account is not "unknown", it is a definitive `0x0` (ADR-0015/0017) —
+  so that is the worst-shaped wrong answer this system can give, and it came
+  from the data, not the code.
+
+**What saves it is that the replay writes absolute post-state, not deltas.** The
+prestate tracer gives the true balance for every account a block touches, so a
+wrong row is corrected the first time that account is touched — and a *missing*
+row is inserted. Both halves were observed directly during the catch-up:
+
+| account | served from snapshot | after replay touched it | independent provider |
+|---|---|---|---|
+| `0xd8dA…6045` | `0x5c03cea37fe9d896` (wrong) | `0x5c0aabfdffd2d737` | `0x5c0aabfdffd2d737` ✓ |
+| `0x3b4d…5ca7` | absent → `0x0` (wrong) | `0x94ca9c9f9fdd198c00` (2,744.72 ETH, at block 25,616,237) | `0x94ca9c9f9fdd198c00` ✓ |
+
+Because the wrong rows are, by construction, the *active* ones, most heal within
+the first hours of replay. The residual exposure is precise and worth stating:
+**an account whose export row is wrong and which is then never touched again
+stays wrong**, and nothing in the current design will notice — the in-loop
+reconciler samples too few accounts to find it, and (see §5.3) it is blind
+altogether at archive depths during a catch-up. ADR-0027's health line now at
+least makes that blindness visible while it lasts:
+
+```
+reconcile: WARNING: block 25613430: 236 fetch(es) attempted against the
+independent provider, 236 failed (dark checkpoint #7 in a row); no successful
+comparison yet this run
+```
+
+The honest summary is that a complete-set deployment is only as correct as its
+snapshot, that this snapshot is measurably not exact at its own boundary, and
+that the system's self-healing turns that from a permanent error into a
+transient one for every account that keeps transacting. `docs/HANDOFF.md` carries
+the remedy.
 
 ## 6. Who does what, explicitly
 

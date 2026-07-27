@@ -62,13 +62,26 @@ the ~100–130 M this file and the runbook had assumed. At the geometry deployed
 then (`arity 3, bucket_size 4`), that made the server DB **35.43 GB** rather
 than 10–13 GB. The "16–24 GB box" advice was wrong by more than 2× regardless;
 the deployment runs on a 64 GB `e2-highmem-8`. ADR-0034 has since retuned the
-deployed geometry to `(arity 2, bucket_size 4)` at a higher target load, which
-computes to **23.62 GB** for the same account count (`docs/deploy.md` §2.3) —
-though the live box has not been re-bootstrapped onto it yet, so today it is
-still serving 35.43 GB. Anything that still quotes the old figures without
-noting which lineage they belong to is stale.
+deployed geometry to `(arity 2, bucket_size 4)` at a higher target load, and the
+live box **was re-bootstrapped onto it on 2026-07-27**: 23.62 GB server DB, a
+24.18 GB state file, 16 min end to end (`docs/deploy.md` §5.4). Anything that
+still quotes the 35.43 GB / `arity=3` / 830.73 MB figures without saying they are
+the superseded `(3,4)` lineage is stale.
 
 **2. Known open items, in priority order:**
+- **Post-bootstrap snapshot audit** (deploy.md §5.4) — *new, and the one that
+  touches the binding rule.* The BigQuery export is byte-exact for accounts
+  drawn at random (40/40) but **wrong for accounts active at its own boundary**
+  (6 of 27 measured, `−424.64` to `+33.72` ETH), and it omitted a funded account
+  holding 2,744.72 ETH entirely — which a complete set serves as a definitive
+  `0x0`. The replay heals every such account the first time a block touches it
+  (it writes absolute post-state from the prestate tracer, not a delta), so the
+  exposure is transient for anything that keeps transacting and **permanent for
+  anything that does not**. Remedy: after bootstrap, re-read the accounts the
+  final ~N blocks before `--snapshot-block` touched — they are exactly the
+  suspect population and there are few of them — against an archive RPC, and
+  correct them before serving. Cheap, bounded, and it closes the only known path
+  to a silently wrong complete-set answer that does not involve a lying feed.
 - **Withdrawal-recipient hard refresh** (deploy.md §4): a one-time absolute
   re-read of the ~32 k withdrawal recipient addresses vs an archive RPC, to
   clear any credit ambiguity at the snapshot join. Small utility; not built.

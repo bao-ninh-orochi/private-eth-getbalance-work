@@ -1028,9 +1028,9 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     writeln!(
         out,
         "**What is not measured, plainly.** Per-block patch time has never been measured at the \
-         complete set. This laptop cannot hold that set — the now-deployed `(arity 2, bucket_size 4)` \
-         geometry alone is a {db_gb:.2} GB server DB (§4b; the live host, still on the pre-ADR-0034 \
-         `(arity 3, bucket_size 4)` build, actually holds 35.43 GB today, until it is re-bootstrapped) \
+         complete set. This laptop cannot hold that set — the deployed `(arity 2, bucket_size 4)` \
+         geometry alone is a {db_gb:.2} GB server DB (§4b; the live host was re-bootstrapped onto it \
+         on 2026-07-27 and now holds exactly that, in a 24.18 GB state file — deploy.md §5.4) \
          — and the deployment box is a production server, not a benchmark rig, so it has never run the \
          bench harness's warm-up/measured-block protocol either. §6 therefore has no {accounts}-account \
          row, and deliberately does not get one: a patch time nobody measured has no business next to \

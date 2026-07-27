@@ -82,19 +82,21 @@ const DEPLOYED_ARITY: u32 = 3;
 /// mirror, not an import.
 const DEPLOYED_BUCKET_SIZE: u32 = 4;
 
-/// Mirrors `risepir_proto::geometry`'s own private `TARGET_LOAD_NUM` /
-/// `TARGET_LOAD_DEN` — that module's `Geometry::for_accounts` doc: "Target
-/// load factor `for_accounts` sizes towards: `accounts / slots <= 0.75`"
-/// (`docs/plan.md` §9). Mirrored rather than imported because those
-/// constants are `pub(self)` there. Kept as the same exact-integer ratio
-/// (never `f64`) so "how many accounts can today's `num_buckets` still
-/// hold before the next doubling" cannot drift from `for_accounts`'s own
-/// rounding at multi-billion-slot scale. `tests::arity4_bucket4_sits_on_the_cliff`
-/// cross-checks this mirror against `for_accounts`'s real behaviour at the
-/// exact boundary, so a future change to the real target fails a test here
-/// rather than silently desynchronising this module's headroom column.
-const TARGET_LOAD_NUM: u64 = 3;
-const TARGET_LOAD_DEN: u64 = 4;
+// The target load this sweep's headroom column measures against is *not*
+// mirrored here. It used to be — a flat `3/4` pair copied from
+// `risepir_proto::geometry`'s then-private constants — which was correct
+// only for as long as the target actually was flat for every
+// configuration. ADR-0031 made it per-`(arity, bucket_size)`
+// (`min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`), at which point a
+// copy here would have quietly overstated the headroom of exactly the three
+// combinations that fix tightens — `(2,1)`, `(2,2)`, `(3,1)` — while every
+// row this repo deploys stayed right, which is the worst shape a stale
+// mirror can take. `risepir_proto::geometry::effective_target_load` is now
+// public for this caller, so the column is derived from the same rule
+// `for_accounts` applies rather than from a comment asking the next person
+// to keep two numbers in sync. Still exact integers, never `f64`: the ratio
+// is compared as `slots * num / den` in `u128`, so it cannot drift from
+// `for_accounts`'s own rounding at multi-billion-slot scale.
 
 // ─── The arithmetic sweep ─────────────────────────────────────────────────
 
@@ -134,8 +136,9 @@ pub struct GeometryRow {
     /// hint) * arity` — what a long-lived rewind client holds.
     pub client_mem_total: u64,
     /// The largest account count this exact `num_buckets` still satisfies
-    /// the 0.75 target load for — i.e. this configuration's capacity
-    /// before the next doubling.
+    /// this configuration's own target load for (ADR-0031 — 0.75 for every
+    /// row this repo deploys or benches) — i.e. its capacity before the
+    /// next doubling.
     pub max_accounts_at_target: u64,
     /// `(max_accounts_at_target / accounts - 1) * 100` — percentage growth
     /// still free before this geometry must re-bootstrap into a bigger one.
@@ -183,10 +186,11 @@ impl GeometryRow {
 /// Derives one [`GeometryRow`]: sizes `accounts` at `(arity, bucket_size,
 /// fingerprint_bits)` under [`Backend::Simple`] (this repo's chosen
 /// backend, ADR-0002), then derives this configuration's capacity before
-/// the next doubling by asking `Geometry::for_accounts` directly — never
-/// by re-deriving the 0.75 target from scratch (see `TARGET_LOAD_NUM`'s
-/// docs for the one exception, kept as an exact-integer mirror rather than
-/// a re-derivation, and cross-checked by a test).
+/// the next doubling by asking `Geometry::for_accounts` directly, and its
+/// target load by asking
+/// `risepir_proto::geometry::effective_target_load` — never by re-deriving
+/// either from a constant kept here (see the note above that constant's
+/// former home).
 ///
 /// # Errors
 ///
@@ -205,11 +209,12 @@ pub fn compute_row(
     let arity64 = u64::from(arity);
 
     // Largest accounts' with this exact num_buckets: the floor-division
-    // form of the same `accounts/slots <= 3/4` test `for_accounts` applies
-    // internally (see TARGET_LOAD_NUM's docs).
-    let max_accounts_at_target =
-        u64::try_from((u128::from(s.slots) * u128::from(TARGET_LOAD_NUM)) / u128::from(TARGET_LOAD_DEN))
-            .expect("slots * 3 / 4 fits u64: slots itself is u64 and the ratio only shrinks it");
+    // form of the same `accounts/slots <= target` test `for_accounts`
+    // applies internally, asking that module for this configuration's own
+    // target rather than assuming a flat one (see the note above).
+    let (target_num, target_den) = risepir_proto::geometry::effective_target_load(arity, bucket_size);
+    let max_accounts_at_target = u64::try_from((u128::from(s.slots) * target_num) / target_den)
+        .expect("slots * target fits u64: slots itself is u64 and the ratio only shrinks it");
 
     let g_next = Geometry::for_accounts(
         max_accounts_at_target + 1,
@@ -310,7 +315,17 @@ pub fn sweep(cfg: &SweepConfig) -> Result<Vec<GeometryRow>, GeomError> {
 /// / [`GeometryRow::buildable`]).
 pub fn render_sweep_table(rows: &[GeometryRow], accounts: u64) -> String {
     let mut out = String::new();
-    writeln!(out, "accounts = {accounts} (target load 0.75, docs/plan.md §9; ADR-0030)").unwrap();
+    // Not "target load 0.75": since ADR-0031 the target is per-row
+    // (`min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`), so a single
+    // number in the header would be wrong for exactly the rows where it
+    // matters. Every configuration this repo deploys or benches still
+    // resolves to 0.75; the three that do not are `(2,1)`, `(2,2)`, `(3,1)`.
+    writeln!(
+        out,
+        "accounts = {accounts} (target load per row: min(0.75, 0.85 x MAX_LOAD_FACTOR); \
+         docs/plan.md §9, ADR-0030, ADR-0031)"
+    )
+    .unwrap();
     writeln!(
         out,
         "{:>5} {:>3} {:>12} {:>5} {:>3} {:>7} {:>7} | {:>8} {:>9} {:>8} {:>8} {:>9} | {:>12} {:>8} | {:>8}",
@@ -326,7 +341,7 @@ pub fn render_sweep_table(rows: &[GeometryRow], accounts: u64) -> String {
         "qry_KB",
         "rsp_KB",
         "cmem_GB",
-        "max@0.75",
+        "max@tgt",
         "headrm%",
         "next_GB",
     )
@@ -369,7 +384,9 @@ pub fn render_sweep_table(rows: &[GeometryRow], accounts: u64) -> String {
             "‡ this sizing lands above what a real cuckoo table at that (arity, bucket_size) holds \
              (`load` > `maxload`, segmented_cuckoo::MAX_LOAD_FACTOR) — the geometry is well-formed \
              but cannot be filled: inserts end in TableFull partway through. Sizing, not arithmetic, \
-             is what is wrong; see ADR-0030 and the load-factor sizing fix it points at."
+             is what is wrong; see ADR-0030 and ADR-0031. Since ADR-0031, Geometry::for_accounts \
+             sizes against each configuration's own achievable load, so no row here should earn this \
+             mark — one that does means a configuration outside what that rule covers."
         )
         .unwrap();
     }
@@ -707,7 +724,8 @@ mod tests {
     /// under 1% growth headroom before the next doubling, and that next
     /// doubling (47.24 GB) is worse than today's deployed 35.43 GB — i.e.
     /// the "saving" evaporates within weeks of mainnet's account growth.
-    /// This also cross-checks `TARGET_LOAD_NUM`/`_DEN` against
+    /// This also cross-checks the headroom column's target-load source
+    /// (`risepir_proto::geometry::effective_target_load`) against
     /// `for_accounts`'s real behaviour at the exact boundary: capacity
     /// must satisfy this `num_buckets`, and one more account must not.
     #[test]
@@ -724,8 +742,8 @@ mod tests {
             deployed.server_db
         );
 
-        // TARGET_LOAD_NUM/_DEN self-check: capacity fits this num_buckets,
-        // one more account does not.
+        // Target-load self-check: capacity fits this num_buckets, one
+        // more account does not.
         let at_capacity =
             Geometry::for_accounts(row.max_accounts_at_target, row.arity, row.bucket_size, 32, &c, Backend::Simple).unwrap();
         assert_eq!(at_capacity.num_buckets, row.num_buckets, "capacity must still fit today's num_buckets");
@@ -751,17 +769,42 @@ mod tests {
         assert!(deployed.buildable);
     }
 
-    /// The sweep must not advertise a configuration that cannot be filled.
-    /// `arity 2, bucket_size 1` is buildable (its `bucket_size` is inside
-    /// `SUPPORTED_BUCKET_SIZES`) yet the 0.75 sizing target lands it at
-    /// load 0.7469 against a published ceiling of 0.48 — measured against a
-    /// real store, the fill dies with `TableFull` at 70.1% of its inserts.
+    /// `arity 2, bucket_size 1` is the configuration that motivated
+    /// ADR-0031, and it is now sized *safely*: a flat 0.75 target used to
+    /// land it at load 0.7469 against a published ceiling of 0.48 — a real
+    /// store died with `TableFull` at 70.1% of its inserts — while
+    /// `effective_target_load` now caps it at `0.85 × 0.48 = 0.408`, so the
+    /// sweep reports a row that can actually be filled.
+    ///
+    /// This is the sweep-level regression test for that fix: it asserts the
+    /// property (sized at or under the ceiling), not the exact figure, so
+    /// it keeps its meaning if the margin is ever retuned.
     #[test]
-    fn a_sizing_above_the_published_ceiling_is_flagged_unfillable() {
+    fn the_motivating_configuration_is_now_sized_below_its_ceiling() {
         let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 1, 32, &codec()).unwrap();
         assert_eq!(row.load_ceiling, Some(0.48));
-        assert!(row.load_factor > 0.48, "load_factor = {}", row.load_factor);
         assert!(row.buildable, "bucket_size 1 is inside SUPPORTED_BUCKET_SIZES");
+        assert!(
+            row.load_factor <= 0.48,
+            "ADR-0031 must size (2,1) at or under its published ceiling, got {}",
+            row.load_factor
+        );
+        assert!(row.fillable(), "nothing left to flag once it is sized correctly");
+        assert_eq!(row_annotation(&row), "");
+    }
+
+    /// ...but the flag itself must still work. `for_accounts` can no longer
+    /// *produce* a row above its own ceiling (that is exactly what ADR-0031
+    /// removed), so this drives [`GeometryRow::fillable`] and
+    /// [`row_annotation`] directly with a row placed over the line. Without
+    /// this, the sweep's unfillable-reporting path would be left with no
+    /// test at all the moment the sizing fix landed — the machinery would
+    /// still be there, and nothing would notice if it broke.
+    #[test]
+    fn a_row_above_its_ceiling_is_still_flagged_unfillable() {
+        let mut row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 1, 32, &codec()).unwrap();
+        assert_eq!(row.load_ceiling, Some(0.48));
+        row.load_factor = 0.7469; // what a flat-0.75 target used to produce here
         assert!(!row.fillable(), "must be flagged: sized above what the table holds");
         assert_eq!(row_annotation(&row), "  ‡");
     }

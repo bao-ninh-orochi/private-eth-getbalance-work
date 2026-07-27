@@ -47,6 +47,7 @@
 use ikpir_common::backend::frodo::FrodoParams;
 use ikpir_common::backend::simple::SimpleParams;
 use ikpir_common::pir_params::{frodo_max_plaintext_bits, simple_max_plaintext_bits};
+use segmented_cuckoo::MAX_LOAD_FACTOR;
 
 use crate::value::ValueCodec;
 
@@ -158,21 +159,136 @@ impl std::fmt::Display for GeomError {
 
 impl std::error::Error for GeomError {}
 
-/// Target load factor `for_accounts` sizes towards: `accounts / slots <= 0.75`.
+/// Flat ceiling `for_accounts` never sizes above, regardless of arity or
+/// bucket_size, expressed as a numerator over [`TARGET_DEN`]:
+/// `GLOBAL_TARGET_NUM / TARGET_DEN` = `7_500 / 10_000` = `0.75`.
 ///
-/// `docs/plan.md` §9: "run at ~75% load for headroom."
-const TARGET_LOAD_NUM: u128 = 3;
-const TARGET_LOAD_DEN: u128 = 4;
+/// `docs/plan.md` §9: "run at ~75% load for headroom." This used to be the
+/// *only* term `for_accounts` sized against; it is now one of two terms
+/// [`effective_target_load`] takes the `min` of — see that function and ADR-0031
+/// (`docs/adr/README.md`) for why a flat cap survives alongside a
+/// per-configuration one: this store mutates continuously inside a
+/// ~12 s block budget while holding the write lock `/answer` also needs,
+/// it cannot grow in place once built (`RisePirServer::full_rebuild` only
+/// ever re-derives hints for the *existing* geometry), and a `TableFull`
+/// mid-block is therefore a full re-bootstrap outage rather than a
+/// slowdown — so the flat 0.75 headroom is kept regardless of what any
+/// single `(arity, bucket_size)` could theoretically reach.
+const GLOBAL_TARGET_NUM: u128 = 7_500;
+
+/// Common denominator for every target-load fraction in this module:
+/// hundredths of a percent. Large enough to represent both
+/// [`GLOBAL_TARGET_NUM`] and the margin-adjusted per-configuration ceiling
+/// (`SAFETY_MARGIN_NUM` × a `MAX_LOAD_FACTOR` hundredth, itself out of
+/// `100 * 100`) exactly, so [`effective_target_load`] never has to reduce
+/// either side before comparing them.
+const TARGET_DEN: u128 = 10_000;
+
+/// Safety margin applied to `segmented_cuckoo::MAX_LOAD_FACTOR` before its
+/// per-configuration ceiling is allowed to tighten [`GLOBAL_TARGET_NUM`] —
+/// out of 100, so `SAFETY_MARGIN_NUM * (a MAX_LOAD_FACTOR hundredth)` lands
+/// directly on the [`TARGET_DEN`] scale.
+///
+/// See [`effective_target_load`] and ADR-0031 for the measured blast
+/// radius at this margin: exactly three `(arity, bucket_size)`
+/// configurations bind — `(2,1)`, `(2,2)`, `(3,1)` — and none of them is
+/// used anywhere in this repo (deployed and benched configurations are all
+/// `(3,4)`), so every configuration this repo actually deploys or benches
+/// is bit-identical to before this safety margin existed.
+const SAFETY_MARGIN_NUM: u128 = 85;
+
+/// `segmented_cuckoo::MAX_LOAD_FACTOR[arity - 2][bucket_size - 1]`,
+/// converted once to an exact numerator over a denominator of 100 (e.g.
+/// `0.48` -> `48`) so [`effective_target_load`] never touches `f64`.
+/// Round-trips exactly for all 12 published entries — see
+/// `max_load_factor_hundredths_round_trips_exactly` in the tests below.
+///
+/// Returns `None` when `MAX_LOAD_FACTOR` has no entry for `(arity,
+/// bucket_size)`. `for_accounts` calls this *before* its own arity
+/// validation runs (the `match` further down in its body), so `arity`
+/// here is not yet guaranteed to be 2/3/4 — this function guards both
+/// indices defensively with `checked_sub`/`get` rather than trusting that,
+/// so it can never panic regardless. The real, reachable case is
+/// `bucket_size` outside `1..=4`: those configurations are not
+/// constructible by `segmented_cuckoo` (`SUPPORTED_BUCKET_SIZES` is
+/// `1..=4`), but `for_accounts` has always accepted any `bucket_size >=
+/// 1`, and a sweep tool on another branch deliberately sizes
+/// `bucket_size` 5..16 for arithmetic-only exploration — so this falls
+/// back to "no per-configuration ceiling known" rather than rejecting or
+/// panicking.
+fn max_load_factor_hundredths(arity: u32, bucket_size: u32) -> Option<u128> {
+    let row = arity.checked_sub(2)? as usize;
+    let col = bucket_size.checked_sub(1)? as usize;
+    let ceiling = *MAX_LOAD_FACTOR.get(row)?.get(col)?;
+    Some((ceiling * 100.0).round() as u128)
+}
+
+/// The load factor `for_accounts` actually sizes towards for one `(arity,
+/// bucket_size)`, as an exact `(numerator, denominator)` pair over
+/// `TARGET_DEN`:
+///
+/// ```text
+/// target = min( GLOBAL_TARGET , SAFETY_MARGIN × MAX_LOAD_FACTOR[arity-2][bucket_size-1] )
+/// ```
+///
+/// i.e. the smaller of the flat `GLOBAL_TARGET_NUM` cap and
+/// `SAFETY_MARGIN_NUM` applied to `segmented_cuckoo`'s own published
+/// achievable-load ceiling for this configuration — never the
+/// per-configuration term alone, because upstream's own ceiling is
+/// calibrated for a fill-once benchmark, not this store's continuous,
+/// lock-held, no-in-place-growth mutation pattern (see
+/// `GLOBAL_TARGET_NUM`'s docs). When `max_load_factor_hundredths` has
+/// no ceiling to offer, this returns the flat cap alone — bit-identical to
+/// every `(arity, bucket_size)` before this module considered a
+/// per-configuration ceiling at all.
+///
+/// # Why this is `pub`
+///
+/// Because the alternative is a copy of it somewhere else, and this repo's
+/// standing rule is that geometry is derived here, never hardcoded. The
+/// `xtask geometry` sweep (ADR-0030) needs this exact ratio to compute its
+/// headroom column — "how many more accounts fit before `num_buckets`
+/// doubles" — and it previously mirrored a flat `3/4` in its own source,
+/// which was correct only while the target *was* flat. Publishing the real
+/// rule means that column tracks `for_accounts` by construction instead of
+/// by a comment asking the next person to remember.
+pub fn effective_target_load(arity: u32, bucket_size: u32) -> (u128, u128) {
+    match max_load_factor_hundredths(arity, bucket_size) {
+        Some(ceiling_hundredths) => (
+            GLOBAL_TARGET_NUM.min(SAFETY_MARGIN_NUM * ceiling_hundredths),
+            TARGET_DEN,
+        ),
+        None => (GLOBAL_TARGET_NUM, TARGET_DEN),
+    }
+}
 
 impl Geometry {
     /// Picks the smallest `num_buckets` (respecting the arity shape
     /// constraint) with `accounts / (num_buckets * bucket_size) <=` the
-    /// fixed target load of `0.75`, then derives `plaintext_bits` from
+    /// *effective* target load for this `(arity, bucket_size)` — see
+    /// `effective_target_load` (private to this module): the smaller of a flat 0.75 cap and a
+    /// safety margin on `segmented_cuckoo::MAX_LOAD_FACTOR`'s own
+    /// published achievable-load ceiling for that configuration
+    /// (ADR-0031). For every `(arity, bucket_size)` this repo actually
+    /// deploys or benches, the effective target is still exactly 0.75 —
+    /// the per-configuration term only ever tightens three combinations
+    /// this repo does not use. Then derives `plaintext_bits` from
     /// `ikpir_common::pir_params` for `backend` at that geometry.
     ///
-    /// The target-load search is done in exact `u128` integer arithmetic
-    /// (not `f64`), so it cannot drift from `0.75` by floating-point
-    /// rounding at large account counts.
+    /// Before ADR-0031, `for_accounts` sized every configuration against a
+    /// single flat 0.75 with no regard for arity/bucket_size, which is
+    /// unsound at the edges of the space: `segmented_cuckoo`'s own
+    /// achievable load for `(arity=2, bucket_size=1)` is only ~0.48, so a
+    /// flat 0.75 target could return a geometry too small for the store to
+    /// actually be filled to (a measured failure at 1,051,458 of
+    /// 1,500,000 inserts, 70.1%, before this fix — see ADR-0031).
+    ///
+    /// The whole target-load search — including the per-configuration
+    /// ceiling, converted from `segmented_cuckoo::MAX_LOAD_FACTOR`'s `f64`
+    /// table to exact integer hundredths once by
+    /// `max_load_factor_hundredths` — is done in exact `u128` integer
+    /// arithmetic, not `f64`, so it cannot drift from either bound by
+    /// floating-point rounding at large account counts.
     ///
     /// # Errors
     ///
@@ -197,10 +313,18 @@ impl Geometry {
             return Err(GeomError::InvalidFieldWidth);
         }
 
-        // buckets_needed = ceil(accounts / (bucket_size * TARGET_LOAD))
-        //                = ceil(accounts * TARGET_LOAD_DEN / (bucket_size * TARGET_LOAD_NUM))
-        let numerator = u128::from(accounts) * TARGET_LOAD_DEN;
-        let denominator = u128::from(bucket_size) * TARGET_LOAD_NUM;
+        // buckets_needed = ceil(accounts / (bucket_size * target))
+        //                = ceil(accounts * target_den / (bucket_size * target_num))
+        // where (target_num, target_den) is the *effective* target load for
+        // this (arity, bucket_size) — see `effective_target_load`. `arity`
+        // is not yet validated at this point (that happens in the `match`
+        // below), but `effective_target_load` never panics on a bad one —
+        // it just falls back to the flat cap — and an invalid arity's
+        // `buckets_needed` here is discarded when that `match` returns
+        // `GeomError::InvalidArity` anyway.
+        let (target_num, target_den) = effective_target_load(arity, bucket_size);
+        let numerator = u128::from(accounts) * target_den;
+        let denominator = u128::from(bucket_size) * target_num;
         let buckets_needed = numerator.div_ceil(denominator);
 
         let num_buckets_u128 = match arity {
@@ -545,5 +669,168 @@ mod tests {
             let g = Geometry { value_bits, ..seed };
             let _ = g.sizes(backend, accounts);
         }
+    }
+
+    /// `max_load_factor_hundredths`'s `f64 -> integer hundredths`
+    /// conversion round-trips exactly for all 12 published
+    /// `MAX_LOAD_FACTOR` entries — the precondition for treating the
+    /// result as exact rather than merely "close enough" (this module's
+    /// whole point, per `for_accounts`'s docs, is doing this search in
+    /// exact integer arithmetic end to end).
+    #[test]
+    fn max_load_factor_hundredths_round_trips_exactly() {
+        for arity in [2u32, 3, 4] {
+            for bucket_size in 1u32..=4 {
+                let row = (arity - 2) as usize;
+                let col = (bucket_size - 1) as usize;
+                let original = MAX_LOAD_FACTOR[row][col];
+                let hundredths = max_load_factor_hundredths(arity, bucket_size).unwrap_or_else(|| {
+                    panic!("({arity},{bucket_size}) must have a MAX_LOAD_FACTOR entry")
+                });
+                assert_eq!(
+                    hundredths as f64 / 100.0,
+                    original,
+                    "({arity},{bucket_size}): round-trip mismatch, hundredths={hundredths}, original={original}"
+                );
+            }
+        }
+    }
+
+    /// `bucket_size` outside `1..=4` has no `MAX_LOAD_FACTOR` entry — a
+    /// sweep tool on another branch deliberately sizes `bucket_size`
+    /// 5..16 for arithmetic-only exploration, so `for_accounts` must keep
+    /// accepting it rather than start rejecting what it always has. An
+    /// out-of-range `arity` is reachable too, because `for_accounts` calls
+    /// this before its own arity validation runs. Neither panics; both
+    /// fall back to `None` ("no per-configuration ceiling known").
+    #[test]
+    fn max_load_factor_hundredths_falls_back_gracefully_out_of_range() {
+        for arity in [2u32, 3, 4] {
+            for bucket_size in [5u32, 6, 16, 1_000] {
+                assert_eq!(max_load_factor_hundredths(arity, bucket_size), None);
+            }
+        }
+        for arity in [0u32, 1, 5, 6, 100] {
+            assert_eq!(max_load_factor_hundredths(arity, 4), None);
+        }
+    }
+
+    /// The whole blast radius of ADR-0031's 0.85 safety margin, asserted
+    /// rather than trusted: at margin 0.85, exactly three `(arity,
+    /// bucket_size)` configurations bind the per-configuration ceiling
+    /// below the flat 0.75 cap, and every other configuration in `2..=4 x
+    /// 1..=4` stays at *exactly* 0.75 — bit-identical to before this
+    /// module considered a per-configuration ceiling at all.
+    #[test]
+    fn effective_target_load_matches_measured_blast_radius() {
+        // (arity, bucket_size) -> numerator over TARGET_DEN, i.e.
+        // SAFETY_MARGIN_NUM * MAX_LOAD_FACTOR-as-hundredths:
+        //   (2,1): 85 * 48 = 4_080  (0.408)
+        //   (2,2): 85 * 83 = 7_055  (0.7055)
+        //   (3,1): 85 * 85 = 7_225  (0.7225)
+        let tight: [((u32, u32), u128); 3] = [((2, 1), 4_080), ((2, 2), 7_055), ((3, 1), 7_225)];
+        for ((arity, bucket_size), expected_num) in tight {
+            assert_eq!(
+                effective_target_load(arity, bucket_size),
+                (expected_num, TARGET_DEN),
+                "({arity},{bucket_size}): expected the margined ceiling to bind"
+            );
+            assert!(
+                expected_num < GLOBAL_TARGET_NUM,
+                "({arity},{bucket_size}): must be strictly below the flat 0.75 cap"
+            );
+        }
+
+        let flat: [(u32, u32); 9] = [
+            (2, 3),
+            (2, 4),
+            (3, 2),
+            (3, 3),
+            (3, 4),
+            (4, 1),
+            (4, 2),
+            (4, 3),
+            (4, 4),
+        ];
+        for (arity, bucket_size) in flat {
+            assert_eq!(
+                effective_target_load(arity, bucket_size),
+                (GLOBAL_TARGET_NUM, TARGET_DEN),
+                "({arity},{bucket_size}): expected the flat 0.75 cap to stay exact"
+            );
+        }
+    }
+
+    /// "Nothing else moved": every configuration this repo actually
+    /// deploys or benches — all `(arity=3, bucket_size=4)`, none of the
+    /// three ADR-0031 tightens — must land on exactly the same
+    /// `num_buckets` as before this fix (`docs/numbers.md` §4a,
+    /// `docs/deploy.md` §5.3 / ADR-0023).
+    #[test]
+    fn for_accounts_deployed_and_bench_num_buckets_unchanged() {
+        let cases: [(u64, u32); 4] = [
+            (100_000, 49_152),
+            (1_000_000, 393_216),
+            (9_437_184, 3_145_728),
+            (200_503_969, 100_663_296), // the live complete mainnet set
+        ];
+        for (accounts, expected_num_buckets) in cases {
+            let g = Geometry::for_accounts(accounts, 3, 4, 32, &codec_96(), Backend::Simple).unwrap();
+            assert_eq!(
+                g.num_buckets, expected_num_buckets,
+                "accounts={accounts}: num_buckets must be bit-identical to pre-ADR-0031"
+            );
+        }
+    }
+
+    /// The bug this module exists to fix, end to end. Before ADR-0031,
+    /// `(arity=2, bucket_size=1)` sized against the flat 0.75 cap alone,
+    /// even though `segmented_cuckoo`'s own achievable load there
+    /// (`MAX_LOAD_FACTOR[0][0]`) is only ~0.48 — measured (outside this
+    /// suite, ADR-0031) to fail a real fill at 1,051,458 of 1,500,000
+    /// inserts (70.1%). After the fix, both the sized load and an actual
+    /// fill of a real store must respect the achievable ceiling.
+    #[test]
+    fn geometry_for_accounts_2_1_is_actually_fillable() {
+        use segmented_cuckoo::Segmented2aryCuckooKVStore;
+
+        // 300,000, not the 1,500,000 the ADR measured: both size above the
+        // 0.48 ceiling under the old flat-0.75 rule (0.5722 and 0.7153
+        // respectively), so both are genuine regression cases, and the
+        // smaller one fills a fifth as many slots in a debug build — this
+        // is the `cargo test --workspace` gate, which CLAUDE.md wants fast.
+        // Note 500,000 would NOT do: the old rule happens to land it at
+        // 0.4768, just under the ceiling, so it would silently pass either
+        // way.
+        let accounts = 300_000u64;
+        let g = Geometry::for_accounts(accounts, 2, 1, 32, &codec_96(), Backend::Simple).unwrap();
+
+        let sizes = g.sizes(Backend::Simple, accounts);
+        assert!(
+            sizes.load_factor <= MAX_LOAD_FACTOR[0][0] + 1e-9,
+            "sized load {} exceeds the (arity=2, bucket_size=1) achievable ceiling {}",
+            sizes.load_factor,
+            MAX_LOAD_FACTOR[0][0]
+        );
+
+        let mut store = Segmented2aryCuckooKVStore::new(
+            g.num_buckets,
+            g.bucket_size,
+            g.fingerprint_bits,
+            g.value_bits,
+            g.plaintext_bits,
+        )
+        .expect("Geometry::for_accounts must always produce a constructible store");
+
+        let value = vec![0u8; store.value_size_in_bytes()];
+        for i in 0..accounts {
+            let mut addr = [0u8; 20];
+            addr[12..].copy_from_slice(&i.to_be_bytes());
+            let key = crate::keccak256(&addr);
+            store
+                .insert(key, &value)
+                .unwrap_or_else(|e| panic!("insert #{i} of {accounts} failed: {e}"));
+        }
+        assert_eq!(store.num_items(), accounts, "not every insert landed");
     }
 }

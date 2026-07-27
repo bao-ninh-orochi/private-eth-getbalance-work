@@ -23,6 +23,15 @@ parallel = ["ikpir-common/parallel"]
 [dependencies]
 ikpir-common = { workspace = true, default-features = false }
 
+# `Geometry::for_accounts`'s per-configuration load-factor ceiling
+# (ADR-0031): depends on the real `segmented_cuckoo::MAX_LOAD_FACTOR`
+# table rather than a copy of it, so this crate's sizing rule cannot drift
+# from the primitive it is sizing for. No feature gating needed — this
+# crate has no `parallel`-style toggle of its own, and `risepir-wasm`
+# already depends on it directly at these same default features (see the
+# workspace manifest), so it is already proven to build for wasm32.
+segmented-cuckoo = { workspace = true }
+
 # `ValueCodec::key_tag`'s hash (ADR-0009): deliberately the *same* xxh3
 # crate `segmented-cuckoo` uses for the SCF's own fingerprint, but called
 # with a distinct nonzero seed (`value::KEY_TAG_SEED`) so the two hashes

@@ -1168,13 +1168,16 @@ row now carries its own `maxload` ceiling
 (`segmented_cuckoo::MAX_LOAD_FACTOR`) next to the load it was sized to, so the
 margin is visible rather than implied.
 
-At the live account count exactly one configuration earns `‡` — `arity 2,
-bucket_size 1`, sized to 0.7469 against a 0.48 ceiling. That is not a quirk of
-the tool but a defect in `Geometry::for_accounts`, which sizes every
-configuration against one flat 0.75 target regardless of arity or bucket size;
-measured against a real store it dies after 70.1% of its inserts. The sizing
-itself is fixed separately (see the load-factor ADR); this table exists so the
-question is visible when someone reads a candidate off it.
+At the live account count exactly one configuration earned `‡` when this
+column was added — `arity 2, bucket_size 1`, sized to 0.7469 against a 0.48
+ceiling. That was not a quirk of the tool but a defect in
+`Geometry::for_accounts`, which sized every configuration against one flat
+0.75 target regardless of arity or bucket size; measured against a real store
+it died after 70.1% of its inserts. Surfacing it here is what this column was
+for, and **ADR-0031 then fixed the sizing itself**, so no configuration earns
+`‡` at the live account count today — `(2,1)` is now sized to `0.85 × 0.48 =
+0.408` and fills. The column stays: it is what would make the *next* such
+sizing defect visible on the way in, rather than at a `TableFull` mid-block.
 
 **Filling at the load factor that actually matters.** The 9,437,184-account
 run above proves each candidate *constructs and fills*, but rounds each one to
@@ -1215,3 +1218,64 @@ which is not. Nothing above is stated as measured unless it was.
 both why `num_buckets` quantizes by factors of 2 and why
 `SUPPORTED_BUCKET_SIZES` hard-caps `bucket_size` at 4. `docs/HANDOFF.md`'s
 upstream-candidates bullet now points here.
+### ADR-0031 — `for_accounts`'s target load is `min(0.75, 0.85 × segmented_cuckoo::MAX_LOAD_FACTOR)`, not a flat 0.75 **[NEW]**
+
+**Chosen:** `Geometry::for_accounts` now sizes each `(arity, bucket_size)`
+against `target = min(GLOBAL_TARGET, SAFETY_MARGIN × MAX_LOAD_FACTOR[arity-2]
+[bucket_size-1])`, with `GLOBAL_TARGET = 0.75` (unchanged) and `SAFETY_MARGIN =
+0.85`, reading the ceiling from the real `segmented_cuckoo::MAX_LOAD_FACTOR`
+(now a normal dependency of `risepir-proto`) rather than a copy of it, so the
+rule cannot drift from the primitive it sizes. The search stays exact `u128`
+arithmetic end to end — the published `f64` ceilings are converted to exact
+integer hundredths once, and both candidate targets are compared by
+cross-multiplication, never as floats.
+
+**Rejected:** upstream's own `target_load_factor` un-margined (`0.91`–`0.95`,
+what `CuckooKVStore::from_num_items` sizes to directly) — it is calibrated for
+a fill-once benchmark, and this store mutates continuously: inserts land
+inside a ~12 s block budget while holding the write lock `/answer` also
+needs, cuckoo eviction chains lengthen sharply as load approaches the
+ceiling, and the store cannot grow in place once built
+(`RisePirServer::full_rebuild` only ever re-derives hints for the *existing*
+geometry — see that method's docs). A `TableFull` mid-block is therefore a
+full re-bootstrap outage — ~33 min of CPU at the deployed scale, plus the
+catch-up replay — not a slowdown, so the flat 0.75 headroom stays as an
+outer bound regardless of what any one configuration could theoretically
+reach. Also rejected: rejecting `bucket_size` outside `1..=4` outright (no
+`MAX_LOAD_FACTOR` entry exists there) — a sweep tool on another branch
+deliberately sizes `bucket_size` 5..16 for arithmetic-only exploration, so
+`for_accounts` falls back to the flat 0.75 for those instead of refusing
+them.
+
+**Why:** every configuration was being sized against one flat 0.75 with no
+regard for arity or bucket_size, and `segmented_cuckoo`'s own achievable load
+is not flat — `MAX_LOAD_FACTOR[arity-2][bucket_size-1]` ranges from `0.48`
+(`arity=2, bucket_size=1`) to `0.95` (`arity=4, bucket_size=3` or `4`). At the
+low end, `0.75` sits *above* the achievable ceiling, not below it: measured
+directly, `Geometry::for_accounts(1_500_000, 2, 1, …)` sized to 2,097,152
+buckets (load 0.7153), and a real `Segmented2aryCuckooKVStore` built at that
+geometry hit `table is full` after only 1,051,458 of 1,500,000 inserts
+(70.1%) — `for_accounts` had returned a geometry the store could not actually
+be filled to, with no error and no warning. Upstream already publishes
+exactly the table this needed (`segmented_cuckoo::MAX_LOAD_FACTOR`) and a
+`from_num_items` constructor that sizes from it; this repo used neither, and
+had been sizing a strictly worse, uniform stand-in for the same idea.
+
+At margin 0.85, the per-configuration term binds on exactly three
+configurations — `(2,1)` → `0.408`, `(2,2)` → `0.7055`, `(3,1)` → `0.7225` —
+and every other `(arity, bucket_size)` in `2..=4 × 1..=4` still resolves to
+*exactly* `0.75`, asserted in tests rather than trusted. None of the three is
+used anywhere in this repo — every deployed and benched configuration is
+`(arity=3, bucket_size=4)` — so this is a no-behavior-change everywhere this
+repo actually runs, and a correctness fix everywhere else.
+
+Deflating but honest: at the deployed complete set (200,503,969 accounts,
+`arity=3, bucket_size=4`) this changes **nothing** — `num_buckets` stays
+100,663,296, load 0.4980, bit-identical to before. `num_buckets` is so
+coarsely quantized (a power of two per segment) at this scale that raising
+the target all the way from 0.75 to `(3,4)`'s own ceiling of 0.94 still lands
+on the same 100,663,296 — the deployed load would need to very nearly double
+before the quantization step even notices a higher target. So this is a
+correctness fix for the edges of the `(arity, bucket_size)` space and for
+account counts that quantize differently, not a space win for the set
+actually running today.

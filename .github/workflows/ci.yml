@@ -3,6 +3,12 @@
 #   xtask conformance                — PRs only (release build, ~minutes;
 #                                      byte-exact vs a synthetic ground truth,
 #                                      fully network-free: MockFeed)
+#   browser                          — PRs only (two release builds — xtask
+#                                      web, risepir-rpc — the same cost class
+#                                      as conformance; drives real headless
+#                                      Chromium against a network-free mock
+#                                      server, the one thing that can see a CSP
+#                                      violation)
 #   cargo-deny                       — advisories / licenses / sources
 # The live feed gate and fuzzing are nightly (nightly.yml): they need the
 # network / long wall-clock and must never flake a merge.
@@ -83,6 +89,102 @@ jobs:
           git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo run -p xtask --release -- conformance
+
+  browser:
+    name: browser (wasm client + headless Chromium)
+    # Same reasoning as conformance, one job up: this needs two release
+    # builds (xtask web's wasm build, then risepir-rpc itself) plus standing
+    # up a live mock server and a real headless-Chromium session — minutes,
+    # not seconds. Every push to main is already a squash-merge of a PR that
+    # ran this exact gate (PGR-001/005), so re-running it there would only
+    # re-pay that cost without a matching chance of catching anything new.
+    # PRs are where a CSP regression must be caught, before it merges — so,
+    # like conformance, this runs on PRs and workflow_dispatch, not on push.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate the private IKPIR dependency
+        env:
+          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
+        run: |
+          if [ -z "$IKPIR_TOKEN" ]; then
+            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # The gates use only Node's built-ins (fetch, WebSocket, wasm) —
+          # there is no package.json in this repo, so no `cache:` input here
+          # (it requires a lockfile to key against) and no `npm install`.
+          node-version: "22"
+      - name: verify a Chromium-family browser is present
+        # `web/test/browser.mjs` exits 0 with a friendly skip when it finds
+        # no browser — right for a developer's laptop, wrong for CI, where
+        # that would be a gate silently passing while testing nothing.
+        # `ubuntu-latest` ships Google Chrome at /usr/bin/google-chrome,
+        # already in browser.mjs's CANDIDATES list, so this fails loudly the
+        # day that ever stops being true, and prints the version so the
+        # gate's evidence is visible in the log. `--require-browser` below
+        # closes the same hole a layer further in, on the Node side.
+        run: |
+          if [ ! -x /usr/bin/google-chrome ]; then
+            echo "::error::/usr/bin/google-chrome not found on this runner — the browser gate has nothing to drive"
+            exit 1
+          fi
+          /usr/bin/google-chrome --version
+          echo "RISEPIR_BROWSER=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+      - name: rustup target add wasm32-unknown-unknown
+        run: rustup target add wasm32-unknown-unknown
+      - name: build the browser client's wasm (xtask web)
+        run: cargo run -p xtask --release -- web
+      - name: build risepir-rpc
+        run: cargo build --release -p risepir-rpc
+      - name: start the mock server (network-free; no live feed needed)
+        run: |
+          ./target/release/risepir-rpc mock --web web > server.log 2>&1 &
+          echo $! > server.pid
+      - name: wait for GET /healthz
+        # Never a fixed sleep — that is exactly how this kind of job goes
+        # flaky (too short on a slow runner, wasted minutes on a fast one).
+        # Poll with a bounded deadline and a failure that dumps the log.
+        run: |
+          # 120s, not 60s: the mock comes up in about two seconds, but this
+          # step starts the instant a release build finishes, and on a
+          # loaded runner that first moment is the worst one — a 60s budget
+          # expired here once with the server having printed nothing at
+          # all. The budget only ever costs wall-clock on a genuine
+          # failure; a healthy server still passes on the first poll.
+          deadline=$((SECONDS + 120))
+          until curl -fsS http://127.0.0.1:8645/healthz > /dev/null 2>&1; do
+            # A server that has already died will never answer, so waiting
+            # out the full budget just delays the report. Fail the moment
+            # the pid is gone and show its log, which is where the reason
+            # will be.
+            if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+              echo "::error::risepir-rpc mock exited before answering GET /healthz"
+              cat server.log
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::risepir-rpc mock never answered GET /healthz on :8645 within 120s"
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: e2e gate (protocol under Node, real wasm host)
+        run: node web/test/e2e.mjs http://127.0.0.1:8645
+      - name: browser gate (headless Chromium — the only thing that can see a CSP)
+        run: node web/test/browser.mjs http://127.0.0.1:8645 --mock --require-browser
+      - name: server log
+        if: failure()
+        run: cat server.log
+      - name: stop the server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
 
   deny:
     name: cargo-deny (advisories, licenses, sources)

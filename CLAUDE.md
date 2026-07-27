@@ -52,18 +52,22 @@ today** and there is a **live GCP deployment** (below).
   `node web/test/e2e.mjs <pir-url>` (real wasm host) and
   `node web/test/browser.mjs <pir-url>` (headless Chromium — it is the only
   thing that can see a CSP, and it has already caught one). Both need a server
-  running with `--web web`; both adapt to `GET /mode`; neither needs npm.
+  running with `--web web`; both adapt to `GET /mode`; neither needs npm. CI
+  now runs both against `mock` on every PR (the `browser` job): a runner with
+  no browser fails loudly (`--require-browser`) rather than silently skipping.
+  Still run them locally against real mainnet after touching the feed or the
+  apply path — CI's mock server does not exercise that.
 - `ikpir-common` is inherited `default-features = false`; every crate re-enables
   the rayon kernels via its own default-on `parallel` feature. A new crate
   depending on it needs that forwarding feature or it silently builds the scalar
   kernels the numbers were not measured against (ADR-0019).
 - CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
-  --all-targets -- -D warnings` + the tests on every push, conformance on PRs,
-  and runs the live gate plus the `fuzz/` targets nightly. It fetches the
-  private IKPIR dep via the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR
-  only, Contents read-only — deploy keys are disabled on that repo).
-  `cargo fmt` is not yet a gate — no mass reformat until the in-flight
-  branches land.
+  --all-targets -- -D warnings` + the tests on every push, conformance and the
+  browser gate (mock mode, real headless Chromium) on PRs, and runs the live
+  gate plus the `fuzz/` targets nightly. It fetches the private IKPIR dep via
+  the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR only, Contents read-only —
+  deploy keys are disabled on that repo). `cargo fmt` is not yet a gate — no
+  mass reformat until the in-flight branches land.
 
 ## Git conventions
 

@@ -12,6 +12,13 @@
 // Drives headless Chromium (Brave/Chrome/Chromium, whichever is present)
 // over the DevTools protocol using Node's built-in WebSocket client, so it
 // adds no dependency to the repo.
+//
+// On a developer's laptop, no browser present is a reason to skip, not to
+// fail — so by default this exits 0 with a note. In CI that same exit code
+// would mean a gate that ran zero checks reporting as a pass, which is
+// worse than not having the gate at all. Pass `--require-browser` (or set
+// `RISEPIR_REQUIRE_BROWSER=1`) to turn "not found" into a loud, non-zero
+// failure — CI always sets it, a laptop never needs to.
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -20,18 +27,41 @@ import { join } from "node:path";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8645";
 const PORT = 9333;
+const requireBrowser = process.argv.includes("--require-browser") || process.env.RISEPIR_REQUIRE_BROWSER === "1";
 
+// Order is load-bearing on Linux. `/usr/bin/chromium` on GitHub's
+// `ubuntu-latest` is a **snap** wrapper: it works, but its first launch
+// does snap mount/confinement setup and floods stderr with dbus failures,
+// and on a loaded runner it can take longer to expose the DevTools port
+// than the whole gate used to allow — observed exactly that, twice, as a
+// spurious red on a PR whose page was fine. `/usr/bin/google-chrome` is a
+// plain deb on the same image with none of that startup cost, so it goes
+// first and the snap stays as the fallback for images that only ship it.
 const CANDIDATES = [
   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/chromium",
   "/usr/bin/google-chrome",
+  "/usr/bin/chromium",
 ];
 
-const browser = CANDIDATES.find((p) => existsSync(p));
+// An explicit override wins over the search: it lets CI pin the exact
+// binary it verified is present (and printed the version of) rather than
+// trusting this list to agree with the workflow's own check.
+const override = process.env.RISEPIR_BROWSER;
+if (override && !existsSync(override)) {
+  console.error(`RISEPIR_BROWSER=${override} does not exist`);
+  process.exit(1);
+}
+const browser = override ?? CANDIDATES.find((p) => existsSync(p));
 
 if (!browser) {
+  if (requireBrowser) {
+    console.error("no Chromium-family browser found, and --require-browser (or RISEPIR_REQUIRE_BROWSER=1) demands one");
+    console.error("looked for:");
+    for (const c of CANDIDATES) console.error(`  ${c}`);
+    process.exit(1);
+  }
   console.log("no Chromium-family browser found; skipping the browser gate");
   process.exit(0);
 }
@@ -46,6 +76,17 @@ function check(name, cond, detail = "") {
 }
 
 const profile = mkdtempSync(join(tmpdir(), "risepir-browser-"));
+
+// On Linux CI runners Chrome's setuid/namespace sandbox usually cannot
+// start, and it fails by never bringing up the DevTools endpoint at all
+// rather than by saying so — which is exactly how this gate first failed
+// on GitHub Actions. `--no-sandbox` is scoped to Linux so a developer's
+// macOS run keeps the sandbox; the browser here only ever loads a
+// localhost page this repo just built, so dropping it there is a test-rig
+// concession, not a posture change. `--disable-dev-shm-usage` avoids the
+// small /dev/shm typical of containers.
+const sandboxArgs = process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : [];
+
 const proc = spawn(
   browser,
   [
@@ -53,12 +94,28 @@ const proc = spawn(
     "--disable-gpu",
     "--no-first-run",
     "--no-default-browser-check",
+    ...sandboxArgs,
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${profile}`,
     base,
   ],
-  { stdio: "ignore" },
+  // stderr is captured rather than discarded: when the browser fails to
+  // come up, its own message is the only thing that explains why, and a
+  // bare "never exposed a debugging target" sent the first CI failure
+  // looking in the wrong place.
+  { stdio: ["ignore", "ignore", "pipe"] },
 );
+
+let browserStderr = "";
+proc.stderr?.on("data", (chunk) => {
+  // Bounded: a chatty browser must not accumulate unboundedly in a
+  // long-running gate.
+  if (browserStderr.length < 8192) browserStderr += String(chunk);
+});
+let browserExit = null;
+proc.on("exit", (code, signal) => {
+  browserExit = signal ? `signal ${signal}` : `code ${code}`;
+});
 
 const cleanup = () => {
   try {
@@ -70,8 +127,17 @@ const cleanup = () => {
 };
 process.on("exit", cleanup);
 
+// How long to wait for the browser's DevTools endpoint. 15s was enough on
+// a laptop and not on a shared CI runner, where a cold browser start
+// competing with a release build's leftovers exceeded it — a gate failing
+// for a reason that has nothing to do with the page. This is a ceiling on
+// a failure path, not a delay anyone pays: a browser that comes up in two
+// seconds still proceeds in two seconds.
+const DEVTOOLS_BUDGET_MS = 60_000;
+
 async function devtoolsTarget() {
-  for (let i = 0; i < 60; i++) {
+  const deadline = Date.now() + DEVTOOLS_BUDGET_MS;
+  while (Date.now() < deadline) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
       const page = list.find((t) => t.type === "page" && t.url.startsWith(base));
@@ -79,7 +145,13 @@ async function devtoolsTarget() {
     } catch {}
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error("browser never exposed a debugging target");
+  const why = [
+    `browser never exposed a debugging target on 127.0.0.1:${PORT} after ${DEVTOOLS_BUDGET_MS / 1000}s`,
+    `  browser: ${browser}`,
+    browserExit ? `  it exited early with ${browserExit}` : "  it is still running",
+    browserStderr.trim() ? `  its stderr:\n${browserStderr.trim()}` : "  it printed nothing to stderr",
+  ].join("\n");
+  throw new Error(why);
 }
 
 const ws = new WebSocket(await devtoolsTarget());

@@ -24,7 +24,17 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { connect, formatEth, parseAddress, PirError, STATUS, assessCapacity, CAPACITY_VERDICT } from "../pir.js";
+import {
+  connect,
+  formatEth,
+  parseAddress,
+  PirError,
+  TimeoutError,
+  STALL_TIMEOUT_MS,
+  STATUS,
+  assessCapacity,
+  CAPACITY_VERDICT,
+} from "../pir.js";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8645";
 const wasmPath = fileURLToPath(new URL("../client.wasm", import.meta.url));
@@ -220,6 +230,10 @@ console.log(
     `arity=${session.arity} setup=${(session.traffic.setupBytes / 1e6).toFixed(2)} MB\n`,
 );
 
+/// The one-time cost of the hint, captured at boot so section 8 can prove
+/// a recovered timeout never quietly paid it a second time.
+const setupBytesAtBoot = session.traffic.setupBytes;
+
 check("entropy shim was called during setup or is ready", session.entropy.calls >= 0);
 check("pinned block is a real block", session.pinnedBlock >= 0n);
 check(
@@ -326,6 +340,74 @@ check(
   "the hint is still pinned where it started (the rewind, not a re-download)",
   session.pinnedBlock <= session.pendingHead,
 );
+
+// ── 8. a stalled request is bounded, and never poisons the session ────
+//
+// The regression this pins is the one that took the live page down for a
+// user on 2026-07-28 (ADR-0035): every request here used to be a bare
+// `fetch()` with no signal, so a socket that accepted and then went silent
+// — a laptop sleep, a Wi-Fi change — hung forever. The page disabled its
+// lookup button before the await and only re-enabled it on paths that
+// require the promise to *settle*, so one stall killed the query UI until
+// a reload, which at the complete set costs a 553.82 MB re-download.
+//
+// The stub below is what a real stalled connection looks like to `fetch`:
+// nothing comes back, and the only thing that ever settles it is its own
+// `AbortSignal`. A client that forgets to pass the signal through hangs
+// here, so the outer race turns that into a named failure rather than a
+// hung CI job.
+{
+  const realFetch = globalThis.fetch;
+  const stallMs = 1200;
+  session.stallTimeoutMs = stallMs;
+  globalThis.fetch = (_input, init) =>
+    new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return; // no signal passed through: the race below reports it
+      if (signal.aborted) reject(new Error("aborted"));
+      signal.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+
+  const HUNG = Symbol("hung");
+  const t0 = Date.now();
+  let err = null;
+  try {
+    await Promise.race([
+      session.getBalance(target),
+      new Promise((resolve) => setTimeout(() => resolve(HUNG), stallMs * 10)),
+    ]).then((r) => {
+      if (r === HUNG) err = HUNG;
+    });
+  } catch (e) {
+    err = e;
+  }
+  const elapsed = Date.now() - t0;
+  globalThis.fetch = realFetch;
+  session.stallTimeoutMs = STALL_TIMEOUT_MS;
+
+  check("a stalled request rejects rather than hanging forever", err !== null && err !== HUNG, err === HUNG ? "still pending after 10x the budget — is the AbortSignal reaching fetch?" : "");
+  check(
+    "...as a TimeoutError, which is a PirError subtype",
+    err instanceof TimeoutError && err instanceof PirError,
+    `got ${err?.constructor?.name ?? String(err)}`,
+  );
+  check("...within a small multiple of the stall budget", elapsed < stallMs * 5, `${elapsed} ms for a ${stallMs} ms budget`);
+
+  // The point of the whole exercise: a timeout costs the attempt and
+  // nothing else. The hint, its pin and its epoch are all untouched, so
+  // the very next query works — no reload, no re-download.
+  const after = await session.getBalance(target);
+  check(
+    "the session still answers after a timeout (retry is a query, not a reload)",
+    after.status === result.status && after.balanceWei === result.balanceWei,
+    `status ${after.status} vs ${result.status}`,
+  );
+  check(
+    "...and the hint was never re-fetched to recover",
+    session.traffic.setupBytes === setupBytesAtBoot,
+    `${session.traffic.setupBytes} vs ${setupBytesAtBoot}`,
+  );
+}
 
 console.log(
   `\n${failures === 0 ? "PASS" : "FAIL"}: ${failures} failing check${failures === 1 ? "" : "s"}\n`,

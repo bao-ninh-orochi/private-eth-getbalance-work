@@ -61,6 +61,59 @@ export class PirError extends Error {
   }
 }
 
+/// The wire went silent: a request neither completed nor failed within
+/// [`STALL_TIMEOUT_MS`]. A `PirError` subtype because it is still "the
+/// lookup did not happen", but a *named* one because the recovery is
+/// different from every other failure here — the session, its hint and its
+/// epoch are all still perfectly good, so the honest move is to retry the
+/// query, never to re-download the hint.
+export class TimeoutError extends PirError {
+  constructor(message) {
+    super(message);
+    this.name = "TimeoutError";
+  }
+}
+
+/// How long a request may make *no progress at all* before it is abandoned.
+///
+/// This bounds **silence, not duration** — the watchdog below re-arms on
+/// every byte received — because the two are wildly different here:
+/// `GET /setup` is 553.82 MB at the live complete-mainnet set and
+/// legitimately runs for minutes, so any total deadline generous enough
+/// for it would be no bound at all for the small endpoints. A download
+/// that is slow but *moving* never trips this; a socket that has died
+/// (laptop sleep, a Wi-Fi change, a network switch — the case that
+/// wedged the page before this existed) trips it in 45 s.
+///
+/// 45 s specifically, and above the server's own 30 s handler bound
+/// (`REQUEST_TIMEOUT`, crates/risepir-http/src/node.rs): a client budget
+/// *under* that would abort requests the server was still about to answer
+/// honestly, turning a server-labelled `408` into a client-side guess.
+/// The Rust client has had exactly this (`READ_STALL_TIMEOUT`,
+/// crates/risepir-http/src/client.rs) since it shipped; the browser was
+/// the outlier. See ADR-0035.
+export const STALL_TIMEOUT_MS = 45_000;
+
+/// An `AbortSignal` that fires after `ms` of no progress. `progress()`
+/// re-arms it; `stop()` disarms it for good. `fired` distinguishes "we
+/// aborted this" from an abort or network error that came from anywhere
+/// else, so a stall is never misreported as a protocol failure.
+function stallWatchdog(ms) {
+  const controller = new AbortController();
+  const w = { signal: controller.signal, fired: false };
+  let timer = null;
+  w.progress = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      w.fired = true;
+      controller.abort();
+    }, ms);
+  };
+  w.stop = () => clearTimeout(timer);
+  w.progress();
+  return w;
+}
+
 function readU64LE(bytes) {
   if (bytes.length !== 8) throw new PirError(`expected 8 bytes, got ${bytes.length}`);
   return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
@@ -103,11 +156,16 @@ export class PirSession {
   /// secret, which is the failure that keeps returning correct balances
   /// while handing the server the bucket you asked for.
   lastQueryTail = "";
+  /// Per-request silence budget; [`STALL_TIMEOUT_MS`] unless `connect`
+  /// was given an override (which only the tests do — they need a stall
+  /// to be observable in seconds rather than in 45 of them).
+  stallTimeoutMs = STALL_TIMEOUT_MS;
 
-  constructor(instance, base, fetchImpl) {
+  constructor(instance, base, fetchImpl, stallTimeoutMs = STALL_TIMEOUT_MS) {
     this.#inst = instance;
     this.#base = base.replace(/\/$/, "");
     this.#fetch = fetchImpl;
+    this.stallTimeoutMs = stallTimeoutMs;
   }
 
   get exports() {
@@ -147,7 +205,19 @@ export class PirSession {
   // ── HTTP ─────────────────────────────────────────────────────────────
 
   async #get(path, { onProgress, intoWasm, onResponse } = {}) {
-    const resp = await this.#fetch(`${this.#base}${path}`);
+    const watch = stallWatchdog(this.stallTimeoutMs);
+    try {
+      return await this.#getWatched(path, watch, { onProgress, intoWasm, onResponse });
+    } catch (e) {
+      throw watch.fired ? new TimeoutError(`GET ${path}: no response for ${this.stallTimeoutMs / 1000}s`) : e;
+    } finally {
+      watch.stop();
+    }
+  }
+
+  async #getWatched(path, watch, { onProgress, intoWasm, onResponse } = {}) {
+    const resp = await this.#fetch(`${this.#base}${path}`, { signal: watch.signal });
+    watch.progress();
     if (resp.status === 409) {
       throw new StaleSetupError(await resp.text());
     }
@@ -180,6 +250,9 @@ export class PirSession {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      // Every chunk re-arms the watchdog: this is what makes the bound
+      // "no progress for 45 s" rather than "553.82 MB in 45 s".
+      watch.progress();
       if (off + value.length > total) {
         throw new PirError(`GET ${path}: body longer than its Content-Length (${total})`);
       }
@@ -194,11 +267,24 @@ export class PirSession {
   }
 
   async #post(path, body) {
+    const watch = stallWatchdog(this.stallTimeoutMs);
+    try {
+      return await this.#postWatched(path, body, watch);
+    } catch (e) {
+      throw watch.fired ? new TimeoutError(`POST ${path}: no response for ${this.stallTimeoutMs / 1000}s`) : e;
+    } finally {
+      watch.stop();
+    }
+  }
+
+  async #postWatched(path, body, watch) {
     const resp = await this.#fetch(`${this.#base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
       body,
+      signal: watch.signal,
     });
+    watch.progress();
     if (resp.status === 409) {
       // /answer's lineage gate (ADR-0033) — same recovery as a stale
       // /sync: only a fresh /setup is sound.
@@ -387,7 +473,10 @@ export class PirSession {
 /// `wasmBytes` may be supplied directly (Node); otherwise `wasmUrl` is
 /// fetched. Streaming instantiation is used when the server sends the
 /// right content type, which our own does.
-export async function connect(base, { wasmUrl = "client.wasm", wasmBytes, fetchImpl, onProgress } = {}) {
+export async function connect(
+  base,
+  { wasmUrl = "client.wasm", wasmBytes, fetchImpl, onProgress, stallTimeoutMs = STALL_TIMEOUT_MS } = {},
+) {
   const doFetch = fetchImpl ?? ((...args) => fetch(...args));
   let instance = null;
   const counter = { calls: 0, bytes: 0 };
@@ -396,10 +485,20 @@ export async function connect(base, { wasmUrl = "client.wasm", wasmBytes, fetchI
   if (wasmBytes) {
     ({ instance } = await WebAssembly.instantiate(wasmBytes, imports));
   } else {
-    ({ instance } = await WebAssembly.instantiateStreaming(doFetch(wasmUrl), imports));
+    // Bounded like every other request: this is the *first* thing the page
+    // fetches, so a stall here used to hang boot before there was any UI
+    // to report it.
+    const watch = stallWatchdog(stallTimeoutMs);
+    try {
+      ({ instance } = await WebAssembly.instantiateStreaming(doFetch(wasmUrl, { signal: watch.signal }), imports));
+    } catch (e) {
+      throw watch.fired ? new TimeoutError(`GET ${wasmUrl}: no response for ${stallTimeoutMs / 1000}s`) : e;
+    } finally {
+      watch.stop();
+    }
   }
 
-  const session = new PirSession(instance, base, doFetch);
+  const session = new PirSession(instance, base, doFetch, stallTimeoutMs);
   session.entropy = counter;
   await session.load({ onProgress });
   return session;

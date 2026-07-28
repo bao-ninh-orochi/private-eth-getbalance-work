@@ -1740,3 +1740,106 @@ ahead of non-power-of-two segment counts. (c) `docs/numbers.md` §1–§6 should
 re-measured on a quiet machine, and §7's complete-set rebuild figure re-measured on the
 box after the re-bootstrap; both are `(3,4)`-lineage or slow-machine numbers today and
 are labelled as such.
+
+### ADR-0035 — Every wait a client makes is bounded, and a stall costs the attempt, not the session **[NEW — completes ADR-0029's "not covered: the browser front end", for stalls]**
+
+**Chosen:** every request `web/pir.js` issues carries an `AbortSignal` from a
+stall watchdog — 45 s of *no progress*, re-armed on every chunk received — and a
+tripped watchdog surfaces as its own `TimeoutError` (a `PirError` subtype). The
+page re-enables its query control in a `finally`, and a timeout renders a retry
+that re-runs the *query*. The same two bounds go on the feed's `reqwest` client
+(`crates/risepir-feed/src/rpc.rs`): 10 s connect, 60 s read-stall.
+**Rejected:** a total per-request deadline (a complete-set `GET /setup` is
+553.82 MB and legitimately runs for minutes — any deadline generous enough for
+it is no bound at all for `/head`); leaning on the server's own 30 s
+`REQUEST_TIMEOUT`, which bounds a *handler*, never a socket that died on the
+client's side; and auto-re-bootstrapping the page on a stall the way ADR-0029
+does for the CLI, which would charge 553.82 MB for a fault that costs nothing to
+retry.
+
+**Why — the browser half.** Reported 2026-07-28: a page left open ~30 minutes
+showed `SERVER UNREACHABLE`, and the lookup then span forever without ever
+returning or failing. Both halves of the obvious explanation were measured and
+are false:
+
+- *The server was fine.* Over 35 minutes against the live deployment: 414
+  `GET /head` probes, 0 non-200, max 1.71 s; 344 `POST /answer` probes (valid
+  epoch, garbage body — which still takes the state read lock at `node.rs`
+  before it decodes, so it measures exactly what a real query waits for), 0
+  non-400, max 1.35 s.
+- *The 30 minutes was a coincidence, and a good one.* It matches the autosave
+  interval exactly, and the reporter's client had last synced at a block the
+  server began a 24.18 GB save at. So the save was the prime suspect — and it
+  is exonerated: across the 04:10:46 → 04:12:55 UTC save (128.6 s), 25 `/head`
+  and 25 `/answer` probes inside the window all answered in 0.7–0.9 s. That is
+  ADR-0025's "readers keep flowing for the whole save" confirmed in production
+  for the first time, on the real 24 GB write.
+- *Staleness alone does not do it.* Driving the same `web/pir.js` and the
+  deployed `client.wasm` against the live server: connect, query OK in 5.9 s,
+  idle 34 min (160 `/head` polls, 0 failures), query OK in 7.4 s, query again
+  OK in 3.7 s — at 237,996 pending delta cells.
+
+What was actually broken was structural, and had nothing to do with elapsed
+time. Every request was a bare `fetch()` with no signal, so a socket that
+accepts and then goes silent — a laptop sleep, a Wi-Fi change, a network switch,
+none of which produce an error — hung forever. `web/app.js` disabled the lookup
+button *before* the await and re-enabled it only on paths that require the
+promise to **settle**, so one such request disabled the query UI for the life of
+the page. The spinner kept turning throughout, because CSS animation runs on the
+compositor thread, not the one that is stuck: the page looked busy while being
+permanently dead. The "30 minutes" in the report is how long the tab sat before
+its first network event after a sleep, not a threshold anywhere in this system.
+
+**Why — the server half, which is the same bug with a worse blast radius.**
+`RpcClient` built its `reqwest` client with no timeouts at all, and its own doc
+comment explains that it needs none because "the follow loop's own cadence is
+the retry: re-asking for the same finalized block is idempotent". That is only
+true of a call that *returns*. A half-open socket to the feed — ordinary
+behaviour for a keyless public endpoint behind a load balancer — left
+`finalized()` or `block_update()` awaiting forever and the follow loop with it.
+No `Err`, so no retry; no `critical`, so no halt; no log line at all. The server
+would go on answering `/setup` and `/answer` from a frozen head, and the only
+outward sign would have been the front end's own "stalled at block N" fifteen
+minutes later. The bound turns a silent freeze into an ordinary retry.
+
+**Why these numbers.** Both bounds cap *silence*, never total duration, for the
+same reason the Rust PIR client already did (`READ_STALL_TIMEOUT`,
+`crates/risepir-http/src/client.rs` — which has had exactly this since it
+shipped; the browser and the feed were the two outliers). 45 s in the browser
+sits deliberately *above* the server's own 30 s handler bound, so a genuinely
+slow answer is reported as the server's honest `408` rather than pre-empted by a
+client-side guess. 60 s on the feed, above both, because those are heavy archive
+calls (`trace_block`) against a public endpoint — and a false timeout there is
+free, since the loop re-asks for the same finalized block.
+
+That leaves one asymmetry, noted rather than quietly fixed: the Rust PIR client
+sits at exactly the server's 30 s, so a handler that runs right up to its bound
+is a race between the client's stall abort and the server's own `408`. Both
+outcomes are loud errors and neither can produce a wrong answer, so this is not
+worth a behaviour change to a client that has been in service unmodified — but
+it is the reason the two numbers differ, and if that client is ever retuned, 45 s
+is the value that makes the server's `408` always win.
+
+**A retry leaks nothing.** Retrying issues a second LWE query for the same
+address under a fresh secret. Semantic security makes it indistinguishable from
+a query for any other address — which the e2e gate already pins directly
+(repeated queries for one address send different ciphertext, at constant size).
+The alternative the page used to offer for every failure, "reload and
+re-download the hint", is strictly worse on every axis including this one.
+
+**What is pinned, and what is not.** `web/test/e2e.mjs` §8 drives a stalled
+socket (a `fetch` stub that settles only via its own `AbortSignal`, which is
+what a real dead connection looks like) and asserts the lookup rejects as a
+`TimeoutError` within the budget, that the session still answers afterwards, and
+that recovering never re-fetched the hint. It is falsifiable and was falsified:
+removing the signal makes those checks fail with "still pending after 10x the
+budget" rather than passing vacuously. Neither Rust client's timeouts are
+unit-tested — a hanging-socket test costs as long as the bound it verifies —
+which matches the precedent `client.rs` set. The button's `finally` is
+structural rather than tested.
+
+**Still deliberate, and unchanged.** A client more than 600 blocks (~2 h) behind
+has genuinely aged out of the delta ring: `/sync` answers `409`, and the page
+still says to reload, because there a fresh hint really is the only sound
+recovery. ADR-0029's "not covered: the browser front end" is now covered for
+stalls; the aged-out case remains a reload by design.

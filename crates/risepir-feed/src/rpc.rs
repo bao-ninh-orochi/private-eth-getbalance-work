@@ -68,6 +68,33 @@ pub struct RpcClient {
 /// and only the application sees the 403.
 const USER_AGENT: &str = concat!("risepir-rpc/", env!("CARGO_PKG_VERSION"));
 
+/// How long to wait for a TCP+TLS connection to the endpoint.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the endpoint may send **nothing at all** before the call is
+/// abandoned (ADR-0035).
+///
+/// This is the server-side half of the same defect that wedged the browser
+/// page: "no retries — the follow loop's own cadence is the retry" (above)
+/// is only true for a call that *returns*. Without these two bounds a
+/// half-open socket to the feed — the far side gone without a FIN, which
+/// is ordinary behaviour for a public endpoint behind a load balancer —
+/// left `finalized()` or `block_update()` awaiting forever, and the follow
+/// loop with it: no error, so no retry, no `critical`, no log line. The
+/// server would simply stop following the chain while continuing to answer
+/// `/setup` and `/answer` from a frozen head, and the only outward sign
+/// would be the front end's own "stalled at block N" (`web/app.js`) 15
+/// minutes later.
+///
+/// It bounds *silence*, not total duration, so a legitimately slow
+/// `trace_block` on an archive endpoint is never cut off mid-answer — only
+/// one that has gone quiet. 60 s rather than the Rust PIR client's 30 s
+/// (`READ_STALL_TIMEOUT`, crates/risepir-http/src/client.rs) because these
+/// are heavy archive calls against a keyless public endpoint, and a false
+/// timeout here is cheap anyway: the loop re-asks for the same finalized
+/// block, which is idempotent by construction.
+const READ_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl RpcClient {
     /// A client for `url`. No I/O yet.
     ///
@@ -81,6 +108,8 @@ impl RpcClient {
             url: url.into(),
             http: reqwest::Client::builder()
                 .user_agent(USER_AGENT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_STALL_TIMEOUT)
                 .build()
                 .expect("reqwest client with a static user-agent"),
         }

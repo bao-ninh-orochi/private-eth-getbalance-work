@@ -6,7 +6,16 @@
 // tracked set", or a `0` rendered for an answer the system does not
 // actually have, would be a wrong answer with a nice font.
 
-import { connect, formatEth, PirError, StaleSetupError, STATUS, assessCapacity, CAPACITY_VERDICT } from "./pir.js";
+import {
+  connect,
+  formatEth,
+  PirError,
+  StaleSetupError,
+  TimeoutError,
+  STATUS,
+  assessCapacity,
+  CAPACITY_VERDICT,
+} from "./pir.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -394,6 +403,30 @@ function errorBlock(title, detail) {
   return p;
 }
 
+/// A timed-out lookup, with the one control that actually helps. The
+/// distinction this draws is the whole point of `TimeoutError` being its
+/// own type: a stall costs nothing but the attempt — the hint, its pin and
+/// its epoch are all still valid — so retrying is a *query*, not the
+/// 553.82 MB reload a StaleSetupError genuinely requires.
+function retryBlock() {
+  const wrap = document.createElement("div");
+  wrap.append(
+    errorBlock(
+      "The request timed out. ",
+      "The server stopped responding partway through — it may be briefly unreachable, or this " +
+        "device's connection may have dropped (a sleep or a network change does it). Nothing is " +
+        "lost: the hint you already downloaded is still valid, so this retries the query alone.",
+    ),
+  );
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "chip";
+  retry.textContent = "Retry the lookup";
+  retry.addEventListener("click", () => $("form").requestSubmit());
+  wrap.append(retry);
+  return wrap;
+}
+
 function queryingNode() {
   const p = document.createElement("p");
   p.className = "querying";
@@ -434,8 +467,10 @@ async function lookup(event) {
   try {
     result = await session.getBalance(address);
   } catch (e) {
-    button.disabled = false;
-    if (e instanceof StaleSetupError) {
+    if (e instanceof TimeoutError) {
+      // Checked before PirError, which it extends.
+      showResult([retryBlock()]);
+    } else if (e instanceof StaleSetupError) {
       showResult([
         errorBlock(
           "This client is too far behind to answer safely. ",
@@ -450,9 +485,16 @@ async function lookup(event) {
       showResult([errorBlock("Unexpected failure. ", String(e.message ?? e))]);
     }
     return;
+  } finally {
+    // Re-enabled on *every* exit, not once per outcome. The two
+    // outcome-local assignments this replaces were what turned a single
+    // stalled request into a permanently dead query box: the button was
+    // disabled before the await and only re-enabled by paths that require
+    // the promise to settle, so a request that never settled disabled the
+    // UI for the life of the page (ADR-0035).
+    button.disabled = false;
   }
   const elapsed = performance.now() - t0;
-  button.disabled = false;
 
   const nodes = [];
   switch (result.status) {

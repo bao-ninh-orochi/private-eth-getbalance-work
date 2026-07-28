@@ -1168,6 +1168,48 @@ Housekeeping: the superseded 36.26 GB `(3,4)` state file is kept on the box as
 rollback if `(2,4)` ever needs reverting, and nothing else can regenerate it
 without another ~33 min bootstrap.
 
+### 5.5 An autosave is invisible to serving, measured (2026-07-28)
+
+ADR-0025 argues that a full state save cannot stall `/answer`, because the save
+runs in the follow loop's own task under a read guard and the follow loop is
+`NodeState`'s only writer, so no writer can queue behind it. Until now that was
+an argument plus a unit test (`queued_writer_parks_new_readers`). It is now also
+a production measurement, taken on the live box at the complete set while it
+wrote the real 24.18 GB file.
+
+Two probes against `https://private-eth-getbalance.duckdns.org`, one every 5 s
+for 35 min: `GET /head`, and `POST /answer?epoch=<current>` with a deliberately
+malformed 4-byte body — that second one matters because the handler takes the
+state read lock *before* it decodes, so its round-trip measures exactly what a
+real query would wait for, without needing a 553.82 MB hint to produce one.
+
+| probe | samples | failures | max |
+|---|---|---|---|
+| `GET /head` | 414 | 0 non-200 | 1.71 s |
+| `POST /answer` (garbage body → `400`) | 344 | 0 non-400 | 1.35 s |
+
+The autosave in that window ran `04:10:46 → 04:12:55` UTC — 128.6 s, 24.18 GB at
+188 MB/s. Twenty-five samples of each probe fall strictly inside it, and every
+one answered in 0.7–0.9 s: no spike at the boundaries, no gap, nothing
+distinguishing the save window from the rest of the run at all.
+
+Recorded because the opposite is the expensive thing to believe by accident. A
+user-reported "the page stopped answering after ~30 minutes" landed on the
+autosave as its prime suspect — the interval matches exactly (1800 s), and the
+reporting client's last synced block was one the server had begun a save at.
+Both facts were coincidence; the real cause was an unbounded `fetch` in the
+browser client (ADR-0035). Chasing it would have meant lengthening
+`--save-interval` or reaching for the journal to "fix" a save that was never
+costing anything.
+
+Same run, unrelated and worth its own fix: `~/server-complete.log` carries
+154,010 `skipping sample` lines and 432 `dark checkpoint` warnings, all from the
+reconcile provider answering archive-depth `eth_getBalance` with
+`HTTP 403 … Archive requests require a personal token`. Current-window
+reconciliation still passes (8 accounts exact per checkpoint, continuously), so
+the cross-provider safety net is up — but its deeper-history half has been dead
+since publicnode tightened that policy.
+
 ## 6. Who does what, explicitly
 
 | step | who | needs |

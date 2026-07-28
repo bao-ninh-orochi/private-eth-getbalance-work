@@ -1844,6 +1844,153 @@ still says to reload, because there a fresh hint really is the only sound
 recovery. ADR-0029's "not covered: the browser front end" is now covered for
 stalls; the aged-out case remains a reload by design.
 
+### ADR-0036 — Bound reconcile's request storm during catch-up; defer by lag, backfill from a reservoir **[NEW — extends ADR-0027]**
+
+**Chosen:** five changes to `reconcile` (`crates/risepir-rpc/src/mainnet.rs`):
+
+1. **A per-checkpoint attempt budget**, `samples.saturating_mul(2)` (16 at
+   the default `samples = 8`): the sampling loop (`sample_reference`) now
+   stops at `checked >= samples` **or** `attempts >= budget`, whichever
+   comes first. A checkpoint where every fetch fails now costs at most 16
+   requests, not a walk of the whole ~300-address candidate list.
+2. **A distinguishable depth-refusal error.** `risepir-feed`'s `FeedError`
+   gets a new variant, `DepthRefused` (`Rpc`'s existing fields untouched —
+   see **Rejected**). `RpcClient::call` classifies into it from an HTTP
+   `403`, or a JSON-RPC error code `-32602`/`-32000` whose message
+   contains (case-insensitively) `archive`, `missing trie node`, `state is
+   not available`, `state unavailable`, or `pruned`.
+   `FeedError::is_depth_refusal()` exposes the answer. Documented as a
+   heuristic over third-party error text — see **Why** for the safety
+   argument that makes that acceptable.
+3. **Defer instead of attempting.** The follow loop already computes
+   `finalized` and the block it is applying, so `lag = finalized -
+   applied` is free — no new trust dependency. `RECENT_DEPTH_BLOCKS = 64`:
+   when `lag` exceeds it, `reconcile` attempts **no fetch at all**.
+   `classify_checkpoint` (now taking `lag` as a third argument, checked
+   first) returns a new `CheckpointOutcome::Deferred { lag }`, with its
+   own log line naming the lag.
+4. **A bounded backfill reservoir** (`DeferredReservoir`). Every blind
+   (dark or deferred) checkpoint's candidates are queued into a capped
+   (`DEFERRED_RESERVOIR_CAP = 256`), deduplicating FIFO. Every checkpoint
+   that is *not itself deferred* additionally drains up to
+   `RESERVOIR_DRAIN_PER_CHECKPOINT = 2` of the oldest entries, verified at
+   *that* checkpoint's own block — a store-vs-provider comparison is valid
+   at whatever height it actually runs, independent of which block first
+   made the address a candidate. A mismatch found this way halts through
+   the same shared path (`compare_one`) as a normal candidate's, naming
+   that it came from the reservoir. A drain fetch failure requeues the
+   address at the back rather than dropping it.
+5. **Truncated per-sample logging** (`FailureLogger`): the first
+   `VERBATIM_CAP = 2` fetch failures per checkpoint print verbatim, then
+   one trailing `... and {m} more fetch failure(s) this checkpoint` line.
+   The dark/deferred/escalation summary lines are untouched.
+
+`GET /healthz` gains three fields on `NodeState`/`ReconcileHealth`:
+`reconcile_deferred_total`, `reconcile_reservoir_checks_total`,
+`reconcile_reservoir_len` — appended strictly after `reconcile_halted`.
+
+Net effect on the incident that motivated this: ~300 requests and up to
+~300 log lines per checkpoint during a catch-up become ≤16 requests and
+≤3 log lines, **plus** a reservoir that gives the addresses a pure
+"stop trying" policy would have let slip through unverified forever a
+second chance once the provider is reachable again.
+
+**Preserved from ADR-0027 — explicitly, since this ADR extends it rather
+than replaces it:**
+
+- Only a value mismatch halts the follow loop. A deferred or dark
+  checkpoint, however long the streak, never does — `ReconcileOutcome`
+  still has exactly the same two cases (`Continued`/`Halted`) and the same
+  meaning; `Halted` now also covers a mismatch found while draining the
+  reservoir, through the identical code path.
+- `CheckpointOutcome::Empty` still leaves `consecutive_dark` untouched:
+  `classify_checkpoint`'s new lag check runs *before* the empty check, so
+  an empty, non-deferred, non-dark block is exactly as inert as it always
+  was.
+- `DARK_ESCALATION_THRESHOLD` (20) and its "re-fire every further 20, not
+  once" cadence (`should_escalate`) are untouched — `Deferred` simply
+  feeds the same `consecutive_dark` counter `Dark` always did, recorded
+  through the same `record_reconcile_checkpoint`, logged through the same
+  `maybe_escalate` (a straight extraction of ADR-0027's own escalation
+  check, now shared instead of duplicated).
+- `GET /healthz`'s first line is still byte-for-byte `ok <head-block>`;
+  every ADR-0027 field keeps its name, order, and meaning. The three new
+  fields are appended strictly after `reconcile_halted` — nothing existing
+  was reordered, renamed, or removed.
+
+**Rejected:**
+
+- **Reshaping `FeedError::Rpc` to carry a classification field**, instead
+  of adding `DepthRefused`. Checked with `grep` first: every
+  `FeedError::Rpc` construction site (the `call` error closure, the
+  null-block case in `block_update_on`, `all_failed`'s multi-endpoint
+  combiner) lives inside `risepir-feed::rpc` itself, and nothing outside
+  that crate ever pattern-matches a `FeedError` variant — every consumer
+  (`risepir-rpc` included) only ever calls `Display` on it. A new variant
+  touches exactly one of those three sites: the one that actually has an
+  HTTP status and a JSON-RPC error object to classify from. The other two
+  are synthetic (a shape mismatch, a combined multi-endpoint summary) and
+  cannot honestly carry the flag anyway. Additive won on measured churn,
+  not just on principle.
+- **Halting after a prolonged deferred streak.** The exact mistake
+  ADR-0027 already rejected, reachable again through a new door: a large
+  `lag` is a fact about the chain and this deployment's own catch-up
+  progress, not about the independent provider's honesty. Halting on it
+  would still convert a routine catch-up into a self-inflicted outage.
+- **Dropping, rather than requeuing, a reservoir address whose drain fetch
+  fails.** Would silently shrink the safety net back toward "skip it"
+  every time the confirm provider has a bad moment — exactly what this
+  ADR's title promises not to do.
+- **A single global request budget instead of per-checkpoint.** Unneeded
+  complexity: bounding each checkpoint independently already caps the
+  worst case (budget × checkpoints/hour) at a small, fixed, easily-stated
+  number, with no cross-checkpoint state to reason about.
+
+**Why:** measured on the live box, 2026-07-28: during a catch-up replay,
+`reconcile` walked its full candidate list every checkpoint because
+`checked` only increments on success and every fetch failed — the
+independent provider's keyless tier refuses archive-depth
+`eth_getBalance` with `HTTP 403
+{"code":-32602,"message":"Archive requests require a personal
+token..."}` — producing 154,010 log lines and ~130,000 useless HTTP
+requests over 432 checkpoints, none of it evidence of anything wrong with
+this deployment (once caught up, every checkpoint succeeded again).
+ADR-0027 already made that period *visible* (dark, escalating at 20); this
+ADR makes it *cheap*, and gives the addresses it could not check during
+that window a second chance instead of leaving them permanently
+unverified.
+
+**The safety argument for the Part 2 heuristic:** `looks_like_depth_refusal`
+is a status check plus a substring match over another operator's free-text
+error message, and it can misclassify. That is acceptable only because
+nothing downstream treats its answer as anything but a scheduling/logging
+hint: every consumer of `DepthRefused` still handles it as "this sample's
+fetch failed", a checkpoint where every attempt fails is dark regardless of
+*why* each attempt failed, and an actual value mismatch is only ever found
+by comparing balances that *did* fetch successfully — `DepthRefused` never
+appears on that path. Worth noting plainly: today `reconcile` does not
+actually branch on `is_depth_refusal()` at all — deferral (§3) is keyed
+purely on `lag`, decided *before* any fetch is attempted, so there is no
+error yet to classify at that decision point. The classifier's practical
+effect today is that a per-sample failure log line's own `Display` text
+names the reason when it applies; `is_depth_refusal()` is exposed as a
+building block for a future caller (e.g. a smarter feed/confirm fallback
+choice) rather than wired into a behavior change in this change.
+
+**What this does NOT fix:** the reservoir is a bounded
+(`DEFERRED_RESERVOIR_CAP`-address) best-effort backfill, not a second
+complete audit log — a catch-up that touches far more than 256 distinct
+accounts before the next non-deferred checkpoint leaves the overflow
+unverified by this mechanism specifically (an overflowed address touched
+*again* later is still an ordinary candidate then). Deferral makes the
+ingest path genuinely **unverified** during catch-up, in exactly the sense
+ADR-0027 already documented for a dark streak — this ADR does not add
+verification depth beyond the sampled-and-eventually-backfilled candidates
+it already had; it only removes the wasted-request cost of failing to get
+that same non-coverage honestly, and it is the reservoir that pays part of
+that back. Full-coverage per-block reconciliation (`docs/roadmap.md`'s A3)
+remains the actual next rung, unaddressed here.
+
 ### ADR-0037 — `--journal-restore` becomes the default; `--save-interval` widens with it **[NEW — flips ADR-0026's opt-in-behind-a-soak default now that the soak has held]**
 
 **Chosen:** `--journal-restore` now defaults **on**. The flag itself stays

@@ -135,6 +135,22 @@ pub struct ReconcileHealth {
     /// answer, not never-stale) — this field only reports that the
     /// integrity backstop is the reason nothing new is being applied.
     pub halted: bool,
+    /// Total checkpoints that were **deferred** (ADR-0036 §3) — skipped
+    /// fetching entirely because the block being applied was more than
+    /// `RECENT_DEPTH_BLOCKS` behind `finalized`. These also count toward
+    /// `consecutive_dark`; this field exists purely so a deferred
+    /// checkpoint is distinguishable, in hindsight, from one that actually
+    /// attempted and failed.
+    pub deferred_total: u64,
+    /// Total deferred-reservoir addresses successfully verified (ADR-0036
+    /// §4) — the same "completed comparison" convention `comparisons_total`
+    /// uses, counted separately since these are backfilled candidates from
+    /// an earlier blind checkpoint rather than the current one's own.
+    pub reservoir_checks_total: u64,
+    /// Current size of the deferred-reservoir backfill queue (ADR-0036
+    /// §4) — a gauge, not a counter: it grows as blind checkpoints queue
+    /// candidates and shrinks as later checkpoints drain them.
+    pub reservoir_len: u64,
 }
 
 fn unix_now() -> u64 {
@@ -363,34 +379,61 @@ impl NodeState {
     ///
     /// `checked` is the number of comparisons that actually completed this
     /// checkpoint; `dark` is whether at least one comparison was attempted
-    /// and *every* attempt failed. **A checkpoint with no candidate
-    /// accounts at all must pass `checked = 0, dark = false`** — that is
-    /// what leaves [`ReconcileHealth::consecutive_dark`] unchanged rather
-    /// than incrementing it. Conflating "nothing to check" with "checked
-    /// and every attempt failed" was the root cause of the 2026-07-26 blind
-    /// spot this type exists to close — see the struct's docs.
+    /// and *every* attempt failed; `deferred` is whether this checkpoint
+    /// skipped fetching entirely because the block was too far behind
+    /// `finalized` (ADR-0036 §3). **A checkpoint with no candidate accounts
+    /// at all must pass `checked = 0, dark = false, deferred = false`** —
+    /// that is what leaves [`ReconcileHealth::consecutive_dark`] unchanged
+    /// rather than incrementing it. Conflating "nothing to check" with
+    /// "checked and every attempt failed" was the root cause of the
+    /// 2026-07-26 blind spot this type exists to close — see the struct's
+    /// docs. `deferred` bumps [`ReconcileHealth::deferred_total`] and, like
+    /// `dark`, counts toward `consecutive_dark` — a deferred checkpoint is
+    /// blind by policy rather than by a failed attempt, but it is exactly
+    /// as blind, and ADR-0027's escalation must treat it that way.
     ///
     /// Any checkpoint with `checked > 0` resets `consecutive_dark` to `0`
     /// and advances `last_success_block`/`last_success_unix`, regardless of
-    /// `dark` (the two are mutually exclusive in practice, but `checked > 0`
-    /// wins if a caller ever passed both).
-    pub fn record_reconcile_checkpoint(&self, block: u64, checked: usize, dark: bool) -> ReconcileHealth {
+    /// `dark`/`deferred` (they are mutually exclusive with `checked > 0` in
+    /// practice, but `checked > 0` wins if a caller ever passed both).
+    pub fn record_reconcile_checkpoint(&self, block: u64, checked: usize, dark: bool, deferred: bool) -> ReconcileHealth {
         let now = unix_now();
         let mut h = self.reconcile_lock();
         h.last_checkpoint_block = block;
         h.last_checkpoint_unix = now;
         h.checkpoints_total += 1;
         h.comparisons_total += checked as u64;
+        if deferred {
+            h.deferred_total += 1;
+        }
         if checked > 0 {
             h.last_success_block = block;
             h.last_success_unix = now;
             h.consecutive_dark = 0;
-        } else if dark {
+        } else if dark || deferred {
             h.consecutive_dark += 1;
         }
         // else: an empty-block checkpoint — `consecutive_dark` is left
         // exactly as it was; see the field's docs.
         *h
+    }
+
+    /// Record one deferred-reservoir address successfully verified
+    /// (ADR-0036 §4) — the same "completed comparison" convention
+    /// [`ReconcileHealth::comparisons_total`] uses, counted separately into
+    /// [`ReconcileHealth::reservoir_checks_total`] since these are
+    /// backfilled candidates from an earlier blind checkpoint rather than
+    /// the current one's own.
+    pub fn record_reservoir_check(&self) {
+        self.reconcile_lock().reservoir_checks_total += 1;
+    }
+
+    /// Update the deferred-reservoir size gauge
+    /// ([`ReconcileHealth::reservoir_len`]) — called by the follow loop in
+    /// `risepir-rpc` whenever it changes (a blind checkpoint enqueues
+    /// candidates, a non-deferred one drains them).
+    pub fn set_reservoir_len(&self, len: u64) {
+        self.reconcile_lock().reservoir_len = len;
     }
 
     /// Record that a value mismatch (or a verified-read error) has
@@ -921,9 +964,15 @@ async fn recent(State(state): State<Arc<NodeState>>) -> Response {
 /// reconcile_checkpoints_total=<u64>
 /// reconcile_consecutive_dark=<u64>
 /// reconcile_halted=<0|1>
+/// reconcile_deferred_total=<u64>
+/// reconcile_reservoir_checks_total=<u64>
+/// reconcile_reservoir_len=<u64>
 /// ```
 ///
-/// e.g. `ok 19123456` followed by nine `reconcile_*=…` lines.
+/// e.g. `ok 19123456` followed by twelve `reconcile_*=…` lines. The last
+/// three (`deferred_total`/`reservoir_checks_total`/`reservoir_len`) are an
+/// ADR-0036 addition, appended after `reconcile_halted` — every existing
+/// line above them is unchanged, in the same order.
 ///
 /// # Compatibility guarantee
 ///
@@ -962,7 +1011,10 @@ async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
          reconcile_comparisons_total={}\n\
          reconcile_checkpoints_total={}\n\
          reconcile_consecutive_dark={}\n\
-         reconcile_halted={}\n",
+         reconcile_halted={}\n\
+         reconcile_deferred_total={}\n\
+         reconcile_reservoir_checks_total={}\n\
+         reconcile_reservoir_len={}\n",
         u8::from(rh.configured),
         rh.last_checkpoint_block,
         rh.last_checkpoint_unix,
@@ -972,6 +1024,9 @@ async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
         rh.checkpoints_total,
         rh.consecutive_dark,
         u8::from(rh.halted),
+        rh.deferred_total,
+        rh.reservoir_checks_total,
+        rh.reservoir_len,
     );
     (StatusCode::OK, body).into_response()
 }

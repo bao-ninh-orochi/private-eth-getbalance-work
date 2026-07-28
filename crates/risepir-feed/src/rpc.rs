@@ -120,14 +120,36 @@ impl RpcClient {
         &self.url
     }
 
-    /// One JSON-RPC call. `Ok` is the `result` member; a transport
-    /// failure, non-2xx status, JSON-RPC `error` member, or missing
-    /// `result` is a [`FeedError::Rpc`].
+    /// One JSON-RPC call. `Ok` is the `result` member; a transport failure,
+    /// non-2xx status, JSON-RPC `error` member, or missing `result` is a
+    /// [`FeedError::Rpc`] — except one that looks like the endpoint
+    /// refusing to serve state at this depth/height, which is a
+    /// [`FeedError::DepthRefused`] instead (ADR-0036; see that variant's
+    /// docs for the classification heuristic and why misclassifying it is
+    /// safe). A transport failure (no response received at all) is never
+    /// classified either way — there is no status or body to classify.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, FeedError> {
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
         let rpc_err = |detail: String| FeedError::Rpc {
             method: method.to_string(),
             detail,
+        };
+        // Picks `DepthRefused` over the plain `Rpc` above whenever the
+        // heuristic matches — same `method`, same `detail` text either way,
+        // so this changes nothing a caller sees via `Display`, only which
+        // variant `is_depth_refusal()` reports.
+        let classified_err = |status: u16, code: Option<i64>, message: &str, detail: String| {
+            if looks_like_depth_refusal(status, code, message) {
+                FeedError::DepthRefused {
+                    method: method.to_string(),
+                    detail,
+                }
+            } else {
+                FeedError::Rpc {
+                    method: method.to_string(),
+                    detail,
+                }
+            }
         };
 
         let resp = self
@@ -143,15 +165,29 @@ impl RpcClient {
             .await
             .map_err(|e| rpc_err(format!("body read: {e}")))?;
         if !status.is_success() {
-            return Err(rpc_err(format!(
+            // Best-effort: publicnode's own archive-depth refusal is a
+            // bare `{"code":...,"message":...}` body on a `403`, which
+            // `extract_json_rpc_code_message` reads directly; the `403`
+            // alone is already sufficient for `looks_like_depth_refusal`
+            // even when a *different* endpoint's non-2xx body is not JSON
+            // at all.
+            let (code, message) = extract_json_rpc_code_message(&bytes);
+            let detail = format!(
                 "HTTP {status}: {}",
                 String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
-            )));
+            );
+            return Err(classified_err(status.as_u16(), code, &message, detail));
         }
         let mut envelope: Value =
             serde_json::from_slice(&bytes).map_err(|e| rpc_err(format!("invalid JSON: {e}")))?;
         if let Some(err) = envelope.get("error") {
-            return Err(rpc_err(format!("JSON-RPC error: {err}")));
+            // The shape a full (non-archive) node uses for its classic
+            // "missing trie node" / "pruned" refusal: a `200` carrying a
+            // JSON-RPC `error` member rather than a non-2xx status.
+            let code = err.get("code").and_then(Value::as_i64);
+            let message = err.get("message").and_then(Value::as_str).unwrap_or("");
+            let detail = format!("JSON-RPC error: {err}");
+            return Err(classified_err(status.as_u16(), code, message, detail));
         }
         match envelope.get_mut("result") {
             Some(r) => Ok(r.take()),
@@ -523,6 +559,58 @@ pub fn credits_from_block(block: &Value) -> Result<Vec<(Address, Balance)>, Feed
 
 // ─── small helpers ──────────────────────────────────────────────────────
 
+/// Heuristic: does `(status, code, message)` look like the endpoint
+/// refusing to serve state at the requested depth, rather than an ordinary
+/// transport hiccup or a plain rate limit? See [`FeedError::DepthRefused`]'s
+/// docs for why misclassifying here is safe — it only ever changes request
+/// volume and log lines, never whether a mismatch is detected.
+///
+/// - `status == 403` alone is sufficient — publicnode's live archive-depth
+///   refusal is exactly this (`HTTP 403 {"code":-32602,"message":"Archive
+///   requests require a personal token..."}`), independent of whether the
+///   body parsed at all.
+/// - Otherwise, the JSON-RPC error `code` must be `-32602` or `-32000`
+///   *and* `message` must contain (case-insensitively) one of a handful of
+///   known archive/pruning phrases. A plain `-32000` with an unrelated
+///   message (e.g. "execution reverted") does not qualify, and neither does
+///   a rate limit under a different code (e.g. `429`/`-32005`).
+fn looks_like_depth_refusal(status: u16, code: Option<i64>, message: &str) -> bool {
+    if status == 403 {
+        return true;
+    }
+    if code == Some(-32602) || code == Some(-32000) {
+        const NEEDLES: [&str; 5] = [
+            "archive",
+            "missing trie node",
+            "state is not available",
+            "state unavailable",
+            "pruned",
+        ];
+        let lower = message.to_ascii_lowercase();
+        return NEEDLES.iter().any(|needle| lower.contains(needle));
+    }
+    false
+}
+
+/// Best-effort `(code, message)` extraction from a JSON-RPC-flavoured error
+/// body, for feeding [`looks_like_depth_refusal`]. Tries the standard
+/// envelope's `error` object first (`{"error":{"code":...,"message":...}}`),
+/// then a bare `{"code":...,"message":...}` with no envelope at all — what
+/// publicnode's `403` archive-depth response actually is, on the wire.
+/// Returns `(None, String::new())` for anything that is not JSON or has
+/// neither shape: this only ever feeds a heuristic, never changes whether
+/// the call is reported as an error, so silently giving up is the right
+/// failure mode rather than propagating a second error about the error.
+fn extract_json_rpc_code_message(bytes: &[u8]) -> (Option<i64>, String) {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return (None, String::new());
+    };
+    let obj = value.get("error").unwrap_or(&value);
+    let code = obj.get("code").and_then(Value::as_i64);
+    let message = obj.get("message").and_then(Value::as_str).unwrap_or("").to_string();
+    (code, message)
+}
+
 fn parse_err(method: &str, detail: &str) -> FeedError {
     FeedError::Parse {
         context: method.to_string(),
@@ -785,6 +873,91 @@ mod tests {
         for bad in ["", "0x", "12", "0xg", "0x100000000000000000000000000000000"] {
             assert!(parse_hex_u128(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    // ── depth-refusal classification (ADR-0036) ─────────────────────────
+
+    /// The exact publicnode wire response this classifier exists for:
+    /// `HTTP 403 {"code":-32602,"message":"Archive requests require a
+    /// personal token..."}`. Status alone is sufficient, and the embedded
+    /// code/message (once extracted) agree independently.
+    #[test]
+    fn publicnode_archive_refusal_classifies_as_depth_refusal() {
+        let body = br#"{"code":-32602,"message":"Archive requests require a personal token..."}"#;
+        let (code, message) = extract_json_rpc_code_message(body);
+        assert_eq!(code, Some(-32602));
+        assert!(message.contains("Archive requests require a personal token"));
+        assert!(looks_like_depth_refusal(403, code, &message));
+        // The HTTP status alone is sufficient -- even a body that failed to
+        // parse at all must still classify as a depth refusal on a 403.
+        assert!(looks_like_depth_refusal(403, None, ""));
+    }
+
+    /// A full node's classic "missing trie node" / "pruned" errors ride a
+    /// `200` with a JSON-RPC `error` member in the wild (Geth et al.), not a
+    /// `403` -- the code+message branch must catch these too.
+    #[test]
+    fn full_node_pruning_errors_classify_without_a_403() {
+        assert!(looks_like_depth_refusal(200, Some(-32000), "missing trie node abcd1234 (archive node needed?)"));
+        assert!(looks_like_depth_refusal(200, Some(-32000), "PRUNED: state not retained for this block"));
+        assert!(looks_like_depth_refusal(200, Some(-32602), "state is not available for the requested block"));
+    }
+
+    /// A transport failure never reaches the classifier at all (no HTTP
+    /// response exists to classify) -- it is built directly as a plain
+    /// `Rpc`, and must never be misreported as a depth refusal.
+    #[test]
+    fn transport_error_is_not_a_depth_refusal() {
+        let err = FeedError::Rpc {
+            method: "eth_getBalance".to_string(),
+            detail: "transport: error sending request".to_string(),
+        };
+        assert!(!err.is_depth_refusal());
+    }
+
+    /// A rate limit must not classify as a depth refusal, whether it
+    /// surfaces as a `429` or as a `200` with an unrelated JSON-RPC code --
+    /// a different failure mode with a different fix (backoff, not "stop
+    /// asking this depth").
+    #[test]
+    fn rate_limit_is_not_a_depth_refusal() {
+        assert!(!looks_like_depth_refusal(429, None, "Too Many Requests"));
+        assert!(!looks_like_depth_refusal(429, Some(-32005), "limit exceeded, please retry later"));
+        assert!(!looks_like_depth_refusal(200, Some(-32005), "rate limit exceeded"));
+    }
+
+    /// The right message with the wrong code, or no code at all, must not
+    /// classify -- the rule is a conjunction, not just a keyword search.
+    #[test]
+    fn keyword_without_the_right_code_does_not_classify() {
+        assert!(!looks_like_depth_refusal(200, Some(-32601), "archive node required"));
+        assert!(!looks_like_depth_refusal(200, None, "archive node required"));
+    }
+
+    /// The right code with an unrelated message must not classify either --
+    /// `-32000` alone covers a lot of ordinary JSON-RPC errors (e.g. a
+    /// reverted call), not just depth refusals.
+    #[test]
+    fn right_code_without_a_keyword_does_not_classify() {
+        assert!(!looks_like_depth_refusal(200, Some(-32000), "execution reverted"));
+    }
+
+    /// `extract_json_rpc_code_message` must also read the standard envelope
+    /// shape (`{"error":{"code":...,"message":...}}`), not just the bare
+    /// shape publicnode's `403` uses.
+    #[test]
+    fn extract_reads_the_standard_envelope_shape_too() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"missing trie node xyz"}}"#;
+        let (code, message) = extract_json_rpc_code_message(body);
+        assert_eq!(code, Some(-32000));
+        assert!(message.contains("missing trie node"));
+    }
+
+    /// Malformed/non-JSON bodies degrade to "nothing extracted" rather than
+    /// panicking or erroring -- this only ever feeds a heuristic.
+    #[test]
+    fn extract_degrades_quietly_on_non_json() {
+        assert_eq!(extract_json_rpc_code_message(b"not json at all"), (None, String::new()));
     }
 }
 

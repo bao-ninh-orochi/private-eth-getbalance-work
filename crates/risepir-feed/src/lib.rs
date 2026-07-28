@@ -68,11 +68,52 @@ pub enum FeedError {
     /// A feed-internal failure with a message.
     Internal(String),
     /// A JSON-RPC call failed: transport error, non-2xx status, a
-    /// JSON-RPC `error` member, or a missing `result`.
+    /// JSON-RPC `error` member, or a missing `result`. An archive-depth
+    /// refusal is classified as [`Self::DepthRefused`] instead — see that
+    /// variant's docs.
     Rpc {
         /// The JSON-RPC method that failed.
         method: String,
         /// What went wrong.
+        detail: String,
+    },
+    /// A JSON-RPC call failed in a way that looks like the endpoint
+    /// refusing to serve state at the requested depth/height — e.g. a
+    /// keyless tier rejecting an archive-depth `eth_getBalance` (observed
+    /// live from publicnode: `HTTP 403
+    /// {"code":-32602,"message":"Archive requests require a personal
+    /// token..."}`), a full node's "missing trie node" / "pruned" error for
+    /// state it no longer retains, or an explicit "state is not available"
+    /// message. Same shape as [`Self::Rpc`] — kept a distinct variant
+    /// purely so a caller that cares (`risepir-rpc`'s reconcile loop,
+    /// ADR-0036) can react to *this specific, expected-during-catch-up*
+    /// failure differently (stop spending requests against a provider that
+    /// is never going to answer at this depth) without re-parsing error
+    /// strings itself. See [`Self::is_depth_refusal`].
+    ///
+    /// # This is a heuristic over third-party error text — by design
+    ///
+    /// The classifier (`risepir_feed::rpc`'s private `looks_like_depth_refusal`)
+    /// is an HTTP-status check plus a substring match over another
+    /// operator's free-text error message. It can misclassify: an
+    /// intervening proxy could return a `403` for an unrelated reason, or a
+    /// provider could rephrase its message and stop matching the known
+    /// needles. **A misclassification can only ever change how many
+    /// requests the reconciler sends and what it logs — never whether a
+    /// mismatch is detected, and never a served answer.** Every consumer of
+    /// this variant treats it as nothing more than "this sample's fetch
+    /// failed": the reconcile loop records the same failure outcome either
+    /// way, a checkpoint where every attempt fails is dark regardless of
+    /// *why* each attempt failed, and an actual value mismatch is only ever
+    /// found by comparing balances that *did* fetch successfully — this
+    /// variant never appears on that path. That safety argument is what
+    /// makes a heuristic acceptable here: worst case it is a
+    /// scheduling/logging hint that guessed wrong, never a correctness
+    /// decision.
+    DepthRefused {
+        /// The JSON-RPC method that failed.
+        method: String,
+        /// What the endpoint said.
         detail: String,
     },
     /// A JSON-RPC result arrived but did not have the required shape —
@@ -101,6 +142,9 @@ impl std::fmt::Display for FeedError {
         match self {
             Self::Internal(msg) => write!(f, "feed error: {msg}"),
             Self::Rpc { method, detail } => write!(f, "rpc {method} failed: {detail}"),
+            Self::DepthRefused { method, detail } => {
+                write!(f, "rpc {method} refused (archive depth?): {detail}")
+            }
             Self::Parse { context, detail } => write!(f, "rpc {context}: malformed result: {detail}"),
             Self::ChainIdMismatch { expected, got } => {
                 write!(f, "endpoint serves chain id {got}, expected {expected}")
@@ -110,6 +154,18 @@ impl std::fmt::Display for FeedError {
 }
 
 impl std::error::Error for FeedError {}
+
+impl FeedError {
+    /// Whether this failure looks like the endpoint refusing to serve state
+    /// at the requested depth/height, rather than an ordinary transport
+    /// hiccup or a plain rate limit — see [`Self::DepthRefused`]'s docs for
+    /// the heuristic this answers from and why a misclassification is
+    /// safe. `false` for every other variant, including an [`Self::Rpc`]
+    /// failure that the classifier never matched in the first place.
+    pub fn is_depth_refusal(&self) -> bool {
+        matches!(self, Self::DepthRefused { .. })
+    }
+}
 
 // ─── Deterministic PRNG (dependency-free) ────────────────────────────────
 

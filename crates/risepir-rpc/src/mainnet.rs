@@ -39,28 +39,40 @@
 //! - The reconcile check's own health is now observable rather than
 //!   inferred (ADR-0027): every checkpoint is classified as empty (no
 //!   candidate accounts — nothing to check), successful (≥1 comparison
-//!   completed), or **dark** (≥1 attempted, all failed) and recorded into
+//!   completed), **dark** (≥1 attempted, all failed), or, since ADR-0036,
+//!   **deferred** (still more than `RECENT_DEPTH_BLOCKS` behind the
+//!   finalized head — no fetch even attempted, because a catch-up replay
+//!   is exactly when the independent provider is known to refuse
+//!   archive-depth reads). All of this is recorded into
 //!   [`risepir_http::NodeState`]'s [`risepir_http::ReconcileHealth`], which
-//!   `GET /healthz` reports. A prolonged dark streak escalates to a
-//!   `CRITICAL` log (after `DARK_ESCALATION_THRESHOLD` consecutive dark
-//!   checkpoints — this module's own private constant) but **never halts** —
-//!   only a value mismatch does that. Halting because a *third-party*
-//!   reference provider is unreachable would convert someone else's outage
-//!   into this deployment's outage while preventing exactly zero wrong
-//!   answers (the feed — and therefore what gets served — is untouched by
-//!   whether the reconcile provider answers).
+//!   `GET /healthz` reports. A deferred checkpoint counts as dark for
+//!   escalation purposes: a prolonged dark-or-deferred streak escalates to
+//!   a `CRITICAL` log (after `DARK_ESCALATION_THRESHOLD` consecutive
+//!   checkpoints — this module's own private constant) but **never
+//!   halts** — only a value mismatch does that. Halting because a
+//!   *third-party* reference provider is unreachable would convert someone
+//!   else's outage into this deployment's outage while preventing exactly
+//!   zero wrong answers (the feed — and therefore what gets served — is
+//!   untouched by whether the reconcile provider answers). Every
+//!   checkpoint also bounds its own request volume to at most
+//!   `samples.saturating_mul(2)` fetch attempts (ADR-0036 §1) rather than
+//!   walking the whole candidate list, and every candidate a blind
+//!   checkpoint could not verify is queued in a bounded reservoir and
+//!   drained a couple at a time once checkpoints resume normally (ADR-0036
+//!   §4) — deferring verification rather than skipping it outright.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use ikpir_common::SimpleConfig;
-use risepir_feed::rpc::{FetchedBlock, RpcClient, RpcFeed};
+use risepir_feed::rpc::{Address, FetchedBlock, RpcClient, RpcFeed};
 use risepir_feed::snapshot;
-use risepir_http::{NodeState, PirHttpClient};
-use risepir_proto::{keccak256, Backend, BlockDelta, Geometry, ValueCodec};
+use risepir_feed::FeedError;
+use risepir_http::{NodeState, PirHttpClient, ReconcileHealth};
+use risepir_proto::{keccak256, Backend, Balance, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
@@ -98,6 +110,36 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// the incident this constant exists to make loud the *next* time it
 /// happens instead of the operator finding out afterward from the log.
 const DARK_ESCALATION_THRESHOLD: u64 = 20;
+
+/// How far behind `finalized` the block currently being applied may be
+/// before a reconcile checkpoint **defers** instead of attempting any
+/// fetch (ADR-0036 §3): during a catch-up replay the independent provider
+/// (publicnode's keyless tier) refuses every archive-depth read anyway —
+/// measured on the live box on 2026-07-28: 154,010 log lines and ~130,000
+/// useless HTTP requests over 432 checkpoints, every single one dark.
+/// `64` sits comfortably above a normal live-following lag (a healthy
+/// follow loop is within a handful of blocks of `finalized`) and
+/// comfortably below the depth publicnode has ever been observed to
+/// serve, so a deployment that is merely a little behind still reconciles
+/// normally — only a genuine catch-up replay defers.
+const RECENT_DEPTH_BLOCKS: u64 = 64;
+
+/// Capacity of the deferred-reservoir backfill queue (ADR-0036 §4): the
+/// bounded memory of addresses seen as reconcile candidates during a blind
+/// (dark or deferred) checkpoint, verified later once checkpoints run
+/// normally again. Sized to comfortably outlast a single
+/// [`DARK_ESCALATION_THRESHOLD`]-checkpoint dark streak without needing to
+/// remember *everything* a multi-hour catch-up touches — that was never
+/// the goal; the reservoir is a bounded best-effort backfill of the
+/// safety net, not a second complete audit log.
+const DEFERRED_RESERVOIR_CAP: usize = 256;
+
+/// How many deferred-reservoir addresses a single (non-deferred)
+/// checkpoint drains, on top of its own normal candidates. Deliberately
+/// small: draining is a steady background trickle across many checkpoints
+/// once the provider is reachable again, not a burst that would recreate
+/// the very request storm ADR-0036 exists to stop.
+const RESERVOIR_DRAIN_PER_CHECKPOINT: usize = 2;
 
 /// How often the follow loop logs a patch-time summary, in blocks — never
 /// per block, which at this deployment's ~12 s block time would be a log
@@ -940,6 +982,10 @@ fn log_patch_stats(through_block: u64, stats: &PatchStats) {
 async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cfg: FollowConfig) {
     let mut last = cfg.start_at;
     let mut patch_stats = PatchStats::default();
+    // Persists across every checkpoint for the life of the loop (ADR-0036
+    // §4) — addresses queued here during a blind checkpoint are verified
+    // later, a couple at a time, once checkpoints run normally again.
+    let mut reservoir = DeferredReservoir::default();
     loop {
         if let Some(saver) = &cfg.saver {
             // Outcome/error ignored on purpose: the saver logs, and a
@@ -1041,15 +1087,21 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             node.note_recent(changed.iter().map(|(addr, _)| *addr)).await;
 
             if cfg.reconcile_every > 0 && n.is_multiple_of(cfg.reconcile_every) {
+                // Free: `finalized` and `n` (the block just applied) are
+                // both already in hand, so this adds no new trust
+                // dependency (ADR-0036 §3).
+                let lag = finalized.saturating_sub(n);
                 let outcome = reconcile(
                     &confirm,
                     &node,
                     n,
+                    lag,
                     &changed,
                     &credited,
                     cfg.complete,
                     cfg.reconcile_samples,
                     cfg.reconcile_every,
+                    &mut reservoir,
                 )
                 .await;
                 if matches!(outcome, ReconcileOutcome::Halted) {
@@ -1059,6 +1111,36 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The reconcile loop's view of "ask an independent source for the balance
+/// of `addr` at block `n`" — implemented by [`RpcClient`] for real traffic
+/// and by an in-memory stub in `tests`, which is what makes the
+/// attempt-budget logic in [`sample_reference`] unit-testable with no
+/// network at all. A local trait over a foreign type (`RpcClient` lives in
+/// `risepir_feed`) — allowed under Rust's orphan rules, and the
+/// lowest-churn way to make this one seam swappable without touching
+/// `RpcClient` itself or any of its other callers.
+///
+/// Declared as an explicit `-> impl Future<...> + Send` rather than
+/// sugared `async fn` purely so the returned future is provably `Send` —
+/// required because `reconcile` is always awaited from inside
+/// `follow_loop`, which `tokio::spawn` needs to be `Send`. Implementations
+/// are free to use ordinary `async fn` syntax; the compiler checks the
+/// desugared future against this bound.
+trait ConfirmSource: Sync {
+    /// `eth_getBalance(addr, block)` against the independent provider.
+    fn balance_at(
+        &self,
+        addr: &Address,
+        block: u64,
+    ) -> impl std::future::Future<Output = Result<Balance, FeedError>> + Send;
+}
+
+impl ConfirmSource for RpcClient {
+    async fn balance_at(&self, addr: &Address, block: u64) -> Result<Balance, FeedError> {
+        RpcClient::balance_at(self, addr, block).await
     }
 }
 
@@ -1078,14 +1160,15 @@ enum SampleResult {
 }
 
 /// What one reconciliation checkpoint amounted to, decided purely from its
-/// sample outcomes — no network inside this function, which is what makes
-/// it unit-testable with no live dependency. This classification is the
-/// core of ADR-0027: the old code's `if checked > 0` shortcut could not
-/// tell "this block touched nothing worth sampling" apart from "every
-/// fetch failed" — both are `checked == 0` — which is exactly the blind
-/// spot `docs/deploy.md` records for the 2026-07-26 catch-up (685
-/// checkpoints, the independent provider refusing every archive-depth
-/// fetch, zero log lines, the old `reconcile` still returning `true`).
+/// preconditions and sample outcomes — no network inside this function,
+/// which is what makes it unit-testable with no live dependency. This
+/// classification is the core of ADR-0027 (extended by ADR-0036 with
+/// `Deferred`): the old code's `if checked > 0` shortcut could not tell
+/// "this block touched nothing worth sampling" apart from "every fetch
+/// failed" — both are `checked == 0` — which is exactly the blind spot
+/// `docs/deploy.md` records for the 2026-07-26 catch-up (685 checkpoints,
+/// the independent provider refusing every archive-depth fetch, zero log
+/// lines, the old `reconcile` still returning `true`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CheckpointOutcome {
     /// The block had no candidate accounts to sample at all — nothing was
@@ -1104,18 +1187,36 @@ enum CheckpointOutcome {
         /// Fetches attempted (== failed, by construction of this variant).
         attempted: usize,
     },
+    /// The block being applied is more than [`RECENT_DEPTH_BLOCKS`] behind
+    /// `finalized` — a catch-up replay, exactly when the independent
+    /// provider is known to refuse archive-depth reads (ADR-0036 §3). No
+    /// fetch was even attempted; this is a blind checkpoint *by policy*
+    /// rather than by discovering the hard way that every attempt fails.
+    Deferred {
+        /// How far behind `finalized` the applied block was.
+        lag: u64,
+    },
 }
 
-/// Classify a checkpoint from its sample outcomes.
+/// Classify a checkpoint from its preconditions and sample outcomes.
 ///
-/// `candidates` is the number of accounts the block actually touched
-/// (before the `samples` cap), passed *separately* from `results.len()` so
-/// "no candidates" (an empty block) and "candidates present but none
-/// attempted" are never conflated even in principle — see
+/// `lag` is checked **first**: if it exceeds [`RECENT_DEPTH_BLOCKS`], the
+/// checkpoint is [`CheckpointOutcome::Deferred`] regardless of `candidates`
+/// or `results` — by contract, [`reconcile`] never attempts a fetch at all
+/// once it sees this, so `results` is always empty in practice on this
+/// path, but the classifier itself does not depend on that being true.
+///
+/// Otherwise, `candidates` is the number of accounts the block actually
+/// touched (before the `samples` cap), passed *separately* from
+/// `results.len()` so "no candidates" (an empty block) and "candidates
+/// present but none attempted" are never conflated even in principle — see
 /// [`CheckpointOutcome::Empty`]'s docs. In practice `results` is only ever
 /// empty here because `candidates` was zero: a positive sample cap always
 /// attempts at least one candidate when one exists.
-fn classify_checkpoint(candidates: usize, results: &[SampleResult]) -> CheckpointOutcome {
+fn classify_checkpoint(candidates: usize, results: &[SampleResult], lag: u64) -> CheckpointOutcome {
+    if lag > RECENT_DEPTH_BLOCKS {
+        return CheckpointOutcome::Deferred { lag };
+    }
     if candidates == 0 {
         return CheckpointOutcome::Empty;
     }
@@ -1138,100 +1239,366 @@ fn should_escalate(consecutive_dark: u64) -> bool {
 }
 
 /// What one [`reconcile`] call amounted to. The follow loop only ever
-/// stops on `Halted` — everything else, including a fully dark checkpoint,
-/// lets following continue; see the module docs and ADR-0027 for why.
+/// stops on `Halted` — everything else, including a fully dark or deferred
+/// checkpoint, lets following continue; see the module docs and ADR-0027 /
+/// ADR-0036 for why.
 enum ReconcileOutcome {
     /// Following continues. The checkpoint's classification has already
     /// been recorded into `node`'s [`risepir_http::ReconcileHealth`] and
     /// logged — including, if applicable, an escalating `CRITICAL` for a
-    /// prolonged dark streak.
+    /// prolonged dark-or-deferred streak.
     Continued,
-    /// A value mismatch or a verified-read error. `reconcile` has already
-    /// logged `CRITICAL` and marked the health record halted; the follow
-    /// loop must stop.
+    /// A value mismatch or a verified-read error, from a normal candidate
+    /// or from draining the deferred reservoir (ADR-0036 §4) — both halt
+    /// through the exact same path. `reconcile` has already logged
+    /// `CRITICAL` and marked the health record halted; the follow loop
+    /// must stop.
     Halted,
+}
+
+/// Bounded FIFO of addresses seen as reconcile candidates during a blind
+/// (dark or deferred) checkpoint — the backfill queue ADR-0036 §4 exists
+/// for. Pure data structure, no network/`NodeState` dependency, which is
+/// what makes its cap/dedup/drain behavior unit-testable directly.
+///
+/// A store-vs-provider comparison at the **current** checkpoint's block is
+/// valid whenever it runs, regardless of which earlier block first made an
+/// address a candidate — so draining this queue against today's height is
+/// exactly as sound a check as a normal candidate, not a weaker one. That
+/// is the whole argument for why this defers verification rather than
+/// skipping it.
+#[derive(Debug, Default)]
+struct DeferredReservoir {
+    addrs: VecDeque<Address>,
+}
+
+impl DeferredReservoir {
+    /// Insert every address in `candidates` not already queued, up to
+    /// [`DEFERRED_RESERVOIR_CAP`]. Once full, further inserts are silently
+    /// dropped — existing entries are kept rather than evicted, so a
+    /// prolonged blind spell does not thrash the queue by repeatedly
+    /// discarding the oldest not-yet-verified address to make room for a
+    /// newer one (that would never let the backlog actually drain).
+    fn insert_many(&mut self, candidates: impl IntoIterator<Item = Address>) {
+        for addr in candidates {
+            if self.addrs.len() >= DEFERRED_RESERVOIR_CAP {
+                break;
+            }
+            if !self.addrs.contains(&addr) {
+                self.addrs.push_back(addr);
+            }
+        }
+    }
+
+    /// Pop up to `n` addresses from the front (oldest queued first) for the
+    /// caller to attempt verifying now. Returns fewer than `n` if the
+    /// reservoir does not hold that many.
+    fn pop_front_up_to(&mut self, n: usize) -> Vec<Address> {
+        let mut out = Vec::with_capacity(n.min(self.addrs.len()));
+        for _ in 0..n {
+            match self.addrs.pop_front() {
+                Some(addr) => out.push(addr),
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Put an address whose drain attempt failed to *fetch* back at the
+    /// **end** of the queue: a transient failure defers it again rather
+    /// than losing it outright — "defer verification, don't skip it"
+    /// applies just as much to a reservoir drain as to the original
+    /// checkpoint. Bounded by the same cap as [`Self::insert_many`];
+    /// dropped only if the reservoir is somehow already full, which cannot
+    /// happen from this call alone (it only ever follows a pop of this
+    /// same address) but is kept as a defensive bound rather than assumed.
+    fn requeue(&mut self, addr: Address) {
+        if self.addrs.len() < DEFERRED_RESERVOIR_CAP {
+            self.addrs.push_back(addr);
+        }
+    }
+
+    /// Current reservoir size — surfaced via `GET /healthz`
+    /// (`reconcile_reservoir_len`, ADR-0036 §4).
+    fn len(&self) -> usize {
+        self.addrs.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.addrs.is_empty()
+    }
+}
+
+/// Attempt reference-balance fetches for `candidates` in order, stopping
+/// once either `samples` fetches have **succeeded** or `budget` fetches
+/// have been **attempted** — whichever comes first (ADR-0036 §1). Returns
+/// every attempted outcome, in the order attempted, index-aligned with
+/// `candidates`' own prefix.
+///
+/// Deliberately fetch-only: it never compares a fetched balance against
+/// this deployment's own store, so it has no [`risepir_http::NodeState`]
+/// dependency and is unit-testable against a stub [`ConfirmSource`] with no
+/// network and no PIR server at all. Splitting fetch from compare is sound
+/// here specifically because a *mismatch* always halts the whole checkpoint
+/// immediately (see [`reconcile`]'s docs) — so "fetched successfully" and
+/// "compared and matched" are the same count for as long as the checkpoint
+/// keeps running at all; the only way they would ever diverge is a
+/// mismatch, which ends the checkpoint on the spot regardless of how many
+/// candidates remain unattempted.
+async fn sample_reference<C: ConfirmSource>(
+    confirm: &C,
+    block: u64,
+    candidates: &[Address],
+    samples: usize,
+    budget: usize,
+) -> Vec<Result<Balance, FeedError>> {
+    let mut succeeded = 0usize;
+    let mut outcomes = Vec::new();
+    for addr in candidates {
+        if succeeded >= samples || outcomes.len() >= budget {
+            break;
+        }
+        let outcome = confirm.balance_at(addr, block).await;
+        if outcome.is_ok() {
+            succeeded += 1;
+        }
+        outcomes.push(outcome);
+    }
+    outcomes
+}
+
+/// Truncates per-sample fetch-failure logging to the first
+/// [`Self::VERBATIM_CAP`] lines per checkpoint, folding every failure past
+/// that into a single trailing count (ADR-0036 §5) — with (1) and (3)
+/// already bounding a checkpoint to ≤16 fetch attempts, this bounds the
+/// *log lines* further still, without losing the information that failures
+/// happened or how many.
+struct FailureLogger {
+    logged: usize,
+    suppressed: usize,
+}
+
+impl FailureLogger {
+    /// How many individual fetch-failure lines a single checkpoint prints
+    /// verbatim before folding the rest into one summary line.
+    const VERBATIM_CAP: usize = 2;
+
+    fn new() -> Self {
+        Self { logged: 0, suppressed: 0 }
+    }
+
+    /// Record one fetch failure; prints it verbatim for the first
+    /// [`Self::VERBATIM_CAP`] calls this checkpoint, silently counts it
+    /// otherwise.
+    fn log(&mut self, addr: &Address, block: u64, err: &FeedError) {
+        if self.logged < Self::VERBATIM_CAP {
+            eprintln!(
+                "risepir-rpc mainnet: reconcile: fetch for 0x{} at {block} failed ({err}); skipping sample",
+                hex20(addr)
+            );
+            self.logged += 1;
+        } else {
+            self.suppressed += 1;
+        }
+    }
+
+    /// Print the trailing "...and N more" summary, if anything was
+    /// suppressed. Call once, after every fetch this checkpoint has already
+    /// been logged.
+    fn finish(&self) {
+        if self.suppressed > 0 {
+            eprintln!(
+                "risepir-rpc mainnet: reconcile: ... and {} more fetch failure(s) this checkpoint",
+                self.suppressed
+            );
+        }
+    }
+}
+
+/// One candidate's fetch-succeeded comparison against this deployment's own
+/// store: [`CompareOutcome::Matched`], or [`CompareOutcome::Halted`] after
+/// already logging `CRITICAL` and marking the health record halted (a
+/// verified-read error or an actual value mismatch) — shared by
+/// `reconcile`'s normal-candidate loop and its reservoir drain so both halt
+/// through the exact same path.
+enum CompareOutcome {
+    Matched,
+    Halted,
+}
+
+/// Runs one [`CompareOutcome`] comparison. `reservoir_entry` only changes
+/// the CRITICAL message's wording (naming that the address came from the
+/// deferred reservoir, ADR-0036 §4) — the halt behavior and the message's
+/// shape are otherwise identical to a normal candidate's, unchanged from
+/// before this ADR.
+async fn compare_one(node: &Arc<NodeState>, addr: &Address, n: u64, reference: Balance, reservoir_entry: bool) -> CompareOutcome {
+    let ours = match node.balance_of(&keccak256(addr)).await {
+        Ok(v) => v.unwrap_or(0),
+        Err(e) => {
+            node.mark_reconcile_halted();
+            let suffix = if reservoir_entry { " (this address was a deferred-reservoir entry, ADR-0036 §4)" } else { "" };
+            critical(&format!("verified read during reconcile failed: {e}{suffix}"));
+            return CompareOutcome::Halted;
+        }
+    };
+    if ours != reference {
+        node.mark_reconcile_halted();
+        let suffix = if reservoir_entry {
+            " — this address was a deferred-reservoir entry (ADR-0036 §4), verified at the current checkpoint's block"
+        } else {
+            ""
+        };
+        critical(&format!(
+            "reconcile MISMATCH at block {n} for 0x{}: store says {ours} wei, independent provider says {reference} wei — \
+             the feed has drifted; serving stays at the last applied block; re-bootstrap required{suffix}",
+            hex20(addr)
+        ));
+        return CompareOutcome::Halted;
+    }
+    CompareOutcome::Matched
+}
+
+/// Human-readable "time since the last successful reconcile comparison",
+/// shared by the dark and deferred log lines (ADR-0036) — both need
+/// exactly the same "how stale is the backstop" framing.
+fn since_last_success(health: &ReconcileHealth) -> String {
+    if health.last_success_unix == 0 {
+        "no successful comparison yet this run".to_string()
+    } else {
+        let elapsed = unix_now().saturating_sub(health.last_success_unix);
+        format!("{} since the last one, at block {}", format_duration_secs(elapsed), health.last_success_block)
+    }
+}
+
+/// Escalates to a `CRITICAL` log once `health.consecutive_dark` crosses a
+/// [`DARK_ESCALATION_THRESHOLD`] multiple ([`should_escalate`]) — shared by
+/// the dark and deferred paths (ADR-0036): a deferred checkpoint counts
+/// toward the same streak and must re-page the operator on exactly the
+/// same cadence a genuinely-dark one would.
+fn maybe_escalate(health: &ReconcileHealth, reconcile_every: u64) {
+    if should_escalate(health.consecutive_dark) {
+        let blocks_dark = health.consecutive_dark.saturating_mul(reconcile_every);
+        critical(&format!(
+            "the reconcile integrity backstop has been dark for {} checkpoint(s) (~{blocks_dark} blocks) — \
+             no cross-provider comparison has succeeded since block {} — the independent reconcile provider \
+             appears unavailable; following continues regardless (a third-party outage must not become \
+             this deployment's outage), but the ingest path is running unverified until this clears",
+            health.consecutive_dark, health.last_success_block
+        ));
+    }
 }
 
 /// Diff up to `samples` of block `n`'s own touched accounts against the
 /// independent provider at height `n`, classify the checkpoint
 /// ([`classify_checkpoint`]), record it into `node`'s reconcile health
 /// ([`risepir_http::NodeState::record_reconcile_checkpoint`]), and log it —
-/// every checkpoint, including a dark one.
+/// every checkpoint, including a dark or deferred one.
 ///
-/// A fetch failure is not evidence of anything wrong with *this*
-/// deployment; it only marks that sample [`SampleResult::FetchFailed`]. A
-/// value **mismatch** is CRITICAL and returns [`ReconcileOutcome::Halted`]
-/// — stop following, keep serving the last good block — exactly as before
-/// this change. Everything else, including a checkpoint that is *entirely*
-/// dark, returns [`ReconcileOutcome::Continued`]: see the module docs for
-/// why halting on a third party's unavailability is the wrong trade. A
-/// prolonged dark streak instead escalates to a `CRITICAL` log at
-/// [`DARK_ESCALATION_THRESHOLD`] — loud, but not fatal.
+/// `lag` is `finalized - n` at the moment this block was applied (free —
+/// the follow loop already has both). When `lag` exceeds
+/// [`RECENT_DEPTH_BLOCKS`] this checkpoint **defers**: no fetch is
+/// attempted at all, because that lag means a catch-up replay is under
+/// way, which is exactly when the independent provider is known to refuse
+/// archive-depth reads (ADR-0036 §3) — attempting anyway is exactly the
+/// request storm this ADR exists to stop. A deferred checkpoint is
+/// recorded and escalates exactly like a dark one ([`classify_checkpoint`]);
+/// its candidates are queued into `reservoir` instead of being fetched, and
+/// are verified later (ADR-0036 §4) once checkpoints are no longer
+/// deferred.
+///
+/// Otherwise, up to `samples.saturating_mul(2)` fetches are attempted
+/// ([`sample_reference`], ADR-0036 §1) — bounding a fully-failing
+/// checkpoint's request volume without needing the whole ~300-address
+/// candidate list to be walked first. A fetch failure is not evidence of
+/// anything wrong with *this* deployment; it only marks that sample
+/// [`SampleResult::FetchFailed`] (logged verbatim at most
+/// [`FailureLogger::VERBATIM_CAP`] times, ADR-0036 §5). A value
+/// **mismatch** is CRITICAL and returns [`ReconcileOutcome::Halted`] — stop
+/// following, keep serving the last good block — exactly as before this
+/// change, whether the mismatch came from a normal candidate or from
+/// draining `reservoir`. Everything else, including a checkpoint that is
+/// *entirely* dark or deferred, returns [`ReconcileOutcome::Continued`]:
+/// see the module docs for why halting on a third party's unavailability is
+/// the wrong trade. A prolonged dark-or-deferred streak instead escalates
+/// to a `CRITICAL` log at [`DARK_ESCALATION_THRESHOLD`] — loud, but not
+/// fatal.
+///
+/// `reservoir` persists across calls (owned by the follow loop): every
+/// blind (dark or deferred) checkpoint's candidates are queued into it
+/// (bounded, ADR-0036 §4), and every non-deferred checkpoint additionally
+/// drains up to [`RESERVOIR_DRAIN_PER_CHECKPOINT`] of its oldest entries,
+/// verified at *this* checkpoint's block `n` — a store-vs-provider
+/// comparison is valid at whatever height it actually runs, independent of
+/// which earlier block first made the address a candidate.
 #[allow(clippy::too_many_arguments)]
-async fn reconcile(
-    confirm: &RpcClient,
+async fn reconcile<C: ConfirmSource>(
+    confirm: &C,
     node: &Arc<NodeState>,
     n: u64,
-    changed: &[([u8; 20], u128)],
-    credited: &[([u8; 20], u128)],
+    lag: u64,
+    changed: &[(Address, Balance)],
+    credited: &[(Address, Balance)],
     complete: bool,
     samples: usize,
     reconcile_every: u64,
+    reservoir: &mut DeferredReservoir,
 ) -> ReconcileOutcome {
     // Tx-changed accounts are exact in both modes; credited recipients
     // are only guaranteed tracked in complete mode.
-    let mut candidates: Vec<[u8; 20]> = changed.iter().map(|(a, _)| *a).collect();
+    let mut candidates: Vec<Address> = changed.iter().map(|(a, _)| *a).collect();
     if complete {
         candidates.extend(credited.iter().map(|(a, _)| *a));
     }
     candidates.dedup();
     let candidate_count = candidates.len();
 
-    let mut checked = 0usize;
-    let mut results: Vec<SampleResult> = Vec::new();
-    for addr in candidates {
-        if checked >= samples {
-            break;
-        }
-        let reference = match confirm.balance_at(&addr, n).await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!(
-                    "risepir-rpc mainnet: reconcile: fetch for 0x{} at {n} failed ({e}); skipping sample",
-                    hex20(&addr)
-                );
-                results.push(SampleResult::FetchFailed);
-                continue;
-            }
-        };
-        let ours = match node.balance_of(&keccak256(&addr)).await {
-            Ok(v) => v.unwrap_or(0),
-            Err(e) => {
-                node.mark_reconcile_halted();
-                critical(&format!("verified read during reconcile failed: {e}"));
-                return ReconcileOutcome::Halted;
-            }
-        };
-        if ours != reference {
-            node.mark_reconcile_halted();
-            critical(&format!(
-                "reconcile MISMATCH at block {n} for 0x{}: store says {ours} wei, independent provider says {reference} wei — \
-                 the feed has drifted; serving stays at the last applied block; re-bootstrap required",
-                hex20(&addr)
-            ));
-            return ReconcileOutcome::Halted;
-        }
-        results.push(SampleResult::Matched);
-        checked += 1;
+    // Deferred: decided from `lag` alone, via the same pure classifier the
+    // non-deferred path uses below — no fetch is attempted on this branch.
+    if let CheckpointOutcome::Deferred { lag } = classify_checkpoint(candidate_count, &[], lag) {
+        reservoir.insert_many(candidates);
+        node.set_reservoir_len(reservoir.len() as u64);
+
+        let health = node.record_reconcile_checkpoint(n, 0, true, true);
+        let since_success = since_last_success(&health);
+        eprintln!(
+            "risepir-rpc mainnet: reconcile: block {n}: deferred — {lag} block(s) behind the finalized head, \
+             deeper than the independent provider serves without a token (dark checkpoint #{} in a row); {since_success}",
+            health.consecutive_dark
+        );
+        maybe_escalate(&health, reconcile_every);
+        return ReconcileOutcome::Continued;
     }
 
-    let outcome = classify_checkpoint(candidate_count, &results);
+    let budget = samples.saturating_mul(2);
+    let outcomes = sample_reference(confirm, n, &candidates, samples, budget).await;
+
+    let mut failures = FailureLogger::new();
+    let mut results: Vec<SampleResult> = Vec::with_capacity(outcomes.len());
+    for (addr, outcome) in candidates.iter().zip(outcomes.iter()) {
+        match outcome {
+            Err(e) => {
+                failures.log(addr, n, e);
+                results.push(SampleResult::FetchFailed);
+            }
+            Ok(reference) => match compare_one(node, addr, n, *reference, false).await {
+                CompareOutcome::Matched => results.push(SampleResult::Matched),
+                CompareOutcome::Halted => {
+                    failures.finish();
+                    return ReconcileOutcome::Halted;
+                }
+            },
+        }
+    }
+    failures.finish();
+
+    let outcome = classify_checkpoint(candidate_count, &results, lag);
     let (record_checked, dark) = match outcome {
         CheckpointOutcome::Empty => (0, false),
         CheckpointOutcome::Success { checked } => (checked, false),
         CheckpointOutcome::Dark { .. } => (0, true),
+        CheckpointOutcome::Deferred { .. } => unreachable!("lag <= RECENT_DEPTH_BLOCKS was already established above"),
     };
-    let health = node.record_reconcile_checkpoint(n, record_checked, dark);
+    let health = node.record_reconcile_checkpoint(n, record_checked, dark, false);
 
     match outcome {
         CheckpointOutcome::Empty => {
@@ -1241,28 +1608,45 @@ async fn reconcile(
             eprintln!("risepir-rpc mainnet: reconcile at block {n}: {checked} account(s) exact vs independent provider");
         }
         CheckpointOutcome::Dark { attempted } => {
-            let since_success = if health.last_success_unix == 0 {
-                "no successful comparison yet this run".to_string()
-            } else {
-                let elapsed = unix_now().saturating_sub(health.last_success_unix);
-                format!("{} since the last one, at block {}", format_duration_secs(elapsed), health.last_success_block)
-            };
+            let since_success = since_last_success(&health);
             eprintln!(
                 "risepir-rpc mainnet: reconcile: WARNING: block {n}: {attempted} fetch(es) attempted against the \
                  independent provider, {attempted} failed (dark checkpoint #{} in a row); {since_success}",
                 health.consecutive_dark
             );
-            if should_escalate(health.consecutive_dark) {
-                let blocks_dark = health.consecutive_dark.saturating_mul(reconcile_every);
-                critical(&format!(
-                    "the reconcile integrity backstop has been dark for {} checkpoint(s) (~{blocks_dark} blocks) — \
-                     no cross-provider comparison has succeeded since block {} — the independent reconcile provider \
-                     appears unavailable; following continues regardless (a third-party outage must not become \
-                     this deployment's outage), but the ingest path is running unverified until this clears",
-                    health.consecutive_dark, health.last_success_block
-                ));
-            }
+            maybe_escalate(&health, reconcile_every);
         }
+        CheckpointOutcome::Deferred { .. } => unreachable!("lag <= RECENT_DEPTH_BLOCKS was already established above"),
+    }
+
+    // Drain the deferred reservoir (ADR-0036 §4): this checkpoint ran
+    // normally (not deferred), so a couple of backlog addresses from an
+    // earlier blind spell get a chance to verify at *this* block's height.
+    let had_entries = !reservoir.is_empty();
+    for addr in reservoir.pop_front_up_to(RESERVOIR_DRAIN_PER_CHECKPOINT) {
+        match confirm.balance_at(&addr, n).await {
+            Err(e) => {
+                eprintln!(
+                    "risepir-rpc mainnet: reconcile: deferred-reservoir fetch for 0x{} at {n} failed ({e}); requeued",
+                    hex20(&addr)
+                );
+                reservoir.requeue(addr);
+            }
+            Ok(reference) => match compare_one(node, &addr, n, reference, true).await {
+                CompareOutcome::Matched => node.record_reservoir_check(),
+                CompareOutcome::Halted => {
+                    node.set_reservoir_len(reservoir.len() as u64);
+                    return ReconcileOutcome::Halted;
+                }
+            },
+        }
+    }
+    node.set_reservoir_len(reservoir.len() as u64);
+    if had_entries && reservoir.is_empty() {
+        eprintln!(
+            "risepir-rpc mainnet: reconcile: deferred reservoir drained to empty — every address queued during a \
+             blind checkpoint has now been verified"
+        );
     }
 
     ReconcileOutcome::Continued
@@ -1316,7 +1700,7 @@ mod tests {
     #[test]
     fn all_fetches_failed_classifies_as_dark_not_success() {
         let results = [SampleResult::FetchFailed, SampleResult::FetchFailed, SampleResult::FetchFailed];
-        let outcome = classify_checkpoint(3, &results);
+        let outcome = classify_checkpoint(3, &results, 0);
         assert_eq!(outcome, CheckpointOutcome::Dark { attempted: 3 });
     }
 
@@ -1325,7 +1709,7 @@ mod tests {
     /// not evidence that anything failed.
     #[test]
     fn no_candidates_classifies_as_empty() {
-        let outcome = classify_checkpoint(0, &[]);
+        let outcome = classify_checkpoint(0, &[], 0);
         assert_eq!(outcome, CheckpointOutcome::Empty);
     }
 
@@ -1339,7 +1723,7 @@ mod tests {
     /// wrong reason. Pin the actual contract: candidate count decides.
     #[test]
     fn empty_classification_is_keyed_on_candidate_count() {
-        assert_eq!(classify_checkpoint(0, &[SampleResult::Matched]), CheckpointOutcome::Empty);
+        assert_eq!(classify_checkpoint(0, &[SampleResult::Matched], 0), CheckpointOutcome::Empty);
     }
 
     /// At least one completed comparison, even amid failures, is `Success`
@@ -1349,8 +1733,41 @@ mod tests {
     #[test]
     fn one_match_among_failures_is_success_with_exact_count() {
         let results = [SampleResult::FetchFailed, SampleResult::Matched, SampleResult::FetchFailed, SampleResult::Matched];
-        let outcome = classify_checkpoint(4, &results);
+        let outcome = classify_checkpoint(4, &results, 0);
         assert_eq!(outcome, CheckpointOutcome::Success { checked: 2 });
+    }
+
+    // ── classify_checkpoint: Deferred (ADR-0036 §3) ─────────────────────
+
+    /// Lag beyond `RECENT_DEPTH_BLOCKS` classifies as `Deferred`,
+    /// regardless of candidates/results — `reconcile` never attempts a
+    /// fetch once it sees this, so `results` is always empty in practice,
+    /// but the classifier itself must not depend on that being true: even
+    /// a `Matched` result present must not override `Deferred`.
+    #[test]
+    fn lag_beyond_recent_depth_classifies_as_deferred_regardless_of_results() {
+        let lag = RECENT_DEPTH_BLOCKS + 1;
+        assert_eq!(classify_checkpoint(5, &[], lag), CheckpointOutcome::Deferred { lag });
+        assert_eq!(
+            classify_checkpoint(5, &[SampleResult::Matched], lag),
+            CheckpointOutcome::Deferred { lag },
+            "deferred must take priority over any results that happen to be present"
+        );
+    }
+
+    /// Lag exactly at the threshold is NOT deferred (only strictly beyond
+    /// it) — pins the boundary rather than leaving `>` vs `>=` ambiguous.
+    #[test]
+    fn lag_exactly_at_threshold_is_not_deferred() {
+        assert_eq!(classify_checkpoint(0, &[], RECENT_DEPTH_BLOCKS), CheckpointOutcome::Empty);
+        assert_eq!(classify_checkpoint(3, &[SampleResult::Matched], RECENT_DEPTH_BLOCKS), CheckpointOutcome::Success { checked: 1 });
+    }
+
+    /// Zero lag (fully caught up) behaves exactly as pre-ADR-0036 — the
+    /// default/common case must be unaffected by the new parameter.
+    #[test]
+    fn zero_lag_is_never_deferred() {
+        assert_eq!(classify_checkpoint(0, &[], 0), CheckpointOutcome::Empty);
     }
 
     // ── should_escalate ──────────────────────────────────────────────────
@@ -1439,5 +1856,160 @@ mod tests {
         log_patch_stats(0, &stats);
         stats.record(Duration::from_millis(7), 12);
         log_patch_stats(300, &stats);
+    }
+
+    // ── ADR-0036: attempt budget, deferral, reservoir ───────────────────
+    //
+    // Everything below is exercised without a network or a live `NodeState`
+    // — [`ConfirmSource`] is what makes that possible: `sample_reference`
+    // only ever needs *some* implementation, and a stub costs nothing.
+
+    /// Distinct, deterministic test addresses — `Address` is `[u8; 20]`, so
+    /// a plain-repeated byte only gives 256 distinct values, not enough to
+    /// exceed [`DEFERRED_RESERVOIR_CAP`]; encode `i` into the low bytes
+    /// instead.
+    fn addr_for(i: u32) -> Address {
+        let mut a = [0u8; 20];
+        a[..4].copy_from_slice(&i.to_le_bytes());
+        a
+    }
+
+    struct AlwaysFails;
+    impl ConfirmSource for AlwaysFails {
+        async fn balance_at(&self, _addr: &Address, _block: u64) -> Result<Balance, FeedError> {
+            Err(FeedError::Rpc {
+                method: "eth_getBalance".to_string(),
+                detail: "stub: always fails".to_string(),
+            })
+        }
+    }
+
+    struct AlwaysSucceeds;
+    impl ConfirmSource for AlwaysSucceeds {
+        async fn balance_at(&self, _addr: &Address, _block: u64) -> Result<Balance, FeedError> {
+            Ok(0)
+        }
+    }
+
+    /// The exact behavior ADR-0036 §1 exists for: a confirm provider that
+    /// always fails must stop at the attempt **budget**, never walk the
+    /// whole candidate list. Pre-ADR-0036, this would have produced 300
+    /// attempts (one `eprintln!` and one HTTP request each); afterward,
+    /// exactly `budget` (16 at the real default `samples = 8`).
+    #[tokio::test]
+    async fn attempt_budget_bounds_requests_when_every_fetch_fails() {
+        let candidates: Vec<Address> = (0..300u32).map(addr_for).collect();
+        let samples = 8usize;
+        let budget = samples.saturating_mul(2);
+        let outcomes = sample_reference(&AlwaysFails, 1, &candidates, samples, budget).await;
+        assert_eq!(
+            outcomes.len(),
+            budget,
+            "must stop at the attempt budget ({budget}), not exhaust all {} candidates",
+            candidates.len()
+        );
+        assert!(outcomes.iter().all(Result::is_err));
+    }
+
+    /// The other stopping condition: when fetches succeed, sampling stops
+    /// once `samples` of them have, well before the (larger) budget.
+    #[tokio::test]
+    async fn attempt_budget_stops_at_samples_when_fetches_succeed() {
+        let candidates: Vec<Address> = (0..300u32).map(addr_for).collect();
+        let samples = 8usize;
+        let budget = samples.saturating_mul(2);
+        let outcomes = sample_reference(&AlwaysSucceeds, 1, &candidates, samples, budget).await;
+        assert_eq!(outcomes.len(), samples, "must stop once `samples` fetches have succeeded");
+        assert!(outcomes.iter().all(Result::is_ok));
+    }
+
+    /// Fewer candidates than either bound: sampling stops when candidates
+    /// run out, attempting neither `samples` successes nor the full budget.
+    #[tokio::test]
+    async fn attempt_budget_stops_early_when_candidates_run_out() {
+        let candidates: Vec<Address> = (0..3u32).map(addr_for).collect();
+        let outcomes = sample_reference(&AlwaysFails, 1, &candidates, 8, 16).await;
+        assert_eq!(outcomes.len(), 3);
+    }
+
+    // ── DeferredReservoir (ADR-0036 §4) ─────────────────────────────────
+
+    #[test]
+    fn reservoir_caps_at_capacity_and_keeps_the_earliest_entries() {
+        let mut r = DeferredReservoir::default();
+        let addrs: Vec<Address> = (0..(DEFERRED_RESERVOIR_CAP as u32 + 50)).map(addr_for).collect();
+        r.insert_many(addrs.iter().copied());
+        assert_eq!(r.len(), DEFERRED_RESERVOIR_CAP, "must not grow past the cap");
+        // The FIRST entries are kept, not the last -- no eviction/thrash of
+        // already-queued (older) addresses to make room for newer ones.
+        assert_eq!(r.pop_front_up_to(1), vec![addr_for(0)]);
+    }
+
+    #[test]
+    fn reservoir_dedups_on_insert() {
+        let mut r = DeferredReservoir::default();
+        r.insert_many([addr_for(1), addr_for(1), addr_for(2)]);
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn reservoir_pop_front_is_fifo_and_bounded_by_whats_available() {
+        let mut r = DeferredReservoir::default();
+        r.insert_many([addr_for(1), addr_for(2), addr_for(3)]);
+        assert_eq!(r.pop_front_up_to(2), vec![addr_for(1), addr_for(2)]);
+        assert_eq!(r.len(), 1);
+        // Asking for more than what remains returns only what's there,
+        // rather than panicking or padding.
+        assert_eq!(r.pop_front_up_to(5), vec![addr_for(3)]);
+        assert!(r.is_empty());
+    }
+
+    /// A drain attempt whose fetch fails is requeued at the **end** —
+    /// deferred again, not lost ("defer verification, don't skip it"
+    /// applies to a reservoir drain too).
+    #[test]
+    fn reservoir_requeue_puts_the_address_back_at_the_end() {
+        let mut r = DeferredReservoir::default();
+        r.insert_many([addr_for(1), addr_for(2)]);
+        let popped = r.pop_front_up_to(1);
+        assert_eq!(popped, vec![addr_for(1)]);
+        r.requeue(popped[0]);
+        assert_eq!(r.pop_front_up_to(2), vec![addr_for(2), addr_for(1)]);
+    }
+
+    // ── FailureLogger (ADR-0036 §5) ──────────────────────────────────────
+
+    /// Counting behavior only (the printed lines themselves are exactly
+    /// what the module docs describe and are not worth capturing stderr
+    /// to re-verify): the first `VERBATIM_CAP` calls are not suppressed,
+    /// everything past that is.
+    #[test]
+    fn failure_logger_suppresses_past_the_verbatim_cap() {
+        let addr = addr_for(0);
+        let err = FeedError::Rpc {
+            method: "eth_getBalance".to_string(),
+            detail: "stub".to_string(),
+        };
+        let mut logger = FailureLogger::new();
+        assert_eq!(FailureLogger::VERBATIM_CAP, 2, "test assumes the documented default of 2");
+        for _ in 0..5 {
+            logger.log(&addr, 1, &err);
+        }
+        assert_eq!(logger.logged, 2);
+        assert_eq!(logger.suppressed, 3);
+        logger.finish(); // must not panic; nothing to assert on stderr itself
+    }
+
+    #[test]
+    fn failure_logger_reports_nothing_suppressed_under_the_cap() {
+        let addr = addr_for(0);
+        let err = FeedError::Rpc {
+            method: "eth_getBalance".to_string(),
+            detail: "stub".to_string(),
+        };
+        let mut logger = FailureLogger::new();
+        logger.log(&addr, 1, &err);
+        assert_eq!(logger.logged, 1);
+        assert_eq!(logger.suppressed, 0);
     }
 }

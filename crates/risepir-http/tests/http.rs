@@ -205,27 +205,28 @@ async fn healthz_reflects_recorded_reconcile_checkpoints() {
     state.set_reconcile_configured(true);
 
     // Two dark checkpoints in a row: attempted-and-failed, not success.
-    let h1 = state.record_reconcile_checkpoint(10, 0, true);
+    let h1 = state.record_reconcile_checkpoint(10, 0, true, false);
     assert_eq!(h1.consecutive_dark, 1);
     assert_eq!(h1.last_success_block, 0, "a dark checkpoint must never be reported as a success");
     assert_eq!(h1.last_success_unix, 0);
 
-    let h2 = state.record_reconcile_checkpoint(20, 0, true);
+    let h2 = state.record_reconcile_checkpoint(20, 0, true, false);
     assert_eq!(h2.consecutive_dark, 2, "consecutive dark checkpoints must accumulate");
 
     // An empty block (no candidates) must leave the dark streak exactly as
     // it was — neither reset nor incremented.
-    let h3 = state.record_reconcile_checkpoint(25, 0, false);
+    let h3 = state.record_reconcile_checkpoint(25, 0, false, false);
     assert_eq!(h3.consecutive_dark, 2, "an empty checkpoint must leave consecutive_dark unchanged");
     assert_eq!(h3.checkpoints_total, 3, "an empty checkpoint still counts as a checkpoint that ran");
 
     // A successful comparison clears the streak and records the success.
-    let h4 = state.record_reconcile_checkpoint(30, 3, false);
+    let h4 = state.record_reconcile_checkpoint(30, 3, false, false);
     assert_eq!(h4.consecutive_dark, 0, "a successful checkpoint must clear the dark streak");
     assert_eq!(h4.last_success_block, 30);
     assert!(h4.last_success_unix > 0, "a real wall-clock timestamp must be recorded");
     assert_eq!(h4.comparisons_total, 3);
     assert_eq!(h4.checkpoints_total, 4);
+    assert_eq!(h4.deferred_total, 0, "none of these checkpoints were deferred");
 
     let (status, body) = get(&app, "/healthz").await;
     assert_eq!(status, StatusCode::OK);
@@ -236,6 +237,49 @@ async fn healthz_reflects_recorded_reconcile_checkpoints() {
     assert!(text.contains("reconcile_last_success_block=30"));
     assert!(text.contains("reconcile_checkpoints_total=4"));
     assert!(text.contains("reconcile_comparisons_total=3"));
+    // ADR-0036 additions: appended after `reconcile_halted`, present and
+    // zero (nothing here ever deferred or drained a reservoir).
+    assert!(text.contains("reconcile_deferred_total=0"));
+    assert!(text.contains("reconcile_reservoir_checks_total=0"));
+    assert!(text.contains("reconcile_reservoir_len=0"));
+}
+
+/// A deferred checkpoint (ADR-0036 §3) must count toward
+/// `consecutive_dark` exactly like a dark one, and must bump
+/// `deferred_total` — the distinguishing field between "attempted and
+/// failed" and "skipped by policy".
+#[tokio::test]
+async fn healthz_reflects_a_deferred_checkpoint_like_a_dark_one() {
+    let (state, _feed) = build_node();
+    state.set_reconcile_configured(true);
+
+    let h = state.record_reconcile_checkpoint(100, 0, true, true);
+    assert_eq!(h.consecutive_dark, 1, "a deferred checkpoint counts toward the dark streak");
+    assert_eq!(h.deferred_total, 1);
+
+    let h2 = state.record_reconcile_checkpoint(130, 0, true, true);
+    assert_eq!(h2.consecutive_dark, 2);
+    assert_eq!(h2.deferred_total, 2);
+}
+
+/// The reservoir gauge/counter setters are plain field writes surfaced on
+/// `/healthz` — exercised directly since `risepir-rpc`'s follow loop (the
+/// only real caller) is out of this crate's reach.
+#[tokio::test]
+async fn healthz_reflects_reservoir_gauge_and_counter() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state.clone());
+    state.set_reconcile_configured(true);
+
+    state.set_reservoir_len(5);
+    state.record_reservoir_check();
+    state.record_reservoir_check();
+
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("reconcile_reservoir_len=5"));
+    assert!(text.contains("reconcile_reservoir_checks_total=2"));
 }
 
 /// A value mismatch halts the follow loop, not `/healthz` — but the probe

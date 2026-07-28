@@ -52,7 +52,7 @@
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -160,14 +160,35 @@ pub struct MainnetConfig {
     /// trigger (bootstrap and Ctrl-C saves still happen). Only meaningful
     /// with [`Self::state`]. See ADR-0025 for why the save runs inside
     /// the follow loop rather than on its own timer task.
+    ///
+    /// The *default* (when no explicit `--save-interval` is given) is
+    /// coupled to [`Self::journal_restore`] (ADR-0037): **21600** (6 h)
+    /// when restore is on, since the journal then bounds how much a
+    /// crash costs to replay and the full save's only remaining job is
+    /// capping journal length; **1800** (30 min, ADR-0025's original
+    /// value) when restore is off, since the full save is then the only
+    /// thing bounding replay. An explicit `--save-interval` always wins
+    /// over either default — see [`Self::save_interval_explicit`].
     pub save_interval_secs: u64,
-    /// `--journal-restore` (default `false`): when a `--state` file and
+    /// Whether [`Self::save_interval_secs`] came from an explicit
+    /// `--save-interval` on the command line, as opposed to being
+    /// defaulted from [`Self::journal_restore`] (ADR-0037). Purely
+    /// informational — lets the startup summary (`main.rs`) print
+    /// "you asked for this" versus "this followed from your
+    /// `--journal-restore` setting" — and has no effect on behavior.
+    pub save_interval_explicit: bool,
+    /// `--journal-restore` / `--no-journal-restore` (default **on**,
+    /// ADR-0037 — flips ADR-0026's original opt-in-behind-a-soak default
+    /// now that the soak evidence has held up): when a `--state` file and
     /// its `.journal` sidecar both exist and the journal's header matches
     /// the file's digest, replay the journal onto the loaded state before
     /// serving starts, resuming above the base file's own height instead
-    /// of at it. Off by default: with it off, the journal is only
-    /// *scanned* (report-only — `docs/adr/README.md` ADR-0026) so an
-    /// operator can watch it accumulate real evidence before trusting it.
+    /// of at it. `--journal-restore` itself is kept as an accepted bare
+    /// flag — a no-op now that it is the default — for scripts that
+    /// already pass it and for operators who want to say so explicitly;
+    /// `--no-journal-restore` is the new off switch. Off, the journal is
+    /// only *scanned* (report-only — `docs/adr/README.md` ADR-0026)
+    /// rather than replayed.
     pub journal_restore: bool,
     /// Bootstrap empty at the current finalized block (see module docs).
     pub partial: bool,
@@ -210,11 +231,18 @@ impl Default for MainnetConfig {
             snapshot_block: None,
             snapshot_accounts: None,
             state: None,
-            // 30 min: worst-case on-disk staleness ≈ interval + one save
-            // duration, so a kill -9 costs minutes of replay instead of
-            // hours (ADR-0025 has the arithmetic and the disk-write cost).
-            save_interval_secs: 1800,
-            journal_restore: false,
+            // 6 h: with journal_restore on by default (ADR-0037), the
+            // journal — not the full save — bounds replay after an
+            // ungraceful kill, so the full save only needs to cap journal
+            // length and its own write volume. `main.rs`'s parser
+            // re-derives this pairing after every flag is read (so it
+            // resolves correctly whichever order `--save-interval` and
+            // `--journal-restore`/`--no-journal-restore` appear in); this
+            // literal only matters to a caller that builds a
+            // `MainnetConfig` directly, bypassing the CLI parser.
+            save_interval_secs: 21_600,
+            save_interval_explicit: false,
+            journal_restore: true,
             partial: false,
             partial_capacity: 4_000_000,
             proxy_upstream: None,
@@ -255,6 +283,33 @@ pub struct MainnetHandle {
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("risepir-rpc mainnet: fatal: {msg}");
     std::process::exit(1);
+}
+
+/// One-line, printed-once-per-startup summary of what the journal has
+/// actually bought since the base save (ADR-0037): its own size on disk
+/// against the base state file's, so the write-amplification saving this
+/// whole change trades on is measurable directly from the log rather than
+/// merely asserted in a doc. Called from both the `--journal-restore`
+/// ON and OFF bootstrap arms, whenever a base-matching journal was found
+/// at all (neither arm calls this for "no usable journal"). Never a
+/// per-block log — this fires exactly once, at startup.
+///
+/// Silently does nothing if either file's size cannot be `stat`ed: by the
+/// time either caller reaches this point, both files are already known to
+/// exist and have already been read/parsed successfully, so a `stat`
+/// failure here would be an extraordinary race (e.g. deleted out from
+/// under the process between then and now) — not worth a fatal error over
+/// a diagnostic log line.
+fn report_journal_savings(state_path: &Path, journal_path: &Path, record_count: u64) {
+    let (Ok(state_meta), Ok(journal_meta)) = (std::fs::metadata(state_path), std::fs::metadata(journal_path)) else {
+        return;
+    };
+    eprintln!(
+        "risepir-rpc mainnet: journal: {record_count} record(s), {} bytes since the base save (base \
+         state file is {} bytes) — restoring costs the replay, not the rewrite",
+        journal_meta.len(),
+        state_meta.len(),
+    );
 }
 
 /// What the bootstrap arm ("state file > snapshot > partial") produces,
@@ -330,9 +385,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let journal_path = journal::journal_path_for(path);
 
         if cfg.journal_restore {
-            // ── --journal-restore ON: replay onto raw parts before the
-            // store is built, so the fresh server starts at the
-            // journal's height instead of the base file's own. ──
+            // ── --journal-restore ON (default since ADR-0037): replay
+            // onto raw parts before the store is built, so the fresh
+            // server starts at the journal's height instead of the base
+            // file's own. ──
             eprintln!("risepir-rpc mainnet: loading state (--journal-restore) from {} ...", path.display());
             let started = std::time::Instant::now();
             let restored = state::load_with_journal_restore(path, backend_config.clone(), &codec, cfg.ring_capacity)
@@ -344,6 +400,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 tail_deltas,
                 adopt_at,
                 scan_stop,
+                replay_elapsed,
             } = restored;
             let plaintext_bits = server.params().plaintext_bits;
 
@@ -361,9 +418,14 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 );
             }
             if replayed > 0 {
+                // `replay_elapsed` (ADR-0037), not `started.elapsed()`:
+                // the latter also includes the base file's own read,
+                // which at the complete mainnet set is the dominant cost
+                // and one this feature does not shrink — conflating the
+                // two would inflate what "replay" appears to cost.
                 eprintln!(
-                    "risepir-rpc mainnet: journal replayed: {replayed} block(s) in {:.1}s — resuming at block {} (base was {base_block})",
-                    started.elapsed().as_secs_f64(),
+                    "risepir-rpc mainnet: journal replayed: {replayed} block(s) in {:.3}s — resuming at block {} (base was {base_block})",
+                    replay_elapsed.as_secs_f64(),
                     server.block(),
                 );
             } else if adopt_at.is_some() {
@@ -381,6 +443,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                     }
                 }
             });
+            // Measurable, not asserted (ADR-0037): one line, only when a
+            // base-matching journal actually existed to measure.
+            if adopt_at.is_some() {
+                report_journal_savings(path, &journal_path, replayed);
+            }
 
             Bootstrap {
                 server,
@@ -390,9 +457,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 tail_deltas,
             }
         } else {
-            // ── --journal-restore OFF (default): load the base exactly
-            // as before, but scan the journal read-only and report what
-            // it would have done — the soak signal (ADR-0026). ──
+            // ── --journal-restore OFF (--no-journal-restore; ADR-0037
+            // flipped the default to ON): load the base exactly as
+            // before, but scan the journal read-only and report what it
+            // would have done — the original ADR-0026 soak signal, still
+            // available for an operator who wants to opt back out. ──
             eprintln!("risepir-rpc mainnet: loading state from {} ...", path.display());
             let started = std::time::Instant::now();
             let state::LoadedState { server, complete, digest } = state::load(path, backend_config.clone(), &codec)
@@ -420,17 +489,30 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 }
                 Some(digest) => match journal::scan_report_only(&journal_path, digest, plaintext_bits, arity) {
                     Ok(Some(report)) => {
+                        // This whole branch only runs with journal-restore
+                        // OFF, which since ADR-0037 means the operator
+                        // passed --no-journal-restore explicitly (it is no
+                        // longer reachable by omission) — so the remedy is
+                        // "drop that flag", not "pass --journal-restore"
+                        // (a no-op now that it is the default).
                         match &report.stop {
                             ScanStop::Eof => eprintln!(
-                                "risepir-rpc mainnet: journal intact: {} records to block {} (--journal-restore to use)",
+                                "risepir-rpc mainnet: journal intact: {} records to block {} (drop \
+                                 --no-journal-restore to use it)",
                                 report.count, report.end_height
                             ),
                             ScanStop::Invalid { offset, reason } => eprintln!(
                                 "risepir-rpc mainnet: journal corrupt at byte {offset} ({reason}); usable prefix: \
-                                 {} records to block {} (--journal-restore to use)",
+                                 {} records to block {} (drop --no-journal-restore to use it)",
                                 report.count, report.end_height
                             ),
                         }
+                        // Measurable, not asserted (ADR-0037): one line,
+                        // regardless of whether this journal is ahead of
+                        // or matches the loaded base — either way its
+                        // on-disk size against the base file's is real,
+                        // reportable evidence.
+                        report_journal_savings(path, &journal_path, report.count);
                         // Adopt ONLY if the journal exactly matches this
                         // base and ends at height B — i.e. it was never
                         // ahead. Ahead means appending now would gap

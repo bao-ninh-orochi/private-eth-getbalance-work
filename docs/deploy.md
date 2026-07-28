@@ -275,28 +275,40 @@ one-day gap is ~2–4 h; the server answers queries the whole time, labelled wit
 its current block) → steady-state follow.
 
 Restarts are cheap: with `--state`, startup is a file load (bit-identical PIR
-parameters — previously bootstrapped clients stay valid) plus the catch-up replay
-since the save. While following, the loop rewrites the file every
-`--save-interval` seconds (default 1800, `0` disables — ADR-0025), so that
-replay is bounded by the interval: an ungraceful kill costs minutes of catch-up,
-not the whole uptime. `Ctrl-C` still saves the exact final state before exiting;
-each save logs a `state saved: block …, … GB in …s` completion line.
+parameters — previously bootstrapped clients stay valid) plus the catch-up
+replay since the save — or, with `--journal-restore` (the default since
+ADR-0037), since the journal's last replayed record, which is normally much
+more recent than the last save. While following, the loop rewrites the file
+every `--save-interval` seconds; the default is now coupled to
+`--journal-restore` (ADR-0037): **21600** (6 h) with restore on — the default —
+since the journal, not the full save, is what bounds replay after an
+ungraceful kill; **1800** (30 min, ADR-0025's original value) with restore
+off. An explicit `--save-interval` always wins over either default, and the
+startup log states which one applied. `Ctrl-C` still saves the exact final
+state before exiting; each save logs a `state saved: block …, … GB in …s`
+completion line.
 
 Beside `--state` there is always a `<state>.journal` sidecar (ADR-0026, once a
 first full save exists): one small per-block delta, appended and fsynced as
 each block applies, rotated to a fresh file bound to the new digest right
-after every save. It is *written* unconditionally; *restoring* from it needs
-`--journal-restore` (default off). Off, a restart only *scans* it and logs
-`journal intact: N records to block X (--journal-restore to use)` — a
-soak signal, not a decision — then loads and replays exactly as above,
-unaffected. On, the restart replays the journal onto the loaded state before
-serving starts and logs `journal replayed: N block(s) in T s — resuming at
-block X (base was B)`, so a kill -9 between saves costs the journal's replay
-time (well under a second per block) instead of a network catch-up. The
-payoff configuration is a long `--save-interval` (hours) once the report line
-has looked healthy for a while, plus `--journal-restore` — recovery to within
-seconds of the last applied block at a small fraction of the disk-write cost
-a short interval alone would need.
+after every save. It is *written* unconditionally. *Restoring* from it is now
+the default (`--journal-restore`, ADR-0037 — ADR-0026 shipped it opt-in,
+behind a soak period that has since held): a restart replays the journal onto
+the loaded state before serving starts and logs `journal replayed: N block(s)
+in T s — resuming at block X (base was B)` (`T` times the replay itself, never
+the base file's own read, so it is not inflated by a cost this feature does
+not shrink), so a kill -9 between saves costs the journal's replay time (well
+under a second per block) instead of a network catch-up. `--no-journal-restore`
+opts back out: a restart then only *scans* the journal and logs `journal
+intact: N records to block X (drop --no-journal-restore to use it)` — the
+original ADR-0026 soak signal, not a decision, still available to anyone who
+wants it. Either way, a clean startup that finds a usable journal also prints
+its size against the base file's once: `journal: N record(s), B bytes since
+the base save (base state file is S bytes) — restoring costs the replay, not
+the rewrite`. What used to be the opt-in payoff configuration — a long
+`--save-interval` plus `--journal-restore` — is now simply the default:
+recovery to within seconds of the last applied block at a small fraction of
+the disk-write cost a short interval alone would need.
 
 Journal-writing failures never risk correctness, only durability: a bad
 rotation logs a `WARNING` and leaves journaling off until the next successful
@@ -304,7 +316,11 @@ save retries it; a continuity gap (should one ever occur) disables journaling
 for the rest of that run. Either way the periodic full save keeps happening
 on schedule — the worst case is falling back to the previous `--save-interval`
 behavior, never a wrong answer at replay time (see ADR-0026's two failure
-classes).
+classes). A journal-*replay* failure is a different, louder case: a record
+that passes every structural check but produces an out-of-bounds cell when
+actually applied aborts the restart rather than serve a state that cannot be
+trusted, and the error names `--no-journal-restore` as the way to start from
+the base save alone instead (ADR-0037).
 
 ### 2.3 Hardware / cost
 

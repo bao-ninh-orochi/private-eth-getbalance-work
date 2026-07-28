@@ -130,6 +130,100 @@ async fn journal_replay_matches_live_apply() {
     std::fs::remove_file(&journal_path).unwrap();
 }
 
+/// **The recovery drill** — the in-process analogue of the live drill run
+/// against the GCP deployment once ADR-0037 ships (`--journal-restore`
+/// default on): a full save lands *mid-run*, at a nonzero height with
+/// real content already in it — unlike `journal_replay_matches_live_apply`
+/// above, whose base is an empty save at genesis — so "resumes at the
+/// last *applied* block, not the last *saved* one" is a real, visible
+/// distinction here rather than one that happens to hold trivially at
+/// `base_block == 0`. More blocks are then applied and journaled — never
+/// folded into a second full save — before an ungraceful kill. The
+/// restart (`state::load_with_journal_restore`, exactly the
+/// `--journal-restore`-on code path) is handed only the two files left on
+/// disk — it never touches the live `NodeState` below, which stands in
+/// for the process that held it having been killed outright — and its
+/// result must match a reference built by applying every block,
+/// start to finish, with no restart in between.
+#[tokio::test]
+async fn recovery_drill_after_a_save_and_a_crash_restores_to_the_last_applied_block() {
+    const BEFORE_SAVE: u64 = 12; // >= 7, so DELETE_TARGET's create (block 1) and delete (block 7) both land pre-save
+    const AFTER_SAVE: u64 = 18; // live only in the journal — never folded into a second full save
+    let last_applied = BEFORE_SAVE + AFTER_SAVE;
+    let base_path = tmp("recovery-drill-base.bin");
+
+    // Phase 1: real content, pre-save — a deployment that has been
+    // running a while before its most recent full save, not one saved
+    // empty at genesis.
+    let mut server = small_server();
+    for b in 1..=BEFORE_SAVE {
+        server.apply_block(&update_for(b)).unwrap();
+    }
+    assert_eq!(server.block(), BEFORE_SAVE, "sanity: phase 1 landed exactly where expected");
+
+    // The full save: what a --journal-restore restart's *base* will be.
+    let report = state::save(&server, &codec(), true, &base_path).unwrap();
+
+    // Phase 2: hand the post-save server to a live NodeState and keep
+    // applying — recorded ONLY in the journal from here on, exactly the
+    // "journal has records past the save" setup this drill needs.
+    let node = NodeState::new(server, DeltaRing::new(64), true);
+    let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
+    let journal_path = journal_path_for(&base_path);
+    let mut writer = JournalWriter::create(&journal_path, report.digest, BEFORE_SAVE, plaintext_bits).unwrap();
+    for b in (BEFORE_SAVE + 1)..=last_applied {
+        let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
+        let n_items = node.with_server(|s| s.num_items()).await;
+        writer.append(&delta, n_items).unwrap();
+    }
+    drop(writer);
+
+    // The reference: what "applying every block, start to finish, with no
+    // restart" produced. Captured now, from the still-live `node` — the
+    // restore call below never consults `node`, only the two files it
+    // just wrote to disk.
+    let (live_cells, live_setup, live_block, live_num_items) = node
+        .with_server(|s| (s.cells().to_vec(), wire::encode_setup(&s.setup()), s.block(), s.num_items()))
+        .await;
+    assert_eq!(live_block, last_applied, "sanity: the reference really did apply every block");
+
+    // The restart: the exact --journal-restore-on code path, against
+    // nothing but the base file + journal left on disk.
+    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
+    assert_eq!(restored.replayed, AFTER_SAVE, "every post-save block must have replayed");
+    assert_eq!(restored.base_block, BEFORE_SAVE, "sanity: the base really was saved mid-run, not at genesis");
+    assert!(matches!(restored.scan_stop, Some(ScanStop::Eof)));
+
+    // The assertion this whole PR exists for: the restored head is the
+    // LAST APPLIED block, never the last SAVED one — and the two must
+    // actually differ, or this drill would prove nothing.
+    assert_ne!(last_applied, restored.base_block, "sanity: last applied and last saved must differ");
+    let restored_server = restored.loaded.server;
+    assert_eq!(restored_server.block(), last_applied, "must resume at the last APPLIED block, not the last SAVED one");
+
+    // Byte-exact match against the uninterrupted reference.
+    assert!(restored.loaded.complete);
+    assert_eq!(restored_server.num_items(), live_num_items);
+    assert_eq!(restored_server.cells(), &live_cells[..], "cells must be byte-exact");
+    assert_eq!(wire::encode_setup(&restored_server.setup()), live_setup, "hints/params/block must be byte-exact");
+
+    // Spot-check individual balances on both sides of the save: the
+    // target created in phase 1 and deleted before the save (must stay
+    // deleted, never resurrected by replay), and the address credited by
+    // the very last replayed block (exercises the journal path itself).
+    let deleted_addr = keccak256(&DELETE_TARGET);
+    assert_eq!(restored_server.balance_of(&deleted_addr).unwrap(), None, "deleted account must read back None");
+    assert_eq!(node.balance_of(&deleted_addr).await.unwrap(), None, "sanity: the live reference agrees");
+
+    let credited_addr = keccak256(&[(last_applied % 40) as u8; 20]);
+    let expected_credited = node.balance_of(&credited_addr).await.unwrap();
+    assert!(expected_credited.is_some(), "sanity: the last block's credited address must be tracked");
+    assert_eq!(restored_server.balance_of(&credited_addr).unwrap(), expected_credited, "credited account must agree");
+
+    std::fs::remove_file(&base_path).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
+}
+
 /// A torn tail (file cut mid-record) must restore to the last good
 /// height, not error the whole load or silently skip past the tear; then
 /// `adopt` + further appends must produce a journal that restores

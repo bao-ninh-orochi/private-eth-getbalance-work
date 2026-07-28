@@ -84,6 +84,8 @@ async fn run_mainnet(cfg: MainnetConfig) {
     }
     let state_path = cfg.state.clone();
     let save_interval = cfg.save_interval_secs;
+    let save_interval_explicit = cfg.save_interval_explicit;
+    let journal_restore = cfg.journal_restore;
     let handle = mainnet::spawn(cfg).await;
 
     println!("RisePIR private eth_getBalance — Ethereum mainnet");
@@ -108,7 +110,19 @@ async fn run_mainnet(cfg: MainnetConfig) {
     if state_path.is_some() {
         println!();
         if save_interval > 0 {
-            println!("State autosave: every {save_interval}s while following (--save-interval; 0 disables).");
+            // ADR-0037: the effective value always prints, and whether it
+            // came from the operator or from --journal-restore's own
+            // setting — a silent default is exactly what made deploy.md
+            // and CLAUDE.md go stale the first time this coupling shipped.
+            let provenance = if save_interval_explicit {
+                "explicit --save-interval".to_string()
+            } else {
+                format!(
+                    "default for --journal-restore {} — pass --save-interval to override",
+                    if journal_restore { "on" } else { "off" }
+                )
+            };
+            println!("State autosave: every {save_interval}s while following ({provenance}; 0 disables).");
             println!("Ctrl-C also saves state before exiting.");
         } else {
             println!("State autosave: DISABLED (--save-interval 0). Ctrl-C still saves state before exiting.");
@@ -231,6 +245,13 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
     // ahead of or behind it — and subsequent occurrences append, building
     // the fallback chain left to right.
     let mut feed_url_seen = false;
+    // Tracked separately from `cfg.save_interval_secs` itself so the
+    // default can be resolved *after* every flag has been read (ADR-0037):
+    // the effective default depends on where `cfg.journal_restore` ends
+    // up, and that flag may appear before or after `--save-interval` on
+    // the command line — resolving eagerly would make the two flags'
+    // relative order matter, which they must not.
+    let mut save_interval_explicit = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -238,9 +259,19 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--snapshot-block" => cfg.snapshot_block = Some(parse_next(args, &mut i, "--snapshot-block")),
             "--snapshot-accounts" => cfg.snapshot_accounts = Some(parse_next(args, &mut i, "--snapshot-accounts")),
             "--state" => cfg.state = Some(next_value(args, &mut i, "--state").into()),
-            "--save-interval" => cfg.save_interval_secs = parse_next(args, &mut i, "--save-interval"),
+            "--save-interval" => {
+                cfg.save_interval_secs = parse_next(args, &mut i, "--save-interval");
+                save_interval_explicit = true;
+            }
             "--journal-restore" => {
+                // Kept accepted, and bare — a no-op now that this is the
+                // default (ADR-0037) — for scripts that already pass it
+                // and for operators who want to say so explicitly.
                 cfg.journal_restore = true;
+                i += 1;
+            }
+            "--no-journal-restore" => {
+                cfg.journal_restore = false;
                 i += 1;
             }
             "--partial" => {
@@ -284,6 +315,15 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             other => unknown(other),
         }
     }
+    // Resolve --save-interval's default only now that every flag has been
+    // read (ADR-0037): --journal-restore/--no-journal-restore may have
+    // appeared before or after --save-interval, in either order, with
+    // identical results either way. An explicit --save-interval always
+    // wins over the default, whichever way --journal-restore ended up.
+    cfg.save_interval_explicit = save_interval_explicit;
+    if !save_interval_explicit {
+        cfg.save_interval_secs = if cfg.journal_restore { 21_600 } else { 1_800 };
+    }
     cfg
 }
 
@@ -319,7 +359,8 @@ fn print_usage() {
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--web <dir>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
-    eprintln!("                      [--state <file>] [--save-interval <secs>] [--journal-restore]");
+    eprintln!("                      [--state <file>] [--save-interval <secs>]");
+    eprintln!("                      [--journal-restore] [--no-journal-restore]");
     eprintln!("                      [--partial] [--partial-capacity <N>]");
     eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
@@ -328,12 +369,19 @@ fn print_usage() {
     eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
     eprintln!();
     eprintln!("mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial.");
-    eprintln!("--save-interval (default 1800, 0 = off) bounds how far the --state file can fall behind");
-    eprintln!("the running server: the follow loop rewrites it that many seconds after the previous");
-    eprintln!("save finished, so an ungraceful kill replays minutes, not the whole uptime (ADR-0025).");
     eprintln!("--state also always writes a <state>.journal delta sidecar once a first full save exists");
-    eprintln!("(ADR-0026). --journal-restore (default off) replays it at startup, resuming above the");
-    eprintln!("last full save instead of at it; off, it is only scanned and reported (soak signal).");
+    eprintln!("(ADR-0026): one small per-block delta, appended and fsynced as each block applies.");
+    eprintln!("--journal-restore (default ON, ADR-0037) replays it at startup, resuming above the last");
+    eprintln!("full save instead of at it; --no-journal-restore turns that off, falling back to only");
+    eprintln!("*scanning* and reporting the journal (`journal intact: N records ...`, the original");
+    eprintln!("ADR-0026 soak signal) without replaying it. --journal-restore itself stays accepted as a");
+    eprintln!("bare flag — a no-op now that it is the default — for scripts and explicitness.");
+    eprintln!("--save-interval (0 = off) bounds how far the --state file can fall behind the running");
+    eprintln!("server: the follow loop rewrites it that many seconds after the previous save finished.");
+    eprintln!("Its default is coupled to --journal-restore (ADR-0037): 21600 (6h) when restore is on,");
+    eprintln!("since the journal then bounds an ungraceful kill's replay cost, not the full save; 1800");
+    eprintln!("(30 min, ADR-0025) when restore is off, since the full save is what bounds it there. An");
+    eprintln!("explicit --save-interval always wins over either default.");
     eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
     eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
     eprintln!("--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind");
@@ -421,13 +469,14 @@ mod tests {
         );
     }
 
-    /// `--save-interval` parses, and its default matches ADR-0025's
-    /// choice (30 min) — an accidental `0` default would silently
+    /// `--save-interval` parses explicit values, including the `0`
+    /// (disable) sentinel — an accidental change here would silently
     /// reintroduce the unbounded-staleness behavior this flag exists to
-    /// bound.
+    /// bound. What it defaults to when *omitted* is coupled to
+    /// `--journal-restore` since ADR-0037 — see
+    /// `save_interval_default_is_coupled_to_journal_restore_but_explicit_always_wins`.
     #[test]
-    fn save_interval_parses_and_defaults_on() {
-        assert_eq!(parse_mainnet(&args(&["--partial"])).save_interval_secs, 1800);
+    fn save_interval_parses_explicit_values_including_zero() {
         assert_eq!(
             parse_mainnet(&args(&["--partial", "--save-interval", "60"])).save_interval_secs,
             60
@@ -438,17 +487,70 @@ mod tests {
         );
     }
 
-    /// `--journal-restore` is a bare flag, default off (ADR-0026): the
-    /// soak posture — an operator opts in only once the report-only scan
-    /// has shown a healthy journal for a while.
+    /// `--journal-restore` is a bare flag, default **on** (ADR-0037 flips
+    /// ADR-0026's original opt-in-behind-a-soak default now that the soak
+    /// evidence has held up). Kept accepted — a no-op now — for scripts
+    /// that already pass it and for explicitness.
     #[test]
-    fn journal_restore_is_a_bare_flag_defaulting_off() {
-        assert!(!parse_mainnet(&args(&["--partial"])).journal_restore);
+    fn journal_restore_is_a_bare_flag_defaulting_on() {
+        assert!(parse_mainnet(&args(&["--partial"])).journal_restore);
         assert!(parse_mainnet(&args(&["--partial", "--journal-restore"])).journal_restore);
         // Must not consume a following value as its own argument.
         let cfg = parse_mainnet(&args(&["--journal-restore", "--partial-capacity", "42"]));
         assert!(cfg.journal_restore);
         assert_eq!(cfg.partial_capacity, 42);
+    }
+
+    /// `--no-journal-restore` is the new off switch (ADR-0037) — also a
+    /// bare flag, consuming no value, exactly like `--journal-restore`.
+    #[test]
+    fn no_journal_restore_is_a_bare_flag_that_turns_it_off() {
+        assert!(!parse_mainnet(&args(&["--partial", "--no-journal-restore"])).journal_restore);
+        // Must not consume a following value as its own argument either.
+        let cfg = parse_mainnet(&args(&["--no-journal-restore", "--partial-capacity", "42"]));
+        assert!(!cfg.journal_restore);
+        assert_eq!(cfg.partial_capacity, 42);
+    }
+
+    /// `--save-interval`'s default is coupled to `--journal-restore`
+    /// (ADR-0037): restore on (the new default) widens it to 6 h, since
+    /// the journal — not the full save — now bounds replay after an
+    /// ungraceful kill; restore off keeps ADR-0025's original 30 min. An
+    /// explicit `--save-interval` always wins over either default, and
+    /// the resolution must not depend on which of the two flags appears
+    /// first on the command line. All four combinations pinned here.
+    #[test]
+    fn save_interval_default_is_coupled_to_journal_restore_but_explicit_always_wins() {
+        // 1. journal-restore ON (default) + no explicit --save-interval -> 6h.
+        let cfg = parse_mainnet(&args(&["--partial"]));
+        assert!(cfg.journal_restore);
+        assert!(!cfg.save_interval_explicit);
+        assert_eq!(cfg.save_interval_secs, 21_600);
+
+        // 2. journal-restore OFF + no explicit --save-interval -> 30 min.
+        let cfg = parse_mainnet(&args(&["--partial", "--no-journal-restore"]));
+        assert!(!cfg.journal_restore);
+        assert!(!cfg.save_interval_explicit);
+        assert_eq!(cfg.save_interval_secs, 1_800);
+
+        // 3. journal-restore ON + explicit --save-interval -> explicit wins.
+        let cfg = parse_mainnet(&args(&["--partial", "--save-interval", "300"]));
+        assert!(cfg.journal_restore);
+        assert!(cfg.save_interval_explicit);
+        assert_eq!(cfg.save_interval_secs, 300);
+
+        // 4. journal-restore OFF + explicit --save-interval -> explicit wins.
+        let cfg = parse_mainnet(&args(&["--partial", "--no-journal-restore", "--save-interval", "300"]));
+        assert!(!cfg.journal_restore);
+        assert!(cfg.save_interval_explicit);
+        assert_eq!(cfg.save_interval_secs, 300);
+
+        // Order must not matter: --save-interval given *before*
+        // --no-journal-restore must resolve identically to combination 4.
+        let cfg = parse_mainnet(&args(&["--partial", "--save-interval", "300", "--no-journal-restore"]));
+        assert!(!cfg.journal_restore);
+        assert!(cfg.save_interval_explicit);
+        assert_eq!(cfg.save_interval_secs, 300);
     }
 
     /// The repeatable flag must not have disturbed its neighbours.

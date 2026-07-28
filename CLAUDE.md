@@ -149,20 +149,26 @@ gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
    --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
 ```
 
-While following, the server rewrites the state file every 30 min by default
-(`--save-interval <secs>`, `0` disables — ADR-0025), so a crash or missed
-Ctrl-C replays at most the last interval, not the whole uptime. Every save
-logs a `state saved: block …, … GB in …s` completion line.
+While following, the server rewrites the state file every `--save-interval`
+seconds — default **21600** (6 h) now that `--journal-restore` defaults **on**
+(ADR-0037: the journal, not the full save, is what bounds replay after an
+ungraceful kill), or **1800** (30 min, ADR-0025's original value) if
+`--no-journal-restore` is passed; an explicit `--save-interval` always wins
+over either default. A crash or missed Ctrl-C then replays at most the
+journal's tail (well under a second per block) rather than the whole
+interval. Every save logs a `state saved: block …, … GB in …s` completion
+line.
 
 Beside it sits `<state>.journal` (ADR-0026): one small per-block delta,
 appended and fsynced as each block applies, rotated to a fresh file at every
-save. Always written once a first save exists. Restoring from it needs
-`--journal-restore` (default off) — off, a restart only scans and reports it
-(`journal intact: N records to block X`), the soak signal before trusting it;
-on, a restart replays it and resumes above the last save's height instead of
-at it. The payoff is a long `--save-interval` (hours) once that report has
-looked healthy for a while, recovering to seconds instead of minutes at a
-fraction of the disk-write cost.
+save. Always written once a first save exists. Restoring from it is now the
+default (`--journal-restore`, ADR-0037 — ADR-0026 shipped it opt-in behind a
+soak period that has since held without a single corruption report): a
+restart replays it and resumes above the last save's height instead of at
+it, recovering to seconds instead of minutes at a fraction of the disk-write
+cost. `--no-journal-restore` opts back out — a restart then only scans and
+reports it (`journal intact: N records to block X`), the original ADR-0026
+soak signal, still available to anyone who wants it.
 
 The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
 signalling it never involves a wrapper shell. `--web web` is what serves the

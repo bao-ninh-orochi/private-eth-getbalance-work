@@ -1843,3 +1843,131 @@ has genuinely aged out of the delta ring: `/sync` answers `409`, and the page
 still says to reload, because there a fresh hint really is the only sound
 recovery. ADR-0029's "not covered: the browser front end" is now covered for
 stalls; the aged-out case remains a reload by design.
+
+### ADR-0037 — `--journal-restore` becomes the default; `--save-interval` widens with it **[NEW — flips ADR-0026's opt-in-behind-a-soak default now that the soak has held]**
+
+**Chosen:** `--journal-restore` now defaults **on**. The flag itself stays
+accepted — a no-op, since it is now the default — for scripts that already
+pass it and for operators who want to say so explicitly; a new
+`--no-journal-restore` is the off switch, restoring ADR-0026's original
+report-only behavior (`journal intact: N records to block X`). Both are bare
+flags, consuming no value, exactly like their predecessor. `--save-interval`'s
+own default is now *coupled* to that setting: **21600 s (6 h)** when restore is
+on, **1800 s (30 min, ADR-0025's original value)** when it is off — an explicit
+`--save-interval` always wins over either default, in whichever order the two
+flags are given. The startup summary and `--help` both print the resolved
+value and say whether it was defaulted or explicit, so which of the two
+defaults fired is never left to be inferred. A clean startup that finds a
+usable journal now also prints its size against the base file's, once, e.g.:
+
+```
+risepir-rpc mainnet: journal: 11 record(s), 3942 bytes since the base save (base state file is 24176139523 bytes) — restoring costs the replay, not the rewrite
+```
+
+— and the "journal replayed" line now times *only* the replay loop
+(`RestoredState::replay_elapsed`), not the base file's own read, so the number
+it reports is not inflated by a cost this change does nothing to shrink. Both
+`RestoreError` variants `load_with_journal_restore` can fail with now name
+`--no-journal-restore` in their own `Display`, so the operator is told the
+remedy by the error itself, not left to find it in a doc.
+
+**Rejected:** *leaving the default off and just widening `--save-interval`
+manually per deployment* — the whole point is that an operator has to
+remember to do that correctly, twice, on every fresh box, and the live
+complete-set deployment already proved that "remember to flip a flag later"
+does not happen (`--journal-restore` had never once been switched on since
+ADR-0026 shipped it). *Decoupling `--save-interval`'s default from
+`--journal-restore` entirely* (e.g. defaulting it to 21600 unconditionally) —
+would silently reintroduce the unbounded-replay exposure ADR-0025 exists to
+bound, for anyone who explicitly opts back out with `--no-journal-restore`;
+the two defaults must move together or the flag stops meaning what it says.
+*Auto-falling-back to the base save on `RestoreError::ApplyFailure`* instead of
+aborting — serving from a base the operator never chose, silently, the moment
+replay looks suspect, is a worse failure mode than a loud abort: this repo's
+whole posture is that erroring is fine and a silent surprise is not, and an
+automatic fallback is still a silent surprise, just a smaller one.
+
+**The problem, measured** (live deployment, 2026-07-28): the complete-set state
+file is 24,176,139,523 B (24.18 GB); at the unconditional pre-ADR-0037 default
+of 1800 s, the follow loop rewrites all of it roughly every 32 minutes, each
+save costing 121–128.6 s at 188–200 MB/s (the exact range §5.4/§5.5 already
+measured live: 123.4 s at 196 MB/s, 128.6 s at 188 MB/s). That is ~45 saves/day
+≈ **1.1 TB written per day**, entirely to buy a bound on replay that the
+journal has been capable of buying — at roughly 1/1000th the bytes — since
+ADR-0026 shipped.
+
+**What the soak evidence actually was, and why it now suffices.** ADR-0026
+framed `--journal-restore` as deliberately opt-in: *"an operator opts in only
+once the report-only scan has shown a healthy journal for a while"* — it did
+not have the soak period yet when it was written. That period has now run, and
+what it consists of is stated plainly rather than rounded up:
+
+1. **The write path has been unconditionally live since ADR-0026 landed**, and
+   the report-only scan it left running — `journal intact: N records to block
+   X (--journal-restore to use)` — has come back clean on every restart of the
+   live complete-set deployment since its 2026-07-27 re-bootstrap onto
+   `(arity 2, bucket_size 4)`; it has never once reported corruption in
+   production. That calendar window is short in absolute days, which is
+   exactly why the next two points, not elapsed wall-clock time alone, are
+   what actually carries this decision.
+2. **The failure surface is now exhaustively pinned, not merely exercised.**
+   14 unit tests (`journal.rs`) and, after this change, 11 integration tests
+   (`tests/journal.rs`, up from 7 at ADR-0026's own writing) cover header
+   corruption, base mismatch, torn tails, mid-file bit flips, height gaps,
+   oversized lengths (both the absolute cap and the independent
+   remaining-file-size bound), the digest-matches-but-block-doesn't
+   cross-check, a row-straddling offset, and the apply-time bound violation —
+   plus `fuzz/fuzz_targets/journal_scan.rs` against arbitrary bytes, run
+   nightly. The specific new one this change adds,
+   `recovery_drill_after_a_save_and_a_crash_restores_to_the_last_applied_block`,
+   is the in-process rehearsal of exactly the live drill this PR's author runs
+   next: save mid-run (not at empty genesis), apply more blocks into the
+   journal alone, "crash" (drop down to nothing but the two files on disk),
+   reload with restore on, and require the restored head to be the last
+   *applied* block, byte-exact against a reference that never restarted at
+   all.
+3. **The failure mode this soak is standing in for is bounded by design, not
+   by trust.** Every way a journal can be wrong degrades to one of exactly two
+   shapes, both already true before this change and untouched by it: a
+   pre-apply defect (bad checksum, decode error, height gap, torn tail)
+   *stops at the last good record* and is never silently skipped past
+   (`ScanStop::Invalid`); an apply-time defect (a record that passes every
+   pre-apply check but would drive a cell out of bounds) refuses to serve at
+   all (`RestoreError::ApplyFailure`) rather than guess which prefix is still
+   good. Flipping the *default* changes how often this code path runs in
+   production; it changes nothing about what happens when it is wrong. The
+   worst case was, and remains, a loud abort — never a wrong balance served.
+
+**Why this is safe even so — the real backstop is elsewhere and untouched.**
+The independent-provider reconciliation loop (ADR-0027) is what actually
+guards against a *wrong* answer reaching a caller, and it runs on its own
+cadence (`--reconcile-every`, default every 30 blocks ≈ 6 minutes of chain
+time) — entirely independent of `--save-interval` or `--journal-restore`. A
+hypothetical replay divergence subtle enough to pass every structural and
+apply-time check in this journal would still have to survive the very next
+reconcile checkpoint to go undetected, and a mismatch there halts the follow
+loop immediately (serving frozen at the last good block, CRITICAL logged).
+Widening `--save-interval` to 6 h therefore does not widen the window in which
+a wrong balance could be *served* — it only widens how much journal a restart
+might have to replay, which the evidence above puts at seconds, not minutes,
+per thousands of blocks.
+
+**Not fixed by this change, stated plainly:** the graceful-shutdown save still
+streams and checksums the entire cells array — still ~121–128.6 s at the
+complete mainnet set's 24.18 GB, unchanged by anything here — and the base
+state file itself still has to be read in full on *every* start, restore on or
+off; the journal shortens what has to be *replayed* after an ungraceful kill,
+it does not touch what has to be *read*. Both remain exactly the costs
+ADR-0025's autosave and this ADR's `--save-interval` widening are bounding
+around, not eliminating.
+
+**Evidence.** All pre-existing coverage (ADR-0025's, ADR-0026's) is unchanged
+and still passes. New for this change: parser tests for `--journal-restore`'s
+new bare-flag default-on behavior, `--no-journal-restore` as its mirror, and
+all four `(--journal-restore on/off) × (--save-interval explicit/defaulted)`
+combinations, including that flag order does not affect the resolved value
+(`crates/risepir-rpc/src/main.rs`); and the integration-level recovery drill
+described above (`crates/risepir-rpc/tests/journal.rs`). `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` all pass — see
+this change's commit for the literal output.

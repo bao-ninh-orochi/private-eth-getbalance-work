@@ -43,6 +43,7 @@
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend, SimplePirBackend};
 use risepir_http::wire;
@@ -548,8 +549,28 @@ pub enum RestoreError {
 impl std::fmt::Display for RestoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::State(e) => write!(f, "{e}"),
-            Self::ApplyFailure(m) => write!(f, "journal replay apply-time failure: {m}"),
+            // `State` can originate either from the base file itself
+            // (before the journal is even opened — `--no-journal-restore`
+            // would hit the identical failure) or from `assemble`
+            // *after* a structurally-valid journal has been replayed onto
+            // it (where `--no-journal-restore` genuinely is the fix,
+            // ADR-0037). This function cannot tell those apart from here,
+            // but naming the flag costs an operator nothing in the first
+            // case (the same error recurs, now unambiguously pointing at
+            // the base file) and fixes the second, so it is named either
+            // way.
+            Self::State(e) => write!(
+                f,
+                "{e} — if this happened while --journal-restore was replaying the journal onto the \
+                 base, restart with --no-journal-restore to load the base state file alone, without \
+                 the journal, and confirm whether the base file or the journal is at fault"
+            ),
+            Self::ApplyFailure(m) => write!(
+                f,
+                "journal replay apply-time failure: {m} — the journal is the suspect, not the base \
+                 file; restart with --no-journal-restore to load the base state file alone (the \
+                 journal is left on disk, untouched, for inspection)"
+            ),
         }
     }
 }
@@ -587,6 +608,16 @@ pub struct RestoredState {
     pub adopt_at: Option<(u64, u64)>,
     /// Why the journal scan stopped, if a journal was consulted at all.
     pub scan_stop: Option<ScanStop>,
+    /// Wall-clock time spent actually replaying records onto the raw
+    /// cells/hints (ADR-0037) — deliberately excludes both the base
+    /// file's own read (`load_raw`, above; often the dominant cost at the
+    /// complete mainnet set, and this change does nothing to shrink it)
+    /// and the final store-assembly step, so the number the startup log's
+    /// "journal replayed ... in Ns" line reports is never inflated by
+    /// costs the journal itself has no bearing on. `Duration::ZERO` when
+    /// no journal was consulted (mirrors [`Self::replayed`] being `0` in
+    /// that case).
+    pub replay_elapsed: Duration,
 }
 
 /// Applies one block's per-segment cell deltas directly to a flat cell
@@ -715,6 +746,7 @@ pub fn load_with_journal_restore(
             tail_deltas: Vec::new(),
             adopt_at: None,
             scan_stop: None,
+            replay_elapsed: Duration::ZERO,
         });
     };
 
@@ -727,6 +759,13 @@ pub fn load_with_journal_restore(
 
     let mut tail: std::collections::VecDeque<BlockDelta> = std::collections::VecDeque::new();
     let mut replayed = 0u64;
+    // Timed separately from the base file's read above and `assemble`
+    // below (ADR-0037): this is specifically what the startup log's
+    // "journal replayed ... in Ns" line now reports, so that number is
+    // never inflated by the (usually much larger, at the complete
+    // mainnet set) cost of reading the base file — a cost this feature
+    // does nothing to reduce.
+    let replay_started = Instant::now();
 
     for rec in reader.by_ref() {
         apply_delta_in_place(&mut raw.cells, &raw.setup.params, &rec.delta).map_err(RestoreError::ApplyFailure)?;
@@ -749,6 +788,7 @@ pub fn load_with_journal_restore(
             tail.pop_front();
         }
     }
+    let replay_elapsed = replay_started.elapsed();
 
     let scan_stop = reader.stop().cloned();
     let adopt_at = Some((reader.valid_end_offset(), reader.last_valid_height()));
@@ -760,6 +800,7 @@ pub fn load_with_journal_restore(
         tail_deltas: tail.into_iter().collect(),
         adopt_at,
         scan_stop,
+        replay_elapsed,
     })
 }
 

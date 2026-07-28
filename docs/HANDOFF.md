@@ -119,9 +119,26 @@ the superseded `(3,4)` lineage is stale.
   `--hard-refresh` run past what the audit samples is still an operator
   judgment call. See ADR-0040 for the full measurement and
   `docs/deploy.md` §2.1/§2.2 for the procedure.
+- **`--hard-refresh` has no rate-limit backoff, and it matters** *(new,
+  found by running it against the live deployment 2026-07-28 — deploy.md
+  §5.6)*. It issues two reads per address at a fixed concurrency of 8 with
+  no backoff. Against the keyless public endpoints it *defaults to*, that
+  gets refused: a 57,646-address run logged **67,791 fetch failures**
+  (essentially all `HTTP 429`) and skipped **50,813 of 57,646 addresses**,
+  correcting 2,633 accounts (3,105.08 ETH of absolute error) out of the
+  6,833 it managed to get a quorum on. It fails safely — no quorum means no
+  write, never a wrong value — and it is idempotent, so re-running picks up
+  the skipped remainder. But an 88% skip rate means one pass does not finish
+  the job, and the fix is small: adaptive backoff on 429, a
+  `--refresh-concurrency` flag, or batched JSON-RPC (most providers accept
+  batches, which would cut the request count ~100×). Do this before the next
+  correction run rather than re-running the storm.
 - **Withdrawal-recipient hard refresh** (deploy.md §4): a one-time absolute
   re-read of the ~32 k withdrawal recipient addresses vs an archive RPC, to
-  clear any credit ambiguity at the snapshot join. Small utility; not built.
+  clear any credit ambiguity at the snapshot join. Partly superseded:
+  `--hard-refresh` *is* that utility now, and the 2026-07-28 run included
+  12,004 withdrawal recipients from the 20,000-block window — but the full
+  ~32 k set has not been swept.
 - The catch-up replay is serial (~1–2 s/block); Xatu balance-diff chunks
   (`docs/data-acquisition.md` path 3) would bulk-replay the snapshot→head gap if
   the join gets long.

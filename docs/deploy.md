@@ -1327,6 +1327,197 @@ reconciliation still passes (8 accounts exact per checkpoint, continuously), so
 the cross-provider safety net is up — but its deeper-history half has been dead
 since publicnode tightened that policy.
 
+### 5.6 The five-problem round: redeploy, the journal drill, and the snapshot correction (2026-07-28)
+
+Repo at `7fcc392` — PRs #31–#35 (ADR-0036 … ADR-0040) merged and deployed in one
+pass. What follows is the recorded output, not a summary of it.
+
+#### The export is wrong, the deployment much less so, and the gap is the whole story
+
+§5.4 recorded that the BigQuery export is "not exact at its own boundary" and
+guessed the suspect population was small and boundary-local. Both halves of that
+guess were wrong, and `bq show` says why: `crypto_ethereum.balances` is a
+**materialized table, "updated daily"** (ethereum-etl, 453,102,032 rows,
+`lastModifiedTime` 2026-07-27) with **no block-number column**. It has one
+effective height per daily rebuild, and §2.1's gate query merely *assumes* that
+height is the previous UTC day's close. The assumption can fail **in either
+direction**.
+
+Method for everything below: for each block in a window ending at
+B = 25,613,233, fold `debug_traceBlockByNumber` (prestate tracer, diffMode) to
+each account's absolute post-state at its last touch ≤ B — that value *is* its
+balance at B — then diff against the exported CSV rows. The fold was checked
+against `gateway.tenderly.co`'s archive `eth_getBalance(a, B)` on 5 of 5 probed
+accounts before being trusted.
+
+| population | measured |
+|---|---|
+| 600 random **exported rows** vs chain at B (tenderly ∧ blastapi, both must agree; 0 dropped) | **2 wrong → 0.33%**, Wilson 95% CI [0.09%, 1.21%] |
+| 1,346,000 accounts trace-touched in (B−20000, B] | **31,200 wrong rows + 14,442 funded-but-absent**, plus 12,004 withdrawal-only recipients |
+| 200 random exported rows vs the **live server** at its head | **0 wrong of 200**, CI [0.00%, 1.88%] |
+| 150 *known-wrong* window rows vs the live server | **28 still wrong** — 18.7%, CI [13.2%, 25.7%] |
+| 100 *known funded-but-absent* accounts vs the live server | **22 still served as `0x0` while funded** — 22.0%, CI [15.0%, 31.1%] |
+
+Wrong-rate by depth of last touch before B does **not** decay to zero: 27.99% at
+depth ≤1, 16.28% at (5,10], 12.66% at (50,100], 7.83% at (250,500], 6.62% at
+(500,1000], 3.04% across (1000,20000].
+
+Those last three rows are the finding. **The export's error is not the
+deployment's error**, and quoting one as the other overstates the live risk by
+about an order of magnitude — but the residual is real, and a uniform sample
+cannot see it: 0/200 is exactly what ~0.2% of 200.5 M looks like at n=200. One
+explanation covers both:
+
+- **Export ahead of B** — the row reflects state *after* B, so the account was
+  touched in (B, h]; the ordinary forward replay re-applies absolute post-state
+  over exactly that range and it **heals**. This is the ~80% that healed, and a
+  rewind is irrelevant to it.
+- **Export behind B** — the row reflects state *before* B, so the account changed
+  in (h, B]; the forward replay from B+1 never revisits that range and the row is
+  wrong **permanently**. This is the ~19–22% residual, and it is precisely and
+  only what `--snapshot-rewind` reaches backward for.
+
+Concretely, from the residual sample:
+`0x67e11115a4173beda9ce1818de6dd2bbc57f7f80` was served as **0.017472 ETH** when
+the chain says **0.000000** — emptied before B, in a range the replay never goes
+back to. `0xcd7f7cc5e7d037ef9fc9940e64fd083800518c94` was served as `0x0` while
+holding 0.000742 ETH.
+
+Largest single export error found: the beacon deposit contract
+`0x00000000219ab540356cbb839cbe05303d7705fa` — export 88,453,361.5383 ETH,
+chain 88,593,844.4457 ETH, **+140,482.91 ETH**.
+
+#### The journal recovery drill — proven, not assumed
+
+ADR-0026 shipped `<state>.journal` in 2026-07 and nobody had ever switched
+restoring on. ADR-0037 made it the default; this is the drill that justified it,
+run on the live box against the real 24.18 GB state file.
+
+```
+# graceful stop first, so the base save is known exactly
+risepir-rpc mainnet: state saved (shutdown): block 25630477, 24.18 GB in 121.4s (199 MB/s)
+risepir-rpc mainnet: state saved; exiting
+
+# restart on the new binary
+risepir-rpc mainnet: state loaded in 25.1s — block 25630477, 200819779 accounts, complete set
+risepir-rpc mainnet: journal matched the base but had nothing new to replay
+State autosave: every 21600s while following (default for --journal-restore on — pass --save-interval to override; 0 disables).
+
+# ... 32 blocks applied, then a deliberate `pkill -9` — no save, no chance to save
+HEAD BEFORE KILL: ok 25630509
+killed -9 (no graceful save)
+
+# restart
+risepir-rpc mainnet: state loaded in 12.3s — block 25630509, 200820858 accounts, complete set
+risepir-rpc mainnet: journal replayed: 32 block(s) in 0.177s — resuming at block 25630509 (base was 25630477)
+risepir-rpc mainnet: journal: 32 record(s), 318497 bytes since the base save (base state file is 24176139523 bytes)
+```
+
+It resumed at the last **applied** block (25,630,509), not the last **saved** one
+(25,630,477). The 32 blocks cost **0.177 s** to replay from the journal against
+roughly 32 s to re-fetch them from the feed, and the journal that bought it is
+**318,497 bytes against a 24,176,139,523-byte state file** — a ~76,000× write
+reduction for the same recovery point.
+
+Write volume, the reason any of this matters: at the old unconditional 1800 s
+interval the box rewrote 24.18 GB roughly every 32 minutes — ~45 saves/day,
+**≈1.1 TB/day**. At the new 21600 s default it is 4 saves/day, **≈97 GB/day**,
+plus a journal running about 10 KB/block (~72 MB/day). Recovery got *better* at
+the same time, not worse.
+
+#### The correction applied, and what it did not reach
+
+The 20,000-block window's diff produced a 57,646-address list (funded-but-absent
+first, then wrong rows by descending error, then withdrawal recipients), fed to
+`--hard-refresh`. Its own report:
+
+```
+hard-refresh: done at block 25630606 — 57646 checked, 6833 agreed, 50813 skipped
+(disagreement or fetch error), 4200 already correct, 2633 corrected,
+3105078215573031991516 wei total absolute correction.
+```
+
+**2,633 accounts corrected, 3,105.08 ETH of absolute error removed** from the
+served set — every one of them written only where `gateway.tenderly.co` and
+`eth-mainnet.public.blastapi.io` independently returned the same value at the
+same explicit height, and only where that value differed from what was stored.
+
+Verified afterwards against **`ethereum-rpc.publicnode.com`** — a third provider,
+neither of the two that produced the corrections — at block 25,630,669: the first
+60 addresses of the list (the ones processed before throughput degraded) are
+**60/60 byte-exact**.
+
+**What it did not reach, stated plainly.** 50,813 of 57,646 addresses were
+skipped, and 67,791 fetch failures were logged, essentially all
+`HTTP 429 Too Many Requests` from both keyless providers: `--hard-refresh`
+issues two reads per address at a fixed concurrency of 8 and has no backoff, so
+against keyless public endpoints it spends most of its budget being refused. It
+fails *safely* — no quorum means no write, never a wrong value — and it is
+idempotent, so a re-run picks up what was skipped. But as shipped it is
+inefficient against exactly the endpoints it defaults to, and that is a real
+defect found by deploying it, not a tuning nicety. A sample of the *unprocessed*
+remainder still shows 15 of 25 funded-but-absent and 10 of 25 wrong rows
+disagreeing with publicnode, which is what an 88% skip rate looks like.
+
+#### `Range` resume works through Caddy, in production
+
+The interesting risk was the reverse proxy, not the handler. Against the public
+origin:
+
+```
+etag="setup-a29c909422165ae4-25630605"
+
+# matching If-Range
+HTTP/2 206
+content-range: bytes 100-131/553819345
+content-length: 32
+
+# stale If-Range — must NOT splice two regenerations
+HTTP/2 200
+content-length: 553819345
+```
+
+32 bytes instead of 553,819,345, and a stale validator correctly refuses the
+range and serves the whole bundle. Two identical range requests returned
+byte-identical data. `accept-ranges: bytes` is present on the full response.
+
+The epoch was **unchanged across the whole redeploy** (`a29c909422165ae4`), so
+every client holding a cached hint kept it — which is what ADR-0038's cache
+exists for.
+
+#### Health at a glance, publicly
+
+`GET /metrics` and `GET /status` are live on the public origin. First scrape
+after the redeploy:
+
+```
+risepir_build_info{version="0.1.0",epoch="a29c909422165ae4",mode="complete"} 1
+risepir_head_block 25630509
+risepir_finalized_block 25630509
+risepir_block_lag 0
+risepir_store_items 200820858
+risepir_store_load_factor 0.7481159940361977
+risepir_state_save_configured 1
+```
+
+`GET /healthz`'s first line is still byte-for-byte `ok <block>`, now followed by
+ADR-0036's three `reconcile_*` additions and ADR-0040's `snapshot_audit=` line.
+
+One gauge worth knowing before reading the dashboard: with a 6 h save interval,
+`risepir_state_save_last_*` all read `0` for hours after a restart, because no
+save has happened yet in that process. `risepir_state_save_configured 1` is what
+distinguishes that from "not configured".
+
+#### An incidental observation, recorded because it looked like a fault and was not
+
+For ~20 minutes mid-redeploy the server's head sat still at 25,630,637 with
+`risepir_block_lag 0`. That is not a stall: `publicnode`, `tenderly`, `merkle`
+and `drpc` all independently reported `finalized` = 25,630,637 while the public
+`latest` was 25,630,729 — **Ethereum's own finality was 92 blocks behind**. This
+deployment follows `finalized` by design (ADR-0007), so a finality lag looks
+exactly like a stalled head unless you check. `risepir_finalized_block` is the
+field that tells the two apart, and it is new in ADR-0039.
+
 ## 6. Who does what, explicitly
 
 | step | who | needs |

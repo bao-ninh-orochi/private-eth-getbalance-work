@@ -1485,6 +1485,31 @@ The epoch was **unchanged across the whole redeploy** (`a29c909422165ae4`), so
 every client holding a cached hint kept it — which is what ADR-0038's cache
 exists for.
 
+#### The hint cache, against the real 553.82 MB deployment
+
+Mock cannot answer the question that actually mattered — whether a browser will
+accept a **553 MB** IndexedDB write at all, or refuse it on quota. So
+`web/test/browser.mjs` was run against the public origin, real Brave, real
+complete set:
+
+```
+ok    a second visit boots successfully from the cached hint
+ok    ...with no body-bearing GET /setup at all — the whole point of caching the hint
+      cached reboot: 5050 ms wall clock (navigate → query box visible); page says:
+      "Ready in 2.9 s — 553.8 MB of hint held locally (loaded from this browser's
+       cache), pinned at finalized block 25630701."
+ok    the ready line says the hint came from this browser's cache
+ok    a lookup completes after the cached boot
+ok    ...and matches the original session's answer for the same address exactly
+ok    no Content-Security-Policy violations
+PASS: 0 failing checks
+```
+
+**341.9 s on the original report, 2.9 s on return** — and zero bytes of hint on
+the wire the second time. The quota question is answered: 553.8 MB was accepted,
+not refused. The post-cache lookup returning byte-identical answers to the
+pre-cache session is the check that matters for correctness, not speed.
+
 #### Health at a glance, publicly
 
 `GET /metrics` and `GET /status` are live on the public origin. First scrape

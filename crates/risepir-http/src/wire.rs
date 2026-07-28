@@ -148,6 +148,30 @@ impl From<CodecError> for WireError {
     }
 }
 
+impl WireError {
+    /// This variant's name, and *only* its name — never a formatted
+    /// message. This module's `Display` impl above routinely embeds
+    /// attacker-influenced values (a declared segment length, a scheme
+    /// byte); a variant name is a closed set fixed by this enum's own
+    /// definition, which is what makes it safe to expose as a Prometheus
+    /// label value (`risepir_request_errors_total{class=…}`, `crate::node`'s
+    /// `/metrics`, ADR-0039) regardless of what bytes produced the error.
+    /// An exhaustive match (no wildcard arm), so a future new variant
+    /// cannot be added without this being updated too.
+    pub fn metric_class(&self) -> &'static str {
+        match self {
+            Self::BadMagic => "BadMagic",
+            Self::UnexpectedEof => "UnexpectedEof",
+            Self::BadScheme(_) => "BadScheme",
+            Self::ArityMismatch { .. } => "ArityMismatch",
+            Self::SegmentLengthMismatch { .. } => "SegmentLengthMismatch",
+            Self::InvalidSimpleParams { .. } => "InvalidSimpleParams",
+            Self::TrailingBytes => "TrailingBytes",
+            Self::Codec(_) => "Codec",
+        }
+    }
+}
+
 // ─── fixed-size field readers ────────────────────────────────────────────
 //
 // Every read here is bounds-checked via `slice::get`, which returns `None`

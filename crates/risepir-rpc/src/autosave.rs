@@ -126,6 +126,18 @@ struct SaverInner {
     /// rotation is not trusted to be free of whatever caused it either —
     /// never a silently wrong answer.
     journal_broken: bool,
+    /// Records successfully appended to the *current* journal since it was
+    /// last created/adopted — `GET /metrics`'s `risepir_journal_records_since_save`
+    /// (ADR-0039, [`StateSaver::journal_status`]). Reset to `0` every time
+    /// a rotation successfully starts a fresh journal
+    /// ([`StateSaver::save_with`]); incremented once per successful
+    /// [`StateSaver::append_delta`] call (a skipped shutdown-race append,
+    /// or one that hit an error, does not increment it — see that
+    /// method's own docs for why those two cases write nothing). This is
+    /// this *process's own* count since start/last rotation, not
+    /// necessarily the on-disk journal's full depth at a resumed restart
+    /// — see [`StateSaver::journal_status`]'s docs for that distinction.
+    journal_records_since_save: u64,
 }
 
 /// What a [`StateSaver`] call did — returned so callers (and tests) can
@@ -149,6 +161,20 @@ pub enum SaveOutcome {
     /// Another save is currently running ([`StateSaver::maybe_save`]
     /// never waits — the next loop iteration will try again).
     Busy,
+}
+
+/// [`StateSaver::journal_status`]'s return value — the current journal's
+/// depth (this process's own running count since it was created/adopted,
+/// **not** necessarily the on-disk file's full depth at a resumed
+/// restart — see `SaverInner::journal_records_since_save`'s docs for
+/// why those two numbers are allowed to differ) and whether it has been
+/// permanently disabled this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalStatus {
+    /// Records appended since the current journal's last rotation.
+    pub records_since_save: u64,
+    /// The `journal_broken` latch.
+    pub broken: bool,
 }
 
 impl StateSaver {
@@ -190,6 +216,13 @@ impl StateSaver {
                 last_finished: Instant::now(),
                 journal: initial_journal,
                 journal_broken: false,
+                // Deliberately `0` even when `initial_journal` is an
+                // adopted/resumed journal that already carries records
+                // ahead of its base — see the field's own docs for why
+                // this counts only what *this process* appends, not the
+                // on-disk journal's full depth at startup (the one-time
+                // startup log line already reports that number once).
+                journal_records_since_save: 0,
             }),
         }
     }
@@ -197,6 +230,18 @@ impl StateSaver {
     /// The configured interval (zero = periodic saves disabled).
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// Snapshot of the current journal's depth and health — what the
+    /// follow loop publishes into `risepir_http::NodeState` for
+    /// `GET /metrics` (ADR-0039, `NodeState::record_journal_status`) after
+    /// every [`Self::append_delta`] call.
+    pub async fn journal_status(&self) -> JournalStatus {
+        let guard = self.inner.lock().await;
+        JournalStatus {
+            records_since_save: guard.journal_records_since_save,
+            broken: guard.journal_broken,
+        }
     }
 
     /// Appends `delta` (with the item count immediately after applying
@@ -224,36 +269,45 @@ impl StateSaver {
         let Some(writer) = guard.journal.as_mut() else {
             return; // no journal active right now (nothing has rotated yet, or a rotation failed)
         };
-        if let Err(e) = writer.append(delta, num_items_after) {
-            // A *backward* gap (`found < expected`) is not a failure: it is
-            // the shutdown/append race. The follow loop commits block N in
-            // memory, then heads here to journal it; if a SIGINT-triggered
-            // `save_now` wins the mutex in between, that save is taken at
-            // height N (it reads the in-memory state, which includes N) and
-            // rotates the journal to a fresh one whose base is N — so by the
-            // time this parked append resumes, the delta it carries is
-            // already *inside the base* the new journal hangs off, and the
-            // journal on disk is exactly correct without it. `append` wrote
-            // zero bytes for a Gap (checked before any I/O), so skipping is
-            // clean, journaling stays enabled for the blocks that follow,
-            // and no misleading "disabling journaling" WARNING fires during
-            // a perfectly healthy shutdown. A *forward* gap
-            // (`found > expected`) still means a block went missing between
-            // the journal's tail and this delta — a real continuity break a
-            // replay would silently jump, so that (and any I/O error, which
-            // may have torn the tail) still disables journaling loudly.
-            if let crate::journal::JournalError::Gap { expected, found } = e {
-                if found < expected {
-                    return;
+        match writer.append(delta, num_items_after) {
+            // `risepir_journal_records_since_save` (ADR-0039,
+            // `Self::journal_status`) — only the genuine success path
+            // increments it; a skipped shutdown-race append (below) or a
+            // disabling failure must not.
+            Ok(()) => guard.journal_records_since_save += 1,
+            Err(e) => {
+                // A *backward* gap (`found < expected`) is not a failure: it
+                // is the shutdown/append race. The follow loop commits block
+                // N in memory, then heads here to journal it; if a
+                // SIGINT-triggered `save_now` wins the mutex in between, that
+                // save is taken at height N (it reads the in-memory state,
+                // which includes N) and rotates the journal to a fresh one
+                // whose base is N — so by the time this parked append
+                // resumes, the delta it carries is already *inside the base*
+                // the new journal hangs off, and the journal on disk is
+                // exactly correct without it. `append` wrote zero bytes for a
+                // Gap (checked before any I/O), so skipping is clean,
+                // journaling stays enabled for the blocks that follow, and no
+                // misleading "disabling journaling" WARNING fires during a
+                // perfectly healthy shutdown. A *forward* gap
+                // (`found > expected`) still means a block went missing
+                // between the journal's tail and this delta — a real
+                // continuity break a replay would silently jump, so that
+                // (and any I/O error, which may have torn the tail) still
+                // disables journaling loudly.
+                if let crate::journal::JournalError::Gap { expected, found } = e {
+                    if found < expected {
+                        return;
+                    }
                 }
+                eprintln!(
+                    "risepir-rpc mainnet: WARNING: journal append failed ({e}) — disabling journaling for \
+                     the rest of this run; state saves continue on schedule (--save-interval), so durability \
+                     degrades to that cadence, never to a wrong answer"
+                );
+                guard.journal = None;
+                guard.journal_broken = true;
             }
-            eprintln!(
-                "risepir-rpc mainnet: WARNING: journal append failed ({e}) — disabling journaling for \
-                 the rest of this run; state saves continue on schedule (--save-interval), so durability \
-                 degrades to that cadence, never to a wrong answer"
-            );
-            guard.journal = None;
-            guard.journal_broken = true;
         }
     }
 
@@ -337,7 +391,12 @@ impl StateSaver {
                 // resurrected here — see `journal_broken`'s docs.
                 if !guard.journal_broken {
                     match JournalWriter::create(&self.journal_path, *digest, *block, self.plaintext_bits) {
-                        Ok(w) => guard.journal = Some(w),
+                        Ok(w) => {
+                            guard.journal = Some(w);
+                            // A fresh journal starts empty — see
+                            // `risepir_journal_records_since_save`'s docs.
+                            guard.journal_records_since_save = 0;
+                        }
                         Err(e) => {
                             guard.journal = None;
                             eprintln!(

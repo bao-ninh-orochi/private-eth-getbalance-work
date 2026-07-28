@@ -73,6 +73,12 @@
 pub mod client;
 #[cfg(feature = "server")]
 pub mod node;
+// `/metrics` rendering (ADR-0039) — pure data + string building, used only
+// by `node`'s handler; `pub(crate)` because nothing outside this crate
+// needs it (the integration test in `tests/metrics.rs` drives the real
+// `GET /metrics` HTTP route, not this module directly).
+#[cfg(feature = "server")]
+pub(crate) mod metrics;
 #[cfg(feature = "server")]
 pub mod web;
 pub mod wire;

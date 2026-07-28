@@ -2310,3 +2310,268 @@ since that sub-test's own question — does consent actually trigger the
 network fetch it gates — is now a different question from whether caching
 works, and conflating the two would have made a passing cache hit look like
 a broken gate).
+
+### ADR-0039 — `GET /metrics` (hand-rolled Prometheus text) and `GET /status`; the answer-latency histogram is timing-side-channel-safe by construction **[NEW — closes roadmap C4]**
+
+**Chosen:** a `GET /metrics` route on the existing PIR router
+(`crates/risepir-http/src/node.rs`), rendering Prometheus text exposition
+format from a small, dependency-free helper module
+(`crates/risepir-http/src/metrics.rs`: `# HELP`/`# TYPE`/`name{labels}
+value`, a hand-rolled label-value escaper, and a cumulative histogram type
+— all unit-tested directly against hand-built fixtures). Every field is an
+aggregate — a counter, a gauge, or a histogram bucket over *all* requests
+this process has served, never one query's own data:
+
+- `risepir_head_block`, `risepir_finalized_block`, `risepir_block_lag` —
+  the number this ADR exists for (see "Why", below). The follow loop
+  already computed `finalized` every iteration and threw it away
+  (`crates/risepir-rpc/src/mainnet.rs`'s `follow_loop`); it now calls the
+  new `NodeState::set_finalized`, the same "only the follow loop knows
+  this, so it publishes it" shape `set_reconcile_configured` already used.
+- `risepir_answer_duration_seconds` — a histogram timed around
+  `RisePirServer::answer(&queries)` **only**, inside the `/answer`
+  handler — not the lock acquisition, not the wire decode/encode. See the
+  timing-side-channel analysis below for why this specific boundary is
+  load-bearing, not cosmetic.
+- `risepir_requests_total{route,outcome}` /
+  `risepir_request_errors_total{route,class}` — counters, applied via one
+  global `tower::Layer` (`track_metrics`, added once in
+  `NodeState::router_with_web`) rather than threaded through every
+  handler body. `route` comes from a fixed, hand-maintained literal match
+  on the request path (`route_label`) — deliberately **not**
+  `axum::extract::MatchedPath` (see the type's own doc comment for why:
+  its availability depends on framework-internal layer-ordering details
+  this module should not have to get right for "which of ten known
+  routes was this", and a hand-maintained match is one line to extend and
+  is checked directly by this crate's own tests). Any path outside the
+  known set — including every 404 an attacker's probe generates — folds
+  to `"unmatched"`, never the raw path, so the label's cardinality is
+  fixed at compile time regardless of what a caller sends. `class` is
+  always an error **variant name** — `ServerError::metric_class`
+  (`crates/risepir-server/src/error.rs`), `WireError::metric_class`
+  (`crates/risepir-http/src/wire.rs`), or a small set of fixed
+  `&'static str` reasons for this crate's own non-taxonomy refusals
+  (`EpochMismatch`, `EpochMissing`, `BadQuery`, `OutOfWindow`,
+  `NotRetained`) — carried from decode site to the router's one
+  middleware via a server-internal `Response` extension (`ErrorClass`,
+  never serialized to the wire) — **never** a formatted `Display`
+  message, which can embed attacker-supplied lengths/offsets/segment
+  indices. `ClientError::metric_class` (`crates/risepir-http/src/client.rs`)
+  is added for taxonomy completeness (the brief for this change named all
+  three error types together) but is **not wired to anything today**: a
+  `ClientError` is what `PirHttpClient` returns to a caller acting as a
+  *client* (the JSON-RPC front end calling this deployment's own PIR
+  transport over loopback), and `/metrics` lives on the PIR server's own
+  router, which never produces one. Instrumenting the JSON-RPC surface
+  (`:8545`) is a separate, out-of-scope change; the method is there so
+  that change does not have to invent the mapping.
+- `risepir_store_items`/`risepir_store_capacity`(+ derived
+  `risepir_store_load_factor`), `risepir_setup_bytes`/
+  `risepir_setup_regenerations_total` (the latter is the existing
+  `NodeState::setup_generation` `AtomicUsize`, ADR-0028, now read by a
+  second caller), and every `reconcile_*` field `GET /healthz` already
+  reports (ADR-0027), rendered as proper gauges/counters instead of
+  `key=value` text lines.
+- `risepir_state_save_*` / `risepir_journal_*` — the follow loop
+  translates its own `SaveOutcome`/journal state into plain values and
+  pushes them into `NodeState` (`record_save_outcome`/
+  `record_save_failure`/`record_journal_status`, mirroring
+  `set_reconcile_configured`'s pattern) because `risepir-http` cannot
+  depend on `risepir-rpc` (the reverse of this workspace's actual
+  dependency direction) to name `StateSaver`/`JournalWriter` directly.
+  `risepir_journal_records_since_save` is deliberately scoped to *this
+  process's own* count since its journal was last created/adopted, not
+  the on-disk file's full depth at a resumed restart — the one-time
+  startup log line (`report_journal_savings`) already reports that
+  number once; duplicating it as a live gauge would need `JournalWriter`
+  to carry a `base` field it does not have today, for a number this
+  gauge does not need to be exact about.
+- `risepir_build_info{version,epoch,mode}` (value `1`) and
+  `risepir_process_uptime_seconds`.
+
+`GET /metrics` never triggers a `/setup` cache regeneration as a side
+effect of being scraped (`NodeState::cached_setup_bytes` peeks the cache's
+current size without calling `setup_bytes`, which would pay the ~831 MB
+re-encode at the deployed complete-mainnet geometry) and takes `inner`'s
+read lock only long enough to read three plain values (`block()`,
+`num_items()`, `params()`) — the same discipline `GET /healthz`/`GET
+/head` already use. None of the new counters/histogram/finalized/save-state
+fields live inside `inner`'s `RwLock` — each is its own separately-locked
+field on `NodeState` (a `std::sync::Mutex` for the counters and save state,
+following `ReconcileHealth`'s own precedent of never being held across an
+`.await`; an `AtomicU64` for `finalized`), so a `/metrics` scrape can never
+queue behind `/answer` traffic and vice versa.
+
+`GET /healthz`'s first line stays byte-identical (`ok <head>`); every
+existing field and test is unchanged. `GET /metrics` is additive.
+
+A second small page, `GET /status` (`web/status.html` + `web/status.js` +
+`web/status.css`), reuses the existing static-asset mechanism
+(`crates/risepir-http/src/web.rs`'s `MANIFEST` — three new entries, no new
+mechanism) rather than inventing one: it polls `/metrics` every 5 seconds
+with a hand-rolled parser mirroring the Rust writer (no dependency either
+side) and renders head/finalized block and lag (an obvious visual state as
+the lag grows — amber past 5 blocks, red past 60, both against a plain
+number so the state is never color-only), uptime, mode/epoch, store
+occupancy, answer-latency quantiles (the standard linear-interpolation-
+within-bucket estimate over the histogram), per-route request/error
+counts, reconcile health, and the last state-save/journal outcome. It is
+its own CSS file rather than sharing `web/style.css`, for two reasons: that
+stylesheet is deliberately single-light-theme by its own header comment,
+while this page is asked to work in both light and dark; and inline
+`<style>` is blocked by this origin's existing CSP (`style-src 'self'`,
+no `'unsafe-inline'`) exactly as inline `<script>` is (`script-src
+'self'`) — the brief's "you need a separate `.js` file" reasoning applies
+identically to styling, so a third file, not two, is the correct minimum.
+`/status` is served only when `--web <dir>` is passed, same as the main
+page — `/metrics` carries no such gate, since it is core to `NodeState`'s
+router rather than part of the browser front end.
+
+**Rejected:**
+
+- **Growing `GET /healthz` instead of adding `GET /metrics`.** `/healthz`
+  is already this crate's one deliberate exception to the
+  binary-everywhere-else wire discipline (ADR-0006), justified there as
+  "a handful of counters does not earn a second format" (ADR-0027). A
+  histogram, per-route counters, and a save/journal snapshot are no
+  longer a handful — `key=value` text has no native way to express
+  labeled series or cumulative buckets without reinventing Prometheus's
+  own format by hand, badly. `/healthz` stays exactly what it is: a
+  liveness probe a monitor's health check can `curl` and grep one line
+  from; `/metrics` is a superset for anything that wants to actually
+  *look*.
+- **Pulling in the `prometheus` or `metrics` crate.** The format this
+  change needs is a dozen lines of string building; `deny.toml` already
+  denies unknown registries and git sources, and every dependency in this
+  workspace is either already present or a pinned git rev to the one
+  private upstream — a new crate (plus its own transitive graph) for
+  something this mechanical is a worse trade than fifteen minutes of
+  `write!` calls, and it is the same "hand-roll it, no dependency"
+  argument the rest of this crate's wire codec already makes (ADR-0006).
+- **Keeping this operator-only behind the existing SSH tunnel.** The
+  stated requirement (below) was explicitly to *stop needing* SSH plus a
+  hand-rolled `curl` loop to answer "is the follow loop behind" — an
+  operator-only metrics endpoint reachable only via a tunnel would have
+  changed nothing about the 2026-07-28 incident this ADR responds to.
+  Public exposure is instead a stated, audited trade (see below), not an
+  oversight.
+
+**Why.** Diagnosing a user report on 2026-07-28 required SSH-ing to the
+VM, tailing `~/server-complete.log`, and hand-rolling two `curl` probe
+loops for 35 minutes just to establish the server was fine (this is the
+same incident ADR-0035 investigated from the browser-client side;
+this ADR is the operator-visibility half). `GET /healthz` reported the
+head block and reconcile health and nothing else — no block lag (the
+actual number that mattered), no answer latency, no error counts.
+`docs/roadmap.md` C4 ("Observability") scoped exactly this gap. The
+single number that would have shortened that diagnosis to one glance is
+`risepir_block_lag` (`risepir_finalized_block` against
+`risepir_head_block`) — which is why the follow loop's own already-
+computed `finalized` value, previously discarded every poll, is the
+first thing this change publishes.
+
+**Timing-side-channel analysis (why a latency histogram cannot leak the
+queried bucket).** `RisePirServer::answer` (`crates/risepir-server/src/server.rs`)
+loops over every segment and, for each, calls `B::server_answer` with the
+**entire** segment slice — `cells[start..start + seg_cells]` — regardless
+of query content:
+
+```rust
+for (j, query) in queries.iter().enumerate() {
+    let start = j * seg_cells;
+    let r = B::server_answer(&self.backend_params[j], &cells[start..start + seg_cells], segment_size, row_width, query);
+    responses.push(r);
+}
+```
+
+This is the whole point of PIR — the server must fold over its entire
+account set to answer at all, so which bucket the query's ciphertext
+happens to select is invisible to anything measuring wall-clock time:
+the matvec kernel underneath runs the identical amount of arithmetic over
+the identical amount of memory for every possible query, at a given
+deployment's fixed geometry. The one early-exit path in this function,
+`ServerError::MalformedQuery` (wrong segment *count*, not content —
+checked "before any segment is touched" per that method's own doc
+comment), is unreachable from `POST /answer`'s HTTP path in practice:
+`wire::decode_query_bundle` already validates the wire-declared segment
+count against `params.arity()` before `RisePirServer::answer` is ever
+called, so by construction every query that reaches the timed call
+already has the exact expected arity. The histogram in `crate::node`'s
+`answer` handler times the call unconditionally (both the `Ok` and the
+practically-unreachable `Err` branch), so there is no conditional
+recording that could itself become a side channel. **What would falsify
+this:** any future change to `RisePirServer::answer` (or the backend's
+`server_answer`) that adds a data-dependent early exit or a
+content-conditional loop bound — e.g. an optimization that skips
+segments a query's own selector does not touch. Nothing in this codebase
+does that today, and if it ever does, this histogram's safety argument
+must be re-derived, not assumed to still hold; that is exactly the kind
+of change `docs/threat-model.md`'s own header asks to update the model in
+the same commit.
+
+**Public exposure is a decision, not an accident.** Caddy currently
+proxies *everything* on the PIR port to the internet
+(`ops/caddy/Caddyfile`, deploy.md §3.7), so `/metrics` and `/status` are
+public on the live deployment the moment this ships. `docs/threat-model.md`
+§5 already declares traffic analysis / timing correlation **undefended**
+for this deployment — a network observer already sees query rate, timing,
+and source IP for free. This change does not worsen that status; what it
+changes is that the same order-of-magnitude metadata (request rate by
+route, error rate, block lag, store size) no longer requires a network
+position to obtain — anyone can just ask. Threat model §5 and §8 are
+updated in this same commit to say so plainly, and `ops/caddy/Caddyfile`
+gets a commented-out one-line stanza (`respond /metrics* 404`) showing how
+to take it back without touching the binary, for a deployment that wants
+the endpoints operator-only again.
+
+**Privacy audit — what was checked.** Every new field added to
+`NodeState` and every line `crate::metrics::render` emits was reviewed
+against one rule: an aggregate over all requests, never one query's own
+data.
+
+- No address, key hash, or bucket/segment index is read, stored, or
+  rendered anywhere in `metrics.rs` or the new `NodeState` fields —
+  grep confirms the only `[u8; 20]`/`AddressHash`-typed values this
+  change touches are the pre-existing `note_recent`/`balance_of`
+  call sites, untouched by this diff.
+- `risepir_requests_total`/`risepir_request_errors_total`'s labels are
+  `&'static str` literals from a closed, compile-time-fixed set (route
+  names, `"ok"`/`"error"`, error variant names) — never a `String` built
+  from request bytes, which would let a client inflate the map's key
+  count or smuggle request content into a label.
+- The answer-latency histogram takes only a `Duration` — see the timing
+  analysis above for why that duration itself cannot vary with query
+  content.
+- `crates/risepir-http/src/metrics.rs`'s own unit tests include a blunt
+  tripwire (`nothing_rendered_looks_address_or_hex_blob_shaped`):
+  no 40+-hex-digit run (a 20-byte address, hex-encoded) may appear
+  anywhere in rendered output. `crates/risepir-http/tests/metrics.rs`
+  repeats the same check one layer up, over the real router-served body
+  after real `/answer` traffic against a real seeded account — not just
+  a hand-built fixture.
+
+**What this does NOT fix.** Rate limiting and per-IP quotas for `/metrics`/
+`/status` themselves are not added here — they inherit whatever the
+reverse proxy in front of this deployment already does (or does not) for
+every other route, which `docs/threat-model.md` §3/§8 already documents as
+partial. Federation/long-term storage of these metrics (a real Prometheus
+server scraping this endpoint) is out of scope — this change is the
+*exposition*, not a monitoring stack. The quantiles `/status` computes
+from histogram buckets are the standard linear-interpolation estimate, not
+exact percentiles — stated on the page itself, not just here.
+
+**Evidence.** `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, and `RUSTDOCFLAGS="-D warnings" cargo doc
+--workspace --no-deps` all pass. New tests: 13 unit tests in
+`crates/risepir-http/src/metrics.rs` (escaping, histogram cumulativity,
+well-formedness, the division-by-zero guard on load factor, the
+address-shape tripwire) and 4 integration tests in
+`crates/risepir-http/tests/metrics.rs` driving the real router (well-formed
+exposition text over real traffic, monotonic buckets with `_count` matching
+the exact number of `/answer` calls made, request/error counters reflecting
+a real `BadMagic` decode failure, and the same address-shape tripwire over
+the router-served body). `node web/test/e2e.mjs`/`browser.mjs` against a
+live mock deployment both still pass unmodified (0 failing checks each) —
+`/metrics`/`/status` are additive and do not touch the query path those
+gates exercise. A real `curl /metrics` against a running `mock --web web`
+deployment is pasted in this change's PR description/commit message.

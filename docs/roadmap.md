@@ -26,7 +26,7 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 | Toolchain | pinned 1.96.0; MSRV declared; rustfmt.toml present (gate deferred, §2 item 10) |
 | TLS | **live** — Caddy + Let's Encrypt in front of a loopback-only `:8645` (`ops/caddy/Caddyfile`, deploy.md §3.7); public origin verified 13/13 + 20/20 |
 | Rate limiting | **none** beyond the `/setup` cap |
-| Observability | still `println!`/`eprintln!` only — zero `tracing`, zero metrics (§2 item 2) |
+| Observability | `GET /metrics` (Prometheus text) + `GET /status` (a polling page) ship block lag, answer latency, error rate by class, store occupancy, save/journal outcomes (ADR-0039, §2 item 2); logging is still `println!`/`eprintln!` only — no `tracing` |
 | Panic audit | **not done** — `clippy::unwrap_used`/`expect_used` not yet enabled (§2 item 1) |
 
 **One key still missing:** CI needs the `IKPIR_TOKEN` secret (fine-grained
@@ -73,10 +73,21 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
    `#[allow]`-with-justification each site. ~330 sites; the value is the
    reviewed enumeration, not deletions. Prioritize anything reachable from
    network input; test modules get a blanket allow. 2–3 days.
-2. **C4 — Observability.** `tracing` + Prometheus (block lag, answer
-   latency, error rate *by class* — the taxonomy already exists, store
-   occupancy, state-save outcomes). Today health beyond `/healthz`'s head
-   number means SSH + reading a log. 2–3 days.
+2. ~~**C4 — Observability.**~~ **Largely done 2026-07-28** — `GET /metrics`
+   (hand-rolled Prometheus text exposition, no new dependency) and
+   `GET /status` (a small polling operator page, same web-asset mechanism
+   as the browser front end) ship block lag (`risepir_finalized_block`
+   against `risepir_head_block` — the number that would have shortened the
+   2026-07-28 diagnosis from 35 minutes of SSH + hand-rolled `curl` loops to
+   one glance), an answer-latency histogram (timed around
+   `RisePirServer::answer` only, timing-side-channel-safe by construction —
+   ADR-0039's own analysis), error rate *by class* (`ServerError`/
+   `WireError`'s existing taxonomies), store occupancy, and state-save/
+   journal outcomes (ADR-0039). What is *not* done: `tracing` /
+   structured logging — this deployment's logs are still `println!`/
+   `eprintln!` text, and federating `/metrics` into an actual Prometheus
+   server (as opposed to exposing the exposition format) is left to
+   whoever operates one.
 3. **A3 — Feed integrity middle rung.** Full quorum needs a second keyless
    *trace* provider (publicnode serves no traces), which does not exist
    today; the achievable rung is full-coverage per-block reconciliation —
@@ -136,7 +147,7 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
 
 Unchanged from v1: the PoC's value is that it is *honest*. Every item above
 either makes an existing guarantee legible, enforced, or extended — nothing
-gets built half-way to look production-ish. If only three more things get
-done: **B3** (the audit that proves the panic-free claim), **C4** (the
-ability to see the system), and **A3's middle rung** (the last stretch of
-never-wrong-answer).
+gets built half-way to look production-ish. **C4** (the ability to see the
+system) landed 2026-07-28; if only two more things get done from what
+remains: **B3** (the audit that proves the panic-free claim) and **A3's
+middle rung** (the last stretch of never-wrong-answer).

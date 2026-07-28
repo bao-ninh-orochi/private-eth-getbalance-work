@@ -1,0 +1,300 @@
+/* GET /status (ADR-0039) — deliberately its own small stylesheet rather
+   than reusing web/style.css: that one is single-theme by design (see its
+   own header comment), and this operator page is asked to read well in
+   both light and dark. Dependency-free, same as style.css — this origin's
+   CSP (`style-src 'self'`, no `'unsafe-inline'`) rules out an inline
+   <style> block the same way it rules out an inline <script>, which is
+   why this is a separate file rather than embedded in status.html. */
+
+:root {
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --ink: #17181b;
+  --muted: #5c6067;
+  --line: #e3e2dd;
+  --line-strong: #c4c2ba;
+  --accent: #0c7285;
+
+  --ok: #187a41;
+  --ok-soft: rgba(24, 122, 65, 0.09);
+  --warn: #8a5c04;
+  --warn-soft: rgba(138, 92, 4, 0.1);
+  --err: #b53329;
+  --err-soft: rgba(181, 51, 41, 0.08);
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --panel: #1b1e24;
+    --ink: #eceef1;
+    --muted: #98a0ab;
+    --line: #2b2f36;
+    --line-strong: #3a3f48;
+    --accent: #5fd3e8;
+
+    --ok: #63d391;
+    --ok-soft: rgba(99, 211, 145, 0.12);
+    --warn: #e0b34c;
+    --warn-soft: rgba(224, 179, 76, 0.12);
+    --err: #f0776d;
+    --err-soft: rgba(240, 119, 109, 0.12);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 3rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.page {
+  max-width: 56rem;
+  margin: 0 auto;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.95rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.55rem;
+}
+
+.brand-name {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.brand-sub {
+  font-family: var(--mono);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.masthead-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.poll-state {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.poll-state.is-err {
+  color: var(--err);
+}
+
+.back-link {
+  font-size: 0.82rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  max-width: 46rem;
+  margin: 1.1rem 0;
+}
+
+.alert {
+  border: 1px solid var(--err);
+  background: var(--err-soft);
+  border-radius: 4px;
+  padding: 0.7rem 0.9rem;
+  color: var(--err);
+  font-size: 0.85rem;
+  margin: 0 0 1.1rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1.1rem 1.3rem 1.3rem;
+  margin-bottom: 1.1rem;
+}
+
+.panel h2 {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.9rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.9rem;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.tile-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tile-value {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+#lag-tile.is-warn .tile-value {
+  color: var(--warn);
+}
+
+#lag-tile.is-err .tile-value {
+  color: var(--err);
+}
+
+table.kv {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+table.kv th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--muted);
+  padding: 0.4rem 0.8rem 0.4rem 0;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+table.kv td {
+  padding: 0.4rem 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
+table.kv tr:not(:last-child) th,
+table.kv tr:not(:last-child) td {
+  border-bottom: 1px dotted var(--line);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  font-family: var(--mono);
+}
+
+table.data th,
+table.data td {
+  text-align: left;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+table.data td.errclasses {
+  white-space: normal;
+  color: var(--muted);
+}
+
+table.data tbody tr:last-child th,
+table.data tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.05rem 0.45rem;
+  border-radius: 3px;
+}
+
+.tag-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.tag-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.tag-err {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+.fine {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0.7rem 0 0;
+}
+
+footer {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.8rem;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}

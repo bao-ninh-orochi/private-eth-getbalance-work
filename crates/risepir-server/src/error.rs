@@ -134,3 +134,27 @@ impl fmt::Display for ServerError {
 }
 
 impl std::error::Error for ServerError {}
+
+impl ServerError {
+    /// This variant's name, and *only* its name — never a formatted
+    /// message. A message can embed attacker-influenced data (a query
+    /// count, a block number); a variant name is a closed set fixed by
+    /// this enum's own definition, which is what makes it safe to expose
+    /// as a Prometheus label value (`risepir_request_errors_total{class=…}`,
+    /// `risepir-http`'s `/metrics`, ADR-0039) regardless of what input
+    /// produced the error. Kept next to the enum it classifies rather than
+    /// in the metrics crate, so a future new variant cannot be added here
+    /// without this match being updated too (an exhaustive match, no
+    /// wildcard arm).
+    pub fn metric_class(&self) -> &'static str {
+        match self {
+            Self::Encode(_) => "Encode",
+            Self::TableFull => "TableFull",
+            Self::NonMonotonicBlock { .. } => "NonMonotonicBlock",
+            Self::MalformedQuery { .. } => "MalformedQuery",
+            Self::FingerprintAmbiguity { .. } => "FingerprintAmbiguity",
+            Self::CorruptStoredValue => "CorruptStoredValue",
+            Self::Store(_) => "Store",
+        }
+    }
+}

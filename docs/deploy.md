@@ -825,6 +825,28 @@ threat model §4.2 and §8.
   consecutive dark checkpoints (~2h, `mainnet.rs`'s
   `DARK_ESCALATION_THRESHOLD`), so this need not be polled continuously, but
   a dashboard on these fields catches it sooner.
+- **`GET /metrics` and `GET /status` (ADR-0039)** answer "is the follow loop
+  behind, and by how much" without SSH-ing in and tailing a log — the gap
+  that took 35 minutes to close by hand on 2026-07-28. `/metrics` is
+  Prometheus text exposition (`text/plain; version=0.0.4`, hand-rolled, no
+  new dependency): `risepir_head_block`/`risepir_finalized_block`/
+  `risepir_block_lag` (the single most useful number — the follow loop's
+  own `finalized` poll, previously discarded every iteration, now
+  published), an answer-latency histogram, per-route request/error
+  counters (`class` is always a fixed `ServerError`/`WireError` variant
+  name, never a formatted message), store occupancy, `/setup` cache
+  regenerations, state-save/journal outcomes, and every `reconcile_*`
+  field above, as proper gauges/counters instead of `key=value` text.
+  `curl -s <host>:8645/metrics` works from any box with network access to
+  the PIR port. `/status` (served only with `--web`, same mechanism as the
+  browser front end) is the same data as a small page that polls
+  `/metrics` every 5 s — open it in a browser instead of reaching for
+  `curl`. Both are public wherever Caddy proxies the whole PIR port, as it
+  already does (§3.7) — every field is an aggregate, never per-query, but
+  see `docs/threat-model.md` §5/§8 for what publishing them means for this
+  deployment's traffic-analysis posture, and `ops/caddy/Caddyfile`'s
+  commented-out stanza for taking public exposure back without touching
+  the binary.
 - **Transient feed errors** (rate limits, truncated bodies) retry the same block
   forever and are routine on keyless tiers; only evidence of *drift* halts.
 - **Replay safety**: tx-derived changes are absolute post-state values, so

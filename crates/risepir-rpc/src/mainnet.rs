@@ -76,7 +76,7 @@ use risepir_proto::{keccak256, Backend, Balance, BlockDelta, Geometry, ValueCode
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
-use crate::autosave::StateSaver;
+use crate::autosave::{SaveOutcome, StateSaver};
 use crate::journal::{self, JournalWriter, ScanStop};
 use crate::private_eth::PrivateEth;
 use crate::state;
@@ -789,6 +789,13 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         );
     }
 
+    // Set before anything starts serving, same reasoning as the reconcile
+    // line right below (ADR-0039): `GET /metrics`'s
+    // `risepir_state_save_configured` must never read as "configured" for
+    // a deployment that was never given `--state`, nor "not configured"
+    // for one that was but simply has not saved yet.
+    node.set_state_saving_configured(cfg.state.is_some());
+
     // Set before anything starts serving (see the method's docs): a probe
     // must never observe a transient "not configured" for a deployment
     // that actually does reconcile.
@@ -966,6 +973,32 @@ fn log_patch_stats(through_block: u64, stats: &PatchStats) {
     );
 }
 
+/// Runs one [`StateSaver::maybe_save`] tick and publishes the outcome into
+/// `node` for `GET /metrics` (ADR-0039, `NodeState::record_save_outcome`/
+/// `record_save_failure`) — the follow loop is the only thing that ever
+/// calls this, so it is also the only thing that can publish it;
+/// `NodeState` holds no reference back to the saver (`risepir-http`
+/// cannot depend on `risepir-rpc`, the reverse of this crate's own
+/// dependency direction).
+///
+/// Timing wraps the whole `maybe_save` call rather than reaching inside
+/// it: for `Saved`, that *is* the save duration (the interesting case, and
+/// the only one this method reports a duration for); for
+/// `Unchanged`/`NotDue`/`Busy` it is just a lock check, cheap enough that
+/// timing it costs nothing and there is no duration to publish for those
+/// anyway. All of `maybe_save`'s own retry/skip/logging semantics are
+/// unchanged — this only adds the publish step around it.
+async fn record_save_tick(saver: &StateSaver, node: &NodeState) {
+    let t0 = std::time::Instant::now();
+    let outcome = saver.maybe_save(node).await;
+    let elapsed = t0.elapsed();
+    match outcome {
+        Ok(SaveOutcome::Saved { bytes, .. }) => node.record_save_outcome(unix_now(), elapsed, bytes),
+        Ok(SaveOutcome::Unchanged { .. } | SaveOutcome::NotDue | SaveOutcome::Busy) => {}
+        Err(_) => node.record_save_failure(),
+    }
+}
+
 /// The forever loop: poll `finalized`, apply each new block exactly once,
 /// reconcile on cadence. See the module docs for the failure posture.
 ///
@@ -988,10 +1021,12 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
     let mut reservoir = DeferredReservoir::default();
     loop {
         if let Some(saver) = &cfg.saver {
-            // Outcome/error ignored on purpose: the saver logs, and a
-            // failed save must not stop the follow loop (it costs restart
-            // speed, never correctness; the next interval retries).
-            let _ = saver.maybe_save(&node).await;
+            // Outcome/error ignored by this loop's own control flow (the
+            // saver logs, and a failed save must not stop following — it
+            // costs restart speed, never correctness; the next interval
+            // retries); `record_save_tick` still publishes it for
+            // `GET /metrics` (ADR-0039).
+            record_save_tick(saver, &node).await;
         }
 
         let finalized = match feed.finalized().await {
@@ -1002,10 +1037,15 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 continue;
             }
         };
+        // The one glance ADR-0039 exists for: `risepir_finalized_block`
+        // and `risepir_block_lag` against `risepir_head_block` on
+        // `GET /metrics`, published from the only place that ever learns
+        // this value.
+        node.set_finalized(finalized);
 
         while last < finalized {
             if let Some(saver) = &cfg.saver {
-                let _ = saver.maybe_save(&node).await;
+                record_save_tick(saver, &node).await;
             }
 
             let n = last + 1;
@@ -1060,6 +1100,12 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             if let Some(saver) = &cfg.saver {
                 let n_items = node.with_server(|s| s.num_items()).await;
                 saver.append_delta(&delta, n_items).await;
+                // `GET /metrics`'s `risepir_journal_records_since_save` /
+                // `risepir_journal_broken` (ADR-0039) — published every
+                // block rather than only at rotation, so the gauge tracks
+                // between saves too, not just at their boundaries.
+                let js = saver.journal_status().await;
+                node.record_journal_status(js.records_since_save, js.broken);
             }
 
             // Per-block patch-time instrumentation (docs/numbers.md §7):

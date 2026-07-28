@@ -148,6 +148,20 @@ to change that:
 - **Sync patterns:** delta fetches reveal the client's pin age and how
   regularly it follows the chain.
 
+**`GET /metrics`/`GET /status` (ADR-0039) do not change this status, but
+they do change who can observe it.** Both are public wherever Caddy
+proxies the whole PIR port (as it does today, deploy.md §3.7), and both
+expose only aggregates — request rate and outcome by route, error counts
+by class, block lag, store occupancy, an answer-latency histogram — never
+which account any single request named. The answer-latency histogram in
+particular cannot leak the queried bucket: `RisePirServer::answer` folds
+over its *entire* segment for every query regardless of content (ADR-0039
+has the full argument, and what would falsify it). What genuinely changes
+is reach: the query-rate/timing metadata this section already treats as
+conceded previously required a position on the network path to observe;
+after this change, anyone can obtain the same order of metadata — request
+volume, timing, error rates — by just asking the server.
+
 Mitigations, cheap to expensive, all future work and none implemented: state
 this in the UI; a Tor onion service; fixed-rate polling / cover traffic; an
 OHTTP relay so the operator never sees client IPs.
@@ -220,6 +234,7 @@ the address and undoes the system. It is an operator audit tool, full stop.
 | On-path attacker replaces the session | closed for the public deployment by TLS (§4.2); still open for any plaintext-HTTP or SSH-tunnel-less use |
 | DNS/CA holder serves a modified client under the deployment's name | **undefended** (§4.2) — free-subdomain provider, its token, and the CA are all in the code-delivery chain |
 | Traffic analysis / timing correlation | **undefended** (§5) |
+| `GET /metrics`/`GET /status` publish aggregate request-rate, error-rate, block-lag, and answer-latency metadata publicly | **same status as traffic analysis above, now ask-able without a network position** (§5, ADR-0039) — every field is an aggregate, never per-query, and the latency histogram is timing-side-channel-safe by construction |
 | Feed poisoning between reconcile checkpoints | detected with lag, sampled (§6) |
 | Feed + reconcile providers collude | undetected (§6) |
 | Volumetric DoS | partially mitigated (§3) |

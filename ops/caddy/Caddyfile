@@ -16,4 +16,13 @@ private-eth-getbalance.duckdns.org {
 	# hand every visitor's queried account to the operator and to anyone
 	# on-path, which is exactly what this project exists to prevent.
 	reverse_proxy 127.0.0.1:8645
+
+	# GET /metrics and GET /status (ADR-0039) are public by default, same as
+	# every other route on this port — a deliberate choice (docs/threat-model.md
+	# §5/§8), not an oversight: every field is an aggregate, never per-query.
+	# To make them operator-only again without touching the binary, uncomment
+	# this — it must come *before* the reverse_proxy line above so Caddy
+	# matches it first:
+	#   respond /metrics* 404
+	#   respond /status* 404
 }

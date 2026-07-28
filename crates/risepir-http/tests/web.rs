@@ -167,6 +167,10 @@ async fn assets_are_served_with_their_hardening_headers() {
         ("/pir.js", "text/javascript; charset=utf-8"),
         ("/style.css", "text/css; charset=utf-8"),
         ("/client.wasm", "application/wasm"),
+        // GET /status (ADR-0039) — the operator page, same mechanism.
+        ("/status", "text/html; charset=utf-8"),
+        ("/status.css", "text/css; charset=utf-8"),
+        ("/status.js", "text/javascript; charset=utf-8"),
     ] {
         let (status, body, headers) = get(&app, route).await;
         assert_eq!(status, StatusCode::OK, "{route}");

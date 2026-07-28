@@ -52,12 +52,26 @@ pub struct WebAssets {
 /// Every file this server will ever serve, with the route it answers on.
 /// `client.wasm` is the build output of `crates/risepir-wasm`; the rest
 /// are checked in under `web/`.
+///
+/// `status.html`/`status.css`/`status.js` are the `GET /status` operator
+/// page (ADR-0039) — a second, independent front end reusing this exact
+/// mechanism (there is no path-mapping fallback, so a route not listed
+/// here is a plain `404` regardless). It is a *separate* CSS file rather
+/// than sharing `style.css`: that stylesheet is deliberately single-theme
+/// (see its own module docs), while `/status` is asked to work in both
+/// light and dark, and inline `<style>`/`<script>` are both blocked by the
+/// same [`CSP`] every asset here carries (`style-src`/`script-src 'self'`,
+/// no `'unsafe-inline'`) — exactly why `/status`'s JS must be its own file
+/// too, not an inline `<script>` block.
 const MANIFEST: &[(&str, &str, &str)] = &[
     ("/", "index.html", "text/html; charset=utf-8"),
     ("/app.js", "app.js", "text/javascript; charset=utf-8"),
     ("/pir.js", "pir.js", "text/javascript; charset=utf-8"),
     ("/style.css", "style.css", "text/css; charset=utf-8"),
     ("/client.wasm", "client.wasm", "application/wasm"),
+    ("/status", "status.html", "text/html; charset=utf-8"),
+    ("/status.css", "status.css", "text/css; charset=utf-8"),
+    ("/status.js", "status.js", "text/javascript; charset=utf-8"),
 ];
 
 /// The policy sent with every asset. `connect-src 'self'` is the

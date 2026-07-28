@@ -143,6 +143,33 @@ impl From<risepir_proto::CodecError> for ClientError {
     }
 }
 
+impl ClientError {
+    /// This variant's name, and *only* its name — never a formatted
+    /// message (see [`crate::wire::WireError::metric_class`]'s identical
+    /// rationale: a message here can embed a status body or a decode
+    /// diagnosis, either of which may carry lengths/offsets the server
+    /// chose; the variant name is a closed, fixed set this crate defines).
+    ///
+    /// Named here for taxonomy completeness (this crate's `/metrics`,
+    /// ADR-0039, names `WireError`/`ServerError`/`ClientError` together as
+    /// "the existing error taxonomies"), but note what it is *not* wired
+    /// to: `risepir_http::node`'s `/metrics` lives on the PIR server's own
+    /// router, and a `ClientError` is never produced by that router — it
+    /// is what [`crate::PirHttpClient`] returns to a caller acting as a
+    /// client (`risepir-rpc`'s JSON-RPC front end, calling this deployment's
+    /// own PIR transport over loopback). Instrumenting *that* call path is
+    /// a JSON-RPC-side (`:8545`) concern, out of scope for the PIR-port
+    /// `/metrics` this change adds; this method is here so a future caller
+    /// that does instrument it does not have to invent the mapping.
+    pub fn metric_class(&self) -> &'static str {
+        match self {
+            Self::Network(_) => "Network",
+            Self::Status { .. } => "Status",
+            Self::Wire(_) => "Wire",
+        }
+    }
+}
+
 /// Async HTTP client for the RisePIR endpoints [`crate::node::NodeState::router`]
 /// exposes: `GET /setup`, `GET /head`, `GET /sync`, `POST /answer`.
 ///

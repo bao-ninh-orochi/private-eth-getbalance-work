@@ -77,8 +77,11 @@ use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
 use crate::autosave::{SaveOutcome, StateSaver};
+use crate::hard_refresh::{self, CorrectionQueue};
 use crate::journal::{self, JournalWriter, ScanStop};
 use crate::private_eth::PrivateEth;
+use crate::snapshot_audit::{self, ReservoirSampler};
+use crate::snapshot_rewind;
 use crate::state;
 
 /// SCF geometry for the mainnet deployment — arity 2, `bucket_size` 4,
@@ -252,6 +255,43 @@ pub struct MainnetConfig {
     /// PIR port's own origin. `None` leaves the deployment headless — the
     /// PIR transport and `cast`/MetaMask still work exactly as before.
     pub web_dir: Option<PathBuf>,
+    /// `--hard-refresh <file>` (ADR-0040): a newline-delimited address
+    /// list to quorum-verify against [`Self::refresh_urls`] and correct in
+    /// the store wherever every configured provider agrees on a value
+    /// that differs from what is currently stored. `None` (the default)
+    /// disables the feature entirely — no file is read, no background
+    /// task runs. See `crate::hard_refresh` for the whole mechanism.
+    pub hard_refresh: Option<PathBuf>,
+    /// Independent balance-reference providers `--hard-refresh` and the
+    /// post-bootstrap snapshot audit (`Self::snapshot_audit_samples`)
+    /// both quorum-check against (ADR-0040) — **every** configured URL
+    /// must agree for a value to be trusted; disagreement or a fetch
+    /// error is always "skip", never "guess". At least 2 *distinct* URLs
+    /// are required whenever either feature actually runs
+    /// ([`hard_refresh::validate_refresh_urls`]); the built-in default
+    /// pair is two different operators from the ones this deployment
+    /// already uses for the feed and for `reconcile`.
+    pub refresh_urls: Vec<String>,
+    /// `--snapshot-rewind <N>` (ADR-0040): when bootstrapping from
+    /// `--snapshot`, treat the snapshot as exact at `snapshot_block - N`
+    /// instead of exactly at `snapshot_block`, so the ordinary catch-up
+    /// replay re-derives every account the extra `N` blocks touch from
+    /// the chain's own absolute post-state — the measured mitigation for
+    /// `docs/deploy.md` §2.1's "the snapshot is not exact at its own
+    /// boundary" finding. Default **2000**; `0` disables. See
+    /// `crate::snapshot_rewind` for what this does and, just as
+    /// importantly, does not fix.
+    pub snapshot_rewind: u64,
+    /// `--snapshot-audit-samples <N>` (ADR-0040): during snapshot ingest,
+    /// reservoir-sample this many `(address, ingested-balance)` pairs
+    /// (streaming, one pass, never a second read of the shards) and, once
+    /// PIR setup finishes, verify each against [`Self::refresh_urls`]'
+    /// quorum at `--snapshot-block` — the mechanism that stops the
+    /// boundary-error finding from silently reappearing in a *future*
+    /// export undetected. Default **512**; `0` disables. Only meaningful
+    /// with `--snapshot` (a `--state`/`--partial` bootstrap does not
+    /// ingest anything to sample from). See `crate::snapshot_audit`.
+    pub snapshot_audit_samples: usize,
 }
 
 impl Default for MainnetConfig {
@@ -293,6 +333,16 @@ impl Default for MainnetConfig {
             ring_capacity: 600,
             lwe_dim: None,
             web_dir: None,
+            hard_refresh: None,
+            // Two different operators from the feed (dRPC/merkle) and the
+            // reconcile check (publicnode) — genuine independence, not
+            // just a distinct URL string (ADR-0040).
+            refresh_urls: vec![
+                "https://gateway.tenderly.co/public/mainnet".to_string(),
+                "https://eth-mainnet.public.blastapi.io".to_string(),
+            ],
+            snapshot_rewind: 2_000,
+            snapshot_audit_samples: 512,
         }
     }
 }
@@ -354,6 +404,31 @@ fn report_journal_savings(state_path: &Path, journal_path: &Path, record_count: 
     );
 }
 
+/// What a fresh `--snapshot` bootstrap needs later, once `node` exists, to
+/// run the post-bootstrap snapshot audit (ADR-0040, `crate::snapshot_audit`)
+/// as a background task. `None` from every other bootstrap arm (a
+/// `--state`/`--partial` bootstrap does not ingest anything to sample
+/// from) and `None` from the snapshot arm too when
+/// `--snapshot-audit-samples 0` disabled it or the reservoir happened to
+/// sample nothing.
+struct PendingAudit {
+    /// Up to `--snapshot-audit-samples` `(address, ingested-balance)`
+    /// pairs, reservoir-sampled during ingest.
+    sample: Vec<([u8; 20], risepir_proto::Balance)>,
+    /// The snapshot's own declared exact-at block (`--snapshot-block`) —
+    /// the height the audit verifies against, which is deliberately *not*
+    /// the same as the server's actual genesis when `--snapshot-rewind`
+    /// moved that earlier (the audit is checking the snapshot's own
+    /// claim, not whatever replay window the server additionally re-runs).
+    snapshot_block: u64,
+    /// Total nonzero rows the snapshot ingested — the population size the
+    /// audit's measured rate is extrapolated over in the report line.
+    total_ingested: u64,
+    /// The reservoir sampler's seed (logged at sampling time; carried
+    /// through so the persisted sidecar records it too).
+    seed: u64,
+}
+
 /// What the bootstrap arm ("state file > snapshot > partial") produces,
 /// beyond the server itself — the extra plumbing state-save/journal
 /// wiring needs (ADR-0025 / ADR-0026).
@@ -379,6 +454,10 @@ struct Bootstrap {
     /// [`NodeState`]'s delta index with ([`NodeState::seed_history`]) —
     /// empty whenever nothing was replayed.
     tail_deltas: Vec<BlockDelta>,
+    /// What the post-bootstrap snapshot audit needs to run, if this was a
+    /// fresh `--snapshot` bootstrap with sampling enabled — see
+    /// [`PendingAudit`].
+    pending_audit: Option<PendingAudit>,
 }
 
 /// Build and spawn the whole mainnet stack. Returns once the PIR
@@ -414,6 +493,21 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     let _state_lock = cfg.state.as_ref().map(|path| {
         state::acquire_state_path(path).unwrap_or_else(|e| die(format!("--state {}: {e}", path.display())))
     });
+
+    // `--hard-refresh` (ADR-0040) is validated here, before any bootstrap
+    // work — a `--snapshot` bootstrap can cost 16+ minutes, and a
+    // misconfigured `--refresh-url` is a configuration mistake that should
+    // fail in milliseconds, not after paying for an entire ingest + PIR
+    // setup first (`crate::snapshot_audit`'s own analogous check, inside
+    // the snapshot-ingest arm below, cannot be hoisted here — it needs to
+    // know whether this run is actually ingesting a snapshot at all, which
+    // is only decided inside that arm).
+    if cfg.hard_refresh.is_some() {
+        if let Err(e) = hard_refresh::validate_refresh_urls(&cfg.refresh_urls) {
+            eprintln!("risepir-rpc mainnet: fatal: --hard-refresh requires valid --refresh-url config: {e}");
+            std::process::exit(2);
+        }
+    }
 
     // ── Bootstrap: state file > snapshot > partial ─────────────────────
     let bootstrap: Bootstrap = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
@@ -497,6 +591,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 on_disk_height: Some(base_block),
                 initial_journal,
                 tail_deltas,
+                pending_audit: None,
             }
         } else {
             // ── --journal-restore OFF (--no-journal-restore; ADR-0037
@@ -607,12 +702,44 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 on_disk_height: Some(b),
                 initial_journal,
                 tail_deltas: Vec::new(),
+                pending_audit: None,
             }
         }
     } else if !cfg.snapshot.is_empty() {
         let snapshot_block = cfg
             .snapshot_block
             .unwrap_or_else(|| die("--snapshot requires --snapshot-block (the block the snapshot is exact at)"));
+
+        // The post-bootstrap snapshot audit (ADR-0040) needs at least 2
+        // distinct reference providers whenever it will actually sample
+        // anything — checked up front, before spending any time on ingest,
+        // the same posture `die()` already takes for every other
+        // deployment-configuration mistake caught before serving starts.
+        if cfg.snapshot_audit_samples > 0 {
+            if let Err(e) = hard_refresh::validate_refresh_urls(&cfg.refresh_urls) {
+                eprintln!("risepir-rpc mainnet: fatal: --snapshot-audit-samples requires valid --refresh-url config: {e}");
+                std::process::exit(2);
+            }
+        }
+
+        // --snapshot-rewind (ADR-0040): the genesis the server actually
+        // starts at may be earlier than the snapshot's own declared exact
+        // block — see `crate::snapshot_rewind`'s docs for what this
+        // narrows and, just as importantly, what it does not fix.
+        let effective_genesis = snapshot_rewind::rewound_genesis(snapshot_block, cfg.snapshot_rewind)
+            .unwrap_or_else(|e| die(e));
+        if cfg.snapshot_rewind > 0 {
+            eprintln!(
+                "risepir-rpc mainnet: --snapshot-rewind {}: treating the snapshot as exact at block {} \
+                 instead of the declared {snapshot_block} — the catch-up replay will re-derive every \
+                 account the extra {} block(s) touch from the chain's own absolute post-state before \
+                 reaching the declared block (~{} extra second(s) of replay at ~1 s/block). This narrows \
+                 the boundary error (docs/adr/README.md ADR-0040) but does not close it, and it does not \
+                 fix relative withdrawal credits inside the window — --hard-refresh is the remedy for those.",
+                cfg.snapshot_rewind, effective_genesis, cfg.snapshot_rewind, cfg.snapshot_rewind,
+            );
+        }
+
         let accounts = match cfg.snapshot_accounts {
             Some(n) => n,
             None => {
@@ -641,12 +768,29 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         )
         .unwrap_or_else(|e| die(format!("store construction: {e:?}")));
 
+        // Post-bootstrap snapshot audit (ADR-0040): a streaming reservoir
+        // over the very rows being ingested, so sampling costs one pass,
+        // never a second read of a ~200M-row export. Seeded so the
+        // sample is reproducible after the fact from the logged seed;
+        // `capacity == 0` (`--snapshot-audit-samples 0`) makes every
+        // `observe` call a permanent no-op.
+        let audit_seed = snapshot_audit::random_seed();
+        let mut reservoir = ReservoirSampler::new(cfg.snapshot_audit_samples, audit_seed);
+        if cfg.snapshot_audit_samples > 0 {
+            eprintln!(
+                "risepir-rpc mainnet: snapshot audit: reservoir-sampling up to {} address(es) during ingest \
+                 (seed={audit_seed})",
+                cfg.snapshot_audit_samples
+            );
+        }
+
         eprintln!("risepir-rpc mainnet: ingesting snapshot ({} shard(s)) ...", cfg.snapshot.len());
         let started = std::time::Instant::now();
         let mut ingested = 0u64;
-        let stats = snapshot::ingest(&cfg.snapshot, |key, balance| {
+        let stats = snapshot::ingest(&cfg.snapshot, |addr20, key, balance| {
             let encoded = codec.encode(&key, balance).map_err(|e| e.to_string())?;
             store.insert(key, &encoded).map_err(|e| format!("{e:?}"))?;
+            reservoir.observe(addr20, balance);
             ingested += 1;
             if ingested.is_multiple_of(5_000_000) {
                 eprintln!(
@@ -668,10 +812,17 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
 
         eprintln!("risepir-rpc mainnet: running PIR setup (one-time preprocessing) ...");
         let started = std::time::Instant::now();
-        let server = RisePirServer::new(store, backend_config.clone(), codec, snapshot_block);
+        // effective_genesis, not snapshot_block: with --snapshot-rewind
+        // active the server's *actual* starting height is earlier than
+        // the snapshot's declared block, and every log line / persisted
+        // height below must reflect what the server truly holds, not the
+        // nominal declaration (the audit, further down, is the one place
+        // that deliberately keeps using the nominal `snapshot_block`).
+        let server = RisePirServer::new(store, backend_config.clone(), codec, effective_genesis);
         eprintln!(
-            "risepir-rpc mainnet: setup done in {:.1}s at block {snapshot_block}",
-            started.elapsed().as_secs_f64()
+            "risepir-rpc mainnet: setup done in {:.1}s at block {}",
+            started.elapsed().as_secs_f64(),
+            server.block(),
         );
 
         let mut on_disk_height = None;
@@ -682,17 +833,18 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             match state::save(&server, &codec, true, path) {
                 Ok(state::SaveReport { bytes, digest }) => {
                     eprintln!(
-                        "risepir-rpc mainnet: state saved: block {snapshot_block}, {:.2} GB in {:.1}s",
+                        "risepir-rpc mainnet: state saved: block {}, {:.2} GB in {:.1}s",
+                        server.block(),
                         bytes as f64 / 1e9,
                         started.elapsed().as_secs_f64(),
                     );
-                    on_disk_height = Some(snapshot_block);
+                    on_disk_height = Some(server.block());
                     // The very first journal for this deployment: bound
                     // to the save that just landed, so the follow loop's
-                    // next append (snapshot_block + 1) is contiguous
+                    // next append (server.block() + 1) is contiguous
                     // from the start.
                     let journal_path = journal::journal_path_for(path);
-                    match JournalWriter::create(&journal_path, digest, snapshot_block, server.params().plaintext_bits) {
+                    match JournalWriter::create(&journal_path, digest, server.block(), server.params().plaintext_bits) {
                         Ok(w) => initial_journal = Some(w),
                         Err(e) => eprintln!("risepir-rpc mainnet: WARNING: could not create the initial journal: {e}"),
                     }
@@ -702,12 +854,33 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 Err(e) => eprintln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"),
             }
         }
+
+        // Post-bootstrap snapshot audit (ADR-0040): hand off the
+        // reservoir's finished sample (if any) to be verified once `node`
+        // exists, later in `spawn`. Verifies against the snapshot's own
+        // *declared* block, not `effective_genesis` — the audit is
+        // checking whether the export's claim at its own boundary held
+        // up, independent of whatever extra replay window the server
+        // additionally re-runs.
+        let sample = reservoir.into_sample();
+        let pending_audit = if sample.is_empty() {
+            None
+        } else {
+            Some(PendingAudit {
+                sample,
+                snapshot_block,
+                total_ingested: stats.nonzero,
+                seed: audit_seed,
+            })
+        };
+
         Bootstrap {
             server,
             complete: true,
             on_disk_height,
             initial_journal,
             tail_deltas: Vec::new(),
+            pending_audit,
         }
     } else if cfg.partial {
         let fin = match feed.finalized().await {
@@ -737,6 +910,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             on_disk_height: None,
             initial_journal: None,
             tail_deltas: Vec::new(),
+            pending_audit: None,
         }
     } else {
         die("need a data source: --snapshot <csv[.gz]> --snapshot-block <N> (complete), or --state <file> (restart), or --partial (demo)");
@@ -748,6 +922,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         on_disk_height,
         initial_journal,
         tail_deltas,
+        pending_audit,
     } = bootstrap;
     let head_at_start = server.block();
     let plaintext_bits = server.params().plaintext_bits;
@@ -795,6 +970,57 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // a deployment that was never given `--state`, nor "not configured"
     // for one that was but simply has not saved yet.
     node.set_state_saving_configured(cfg.state.is_some());
+
+    // ── Hard-refresh (ADR-0040) + snapshot audit (ADR-0040) ─────────────
+    // Both run as background tasks, never awaited here: neither may block
+    // serving or following (see `crate::hard_refresh`'s and
+    // `crate::snapshot_audit`'s module docs for exactly why that is safe
+    // — briefly, neither ever touches the PIR server's write lock).
+
+    // A restart that only *loads* a state file (no fresh ingest this run)
+    // has nothing new to sample, but the last snapshot audit's finding
+    // should not silently vanish from `/healthz` just because the process
+    // restarted. Reading this unconditionally on `cfg.state.is_some()` is
+    // safe even on a fresh `--snapshot` bootstrap that reuses an old path:
+    // if no sidecar exists yet (the ordinary case), this is a no-op, and
+    // if a *stale* one from a previous lineage happens to exist, it is
+    // overwritten within minutes by the fresh audit spawned below.
+    if let Some(path) = &cfg.state {
+        if let snapshot_audit::AuditSidecar::Known(record) = snapshot_audit::read_sidecar(&snapshot_audit::sidecar_path(path)) {
+            node.set_snapshot_audit_line(snapshot_audit::healthz_value(&record));
+        }
+    }
+
+    // Always constructed (cheap, and empty by default) so the follow loop
+    // has exactly one thing to drain from, whether or not --hard-refresh
+    // is configured — see `FollowConfig::corrections`.
+    let corrections = Arc::new(CorrectionQueue::new());
+
+    if let Some(path) = &cfg.hard_refresh {
+        // --refresh-url was already validated at the very top of `spawn`
+        // (before any bootstrap work), so this is wiring, not validation:
+        // hard-refresh is not specific to a fresh snapshot ingest — it is
+        // equally meaningful against a `--state`-restarted server, which
+        // is why this lives here rather than inside any one bootstrap arm.
+        eprintln!(
+            "risepir-rpc mainnet: hard-refresh: {} configured; checking will run in the background \
+             (never blocks serving or following)",
+            path.display()
+        );
+        tokio::spawn(hard_refresh::run(node.clone(), corrections.clone(), path.clone(), cfg.refresh_urls.clone()));
+    }
+
+    if let Some(audit) = pending_audit {
+        tokio::spawn(snapshot_audit::verify(
+            node.clone(),
+            audit.sample,
+            audit.snapshot_block,
+            cfg.refresh_urls.clone(),
+            audit.total_ingested,
+            audit.seed,
+            cfg.state.clone(),
+        ));
+    }
 
     // Set before anything starts serving (see the method's docs): a probe
     // must never observe a transient "not configured" for a deployment
@@ -852,6 +1078,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             reconcile_samples: cfg.reconcile_samples,
             start_at: head_at_start,
             saver: saver.clone(),
+            corrections: corrections.clone(),
         },
     ));
 
@@ -903,6 +1130,11 @@ struct FollowConfig {
     reconcile_samples: usize,
     start_at: u64,
     saver: Option<Arc<StateSaver>>,
+    /// Hard-refresh corrections (ADR-0040) waiting to ride a block's
+    /// `changes` — always a live queue (possibly permanently empty when
+    /// `--hard-refresh` was never set), so the follow loop can drain it
+    /// unconditionally rather than branching on an `Option` every block.
+    corrections: Arc<CorrectionQueue>,
 }
 
 /// Pure aggregation of [`NodeState::apply_block`]'s measured hint-patch
@@ -1082,6 +1314,48 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                     }
                 }
                 update.credits = kept;
+            }
+
+            // Hard-refresh corrections (ADR-0040): drained FIFO, capped at
+            // MAX_CORRECTIONS_PER_BLOCK. A correction set larger than that
+            // cap can sit queued across several blocks, so every drained
+            // correction is re-checked against the store's *live* balance
+            // (`filter_stale_corrections`) immediately before use and
+            // dropped if an ordinary feed-applied block has since moved
+            // that account on — never overwrite fresher, correct on-chain
+            // data with a stale corrected value. Survivors are placed
+            // FIRST so the feed's own changes for *this* block — appended
+            // after, and last-entry-for-a-key-wins per
+            // `BlockUpdate::changes`'s own documented contract — always
+            // take precedence over a correction for the same account.
+            // Draining an empty queue (the common case when
+            // `--hard-refresh` was never set) is a cheap no-op, so this
+            // runs unconditionally every block rather than behind an
+            // `Option` check.
+            let drained = cfg.corrections.drain_up_to(hard_refresh::MAX_CORRECTIONS_PER_BLOCK);
+            if !drained.is_empty() {
+                let (still_valid, stale) = match hard_refresh::filter_stale_corrections(&node, drained).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        critical(&format!("verified read while re-checking hard-refresh corrections failed: {e}"));
+                        return;
+                    }
+                };
+                if stale > 0 {
+                    eprintln!(
+                        "risepir-rpc mainnet: hard-refresh: {stale} correction(s) dropped as stale in block {n} \
+                         (the account changed since the check; the feed's own value wins)"
+                    );
+                }
+                if !still_valid.is_empty() {
+                    let still_queued = cfg.corrections.len();
+                    eprintln!(
+                        "risepir-rpc mainnet: hard-refresh: applying {} correction(s) in block {n} \
+                         ({still_queued} still queued)",
+                        still_valid.len()
+                    );
+                    update.changes = hard_refresh::prepend_corrections(still_valid, std::mem::take(&mut update.changes));
+                }
             }
 
             let (delta, patch_duration) = match node.apply_block(&update).await {

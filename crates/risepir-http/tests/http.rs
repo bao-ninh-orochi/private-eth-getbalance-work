@@ -297,6 +297,30 @@ async fn healthz_reports_halted_after_a_mismatch() {
     assert!(text.contains("reconcile_halted=1"));
 }
 
+/// The post-bootstrap snapshot audit's one-line summary (ADR-0040): absent
+/// by default (`"unknown"` — a deployment that never ran the audit, same
+/// as this test's `build_node`, must say so explicitly rather than omit
+/// the line), and reflects whatever `risepir_rpc::snapshot_audit` last set
+/// once it has run. This crate owns only the storage/display of the line,
+/// never its arithmetic — `set_snapshot_audit_line` accepts any string.
+#[tokio::test]
+async fn healthz_reports_snapshot_audit_unknown_by_default_then_whatever_is_set() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state.clone());
+
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("snapshot_audit=unknown"), "{text}");
+    assert_eq!(state.snapshot_audit_line(), "unknown");
+
+    state.set_snapshot_audit_line("checked=512 disagreed=3 block=1 rate=0.59% ci=[0.16%,1.46%]".to_string());
+    let (status, body) = get(&app, "/healthz").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("snapshot_audit=checked=512 disagreed=3 block=1 rate=0.59% ci=[0.16%,1.46%]"), "{text}");
+}
+
 #[tokio::test]
 async fn setup_concurrency_cap_is_invisible_to_sequential_clients() {
     // The `/setup` route carries a small concurrency cap (bandwidth-

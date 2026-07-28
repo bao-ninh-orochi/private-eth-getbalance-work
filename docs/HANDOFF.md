@@ -69,19 +69,56 @@ still quotes the 35.43 GB / `arity=3` / 830.73 MB figures without saying they ar
 the superseded `(3,4)` lineage is stale.
 
 **2. Known open items, in priority order:**
-- **Post-bootstrap snapshot audit** (deploy.md §5.4) — *new, and the one that
-  touches the binding rule.* The BigQuery export is byte-exact for accounts
-  drawn at random (40/40) but **wrong for accounts active at its own boundary**
-  (6 of 27 measured, `−424.64` to `+33.72` ETH), and it omitted a funded account
-  holding 2,744.72 ETH entirely — which a complete set serves as a definitive
-  `0x0`. The replay heals every such account the first time a block touches it
-  (it writes absolute post-state from the prestate tracer, not a delta), so the
-  exposure is transient for anything that keeps transacting and **permanent for
-  anything that does not**. Remedy: after bootstrap, re-read the accounts the
-  final ~N blocks before `--snapshot-block` touched — they are exactly the
-  suspect population and there are few of them — against an archive RPC, and
-  correct them before serving. Cheap, bounded, and it closes the only known path
-  to a silently wrong complete-set answer that does not involve a lying feed.
+- **~~Post-bootstrap snapshot audit~~ — DONE (ADR-0040), and re-scoped: the
+  suspect population is not what this file used to say.** The original
+  version of this item claimed the suspect population was "exactly the
+  accounts touched in the final ~N blocks before `--snapshot-block`" and that
+  "there are few of them" — **both are now known to be wrong.** Re-measuring
+  the **export** at scale (deploy.md §2.1, ADR-0040) found the error decays
+  with distance from the boundary but does **not** vanish: 6.9% of accounts
+  touched in the 2000 blocks before the boundary were wrong, still 5.47% at
+  depth (1000,2000], and — independent of any recency window at all — a
+  population-wide random sample measured **0.33%** wrong (Wilson 95% CI
+  [0.09%, 1.21%], implying ~668,000 of the 200,503,969 accounts). "Few, and
+  bounded to a recent window" was never true; "a measured, disclosed
+  residual across the whole set" is the honest description of the *export*.
+
+  **The deployment itself is not the export**, and both were measured: the
+  same population check run directly against the live server found 0 wrong
+  of 200 (Wilson 95% CI [0.00%, 1.88%]) — the ordinary forward replay heals
+  most of what the export got wrong, for free — but re-checking the
+  *specific* rows already flagged as wrong found 28/150 window-wrong and
+  22/100 funded-but-absent accounts still wrong days later. Root cause,
+  verified with `bq show` (not inferred): the source is a table rebuilt once
+  daily with no block-number column, so the gate query's "last block of the
+  previous UTC day" is an assumption about that rebuild's instant that **can
+  fail in either direction** — every disagreement is either the export
+  reflecting a state *after* the declared block (heals unconditionally via
+  ordinary replay) or *before* it (never heals via forward replay alone,
+  which is exactly what `--snapshot-rewind` reaches backward for). See
+  ADR-0040 for the full measurement, both populations' numbers, and the
+  causal model; citing only the export's 0.33% or only the deployment's
+  0/200 each mislead in a different direction.
+
+  Three mechanisms now exist, none of which alone closes the gap:
+  **`--snapshot-rewind`** (default 2000, on by default) targets exactly the
+  "export reflects a state before B" half by re-deriving a window from the
+  chain's own absolute post-state during the ordinary replay — it does
+  nothing for, and needs to do nothing for, the "after B" half, which heals
+  on its own; **the post-bootstrap audit** (`--snapshot-audit-samples`,
+  default 512) measures and discloses the population-wide baseline on every
+  bootstrap (console line + `<state>.audit` sidecar + one `GET /healthz`
+  line, reporting loudly above a 1% Wilson-lower-bound threshold but never
+  refusing to serve) — its uniform sampling tracks that baseline but is not
+  built to catch the boundary-concentrated residual itself; **`--hard-refresh
+  <file>`** is the general-purpose quorum-verified correction tool for a
+  *known* suspect list (idempotent, runs in the background, never blocks
+  serving or following), which is what actually reaches the concentrated
+  residual once one is identified. None of the three is automatic
+  population-wide correction — deciding which addresses warrant a
+  `--hard-refresh` run past what the audit samples is still an operator
+  judgment call. See ADR-0040 for the full measurement and
+  `docs/deploy.md` §2.1/§2.2 for the procedure.
 - **Withdrawal-recipient hard refresh** (deploy.md §4): a one-time absolute
   re-read of the ~32 k withdrawal recipient addresses vs an archive RPC, to
   clear any credit ambiguity at the snapshot join. Small utility; not built.

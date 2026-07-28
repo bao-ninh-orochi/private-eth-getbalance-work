@@ -212,15 +212,58 @@ SELECT
 ```
 
 - `nonzero_accounts` → `--snapshot-accounts` (sizes the geometry).
-- `snapshot_block` → `--snapshot-block`. The dataset refreshes on UTC-day
-  boundaries, so the last block of the previous UTC day is the canonical "exact
-  at" point. **Check `dataset_head_time` is recent (today)** — if the dataset has
-  gone stale (the community ETL stopping is a known risk), stop here and use the
-  snap-download fallback (`docs/data-acquisition.md` path 2).
-- Getting `snapshot_block` slightly **too low** is safe (re-applied tx changes are
-  absolute; see the replay note in §4); too **high** silently misses changes —
-  when unsure, subtract a few hundred blocks and let reconciliation prove the
-  join.
+- `snapshot_block` → `--snapshot-block`. **This is not, and was never, an
+  "exact at" point** — an earlier revision of this doc claimed the dataset
+  "refreshes on UTC-day boundaries, so the last block of the previous UTC day
+  is the canonical 'exact at' point", which is measurably false and was the
+  root cause of the finding below. Verified directly (`bq show`, not
+  inferred): `crypto_ethereum.balances` is a materialized **table**, not a
+  view — description *"This table contains Ether balances of all addresses,
+  updated daily. Data is exported using
+  https://github.com/medvedev1088/ethereum-etl"*, 453,102,032 rows,
+  27,186,121,920 bytes, created 2020-01-22. It has **one effective height per
+  daily rebuild** — every row in a given rebuild shares one instant, there is
+  no per-row versioning and no block-number column to check any of them
+  against. `snapshot_block` here is only ever this query's *assumption* that
+  that instant equals the last block of the previous UTC day, and **that
+  assumption can fail in either direction** — the rebuild may have run before
+  or after that block, and nothing in the table itself says which. **Check
+  `dataset_head_time` is recent (today)** — if the dataset has gone stale
+  (the community ETL stopping is a known risk), stop here and use the
+  snap-download fallback (`docs/data-acquisition.md` path 2, the only source
+  in this repo that is genuinely, cryptographically atomic at one block via
+  Merkle range proofs against the state root — this BigQuery path trades that
+  atomicity for being free and requiring no node). The post-bootstrap audit
+  (§2.2) is what actually *detects* which way, and by how much, the
+  assumption failed for a given bootstrap — nothing else in this pipeline can.
+- **Measured, not assumed, ADR-0040 — the export, and, separately, what the
+  deployment actually serves.** Re-verifying the 2026-07-25 export against
+  the chain at its own declared block found the *export's* error is **not**
+  confined to a thin boundary layer: in the 2000 blocks before the declared
+  block, 6.9% of touched accounts were wrong (up to 27.99% at depth ≤1,
+  decaying to 5.47% at depth (1000,2000]); a population-wide random sample
+  with **no** recency constraint still measured **0.33%** wrong (Wilson 95%
+  CI [0.09%, 1.21%]) — an implied ~668,000 accounts across the full
+  200,503,969. But the export's own error rate is **not** the deployment's
+  answer rate: re-running the same population check directly against the
+  *live server* (200 addresses, applied head, quorum-verified) found **0
+  wrong of 200** (Wilson 95% CI [0.00%, 1.88%]) — the ordinary forward
+  replay heals most of what the CSV got wrong, for free. It does not heal all
+  of it: re-checking the *specific* rows already known wrong found 28 of 150
+  window-wrong rows and 22 of 100 funded-but-absent accounts **still** wrong,
+  days later. The two are not in tension — an export error either reflects
+  state *after* the declared block (heals unconditionally, the ordinary
+  replay reaches it regardless of any rewind) or *before* it (never heals
+  from forward replay alone; `--snapshot-rewind` is what reaches backward
+  into that window). See ADR-0040 for the full depth table, the live-server
+  numbers, and this causal model. Getting `snapshot_block` slightly **too
+  low** is therefore not merely "safe" but the *documented default
+  behavior*: `--snapshot-rewind` (default 2000, on by default) already
+  treats the snapshot as exact that many blocks earlier and lets the
+  ordinary replay re-derive the window from the chain's own absolute
+  post-state — see §2.2. Getting it **too high** silently misses changes and
+  is never safe; when unsure, prefer a lower value and let reconciliation
+  and the post-bootstrap audit (§2.2) prove the join.
 
 **Export** (console or CLI; needs a dataset you own for the intermediate table and
 a GCS bucket):
@@ -273,6 +316,42 @@ every 5 M accounts) → one-time PIR setup → state saved to `--state` → catc
 replay `snapshot_block+1 ‥ finalized` through the feed (~1–2 s per block — a
 one-day gap is ~2–4 h; the server answers queries the whole time, labelled with
 its current block) → steady-state follow.
+
+**The export is not exact (ADR-0040) — three flags are part of this procedure,
+not optional extras:**
+
+- **`--snapshot-rewind <N>`** (default **2000**, on by default; `0` disables).
+  Treats the snapshot as exact `N` blocks before `--snapshot-block` instead of
+  exactly at it, so the catch-up replay above re-derives the rewind window
+  from the chain's own absolute post-state before it ever reaches the
+  declared block. Narrows the *densest* part of the measured error; does not
+  close it (see below), and does not fix relative withdrawal credits inside
+  the window — `--hard-refresh` does.
+- **`--snapshot-audit-samples <N>`** (default **512**, on by default; `0`
+  disables). Reservoir-samples that many addresses during the ingest above
+  and verifies them against `--refresh-url`'s quorum once setup finishes,
+  logging `snapshot audit: N checked, W disagreed … (rate …%, Wilson 95% CI
+  […, …])` and writing a `<state>.audit` sidecar so a later restart still
+  reports it (also one line on `GET /healthz`). This does not correct
+  anything — it measures and discloses whatever residual error remains after
+  the rewind above, so a bad export is *visible* instead of assumed away.
+- **`--hard-refresh <file>`** (off by default — needs a caller-supplied
+  address list). Quorum-verifies each address against `--refresh-url` at the
+  current applied head and corrects the store wherever every configured
+  provider agrees on a value differing from what is stored. Runs entirely in
+  the background (never blocks serving or following) and is idempotent — a
+  restart with the same file is a no-op re-verification. This is the tool for
+  a *known* suspect list (e.g. accounts the audit above flagged, or ones a
+  specific incident turned up); it is not run automatically against the
+  whole account set.
+
+None of the three, alone or together, proves the served set is exact — see
+ADR-0040 for the full measurement and what remains open. `docs/data-acquisition.md`
+path 2 (the account-only `snap` download, verified against the state root via
+Merkle range proofs) is the only source in this repo that is genuinely atomic
+at one block; this BigQuery path trades that guarantee for being free and
+node-free, and the three flags above are the documented mitigation for that
+trade, not a claim that it has been eliminated.
 
 Restarts are cheap: with `--state`, startup is a file load (bit-identical PIR
 parameters — previously bootstrapped clients stay valid) plus the catch-up

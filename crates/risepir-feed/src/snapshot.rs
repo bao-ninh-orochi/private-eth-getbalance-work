@@ -105,8 +105,15 @@ pub struct SnapshotStats {
 }
 
 /// Streams every row of `paths` (in order) into `sink` as
-/// `(keccak256(address), balance)`, skipping zero balances. See the
-/// module docs for the accepted format.
+/// `(address, keccak256(address), balance)`, skipping zero balances. See
+/// the module docs for the accepted format.
+///
+/// The raw 20-byte address rides alongside its hash — `AddressHash` is a
+/// one-way digest, so anything that needs to ask a *chain* about the row
+/// later (the post-bootstrap snapshot audit, ADR-0040) needs the address
+/// this ingest pass already parsed, not a second re-derivation of it.
+/// Everything downstream of the hash (the store, the codec) still only
+/// ever sees `AddressHash`, unchanged.
 ///
 /// # Errors
 ///
@@ -114,7 +121,7 @@ pub struct SnapshotStats {
 /// rejection — the ingest never skips a bad row and continues.
 pub fn ingest<F>(paths: &[PathBuf], mut sink: F) -> Result<SnapshotStats, SnapshotError>
 where
-    F: FnMut(AddressHash, Balance) -> Result<(), String>,
+    F: FnMut([u8; 20], AddressHash, Balance) -> Result<(), String>,
 {
     let mut stats = SnapshotStats::default();
     for path in paths {
@@ -126,7 +133,7 @@ where
             }
             stats.nonzero += 1;
             stats.max_balance = stats.max_balance.max(balance);
-            sink(keccak256(&addr20), balance).map_err(|error| SnapshotError::Sink {
+            sink(addr20, keccak256(&addr20), balance).map_err(|error| SnapshotError::Sink {
                 file: path.clone(),
                 line: line_no,
                 error,
@@ -269,11 +276,33 @@ mod tests {
 
     fn collect(paths: &[PathBuf]) -> Result<(Vec<(AddressHash, Balance)>, SnapshotStats), SnapshotError> {
         let mut rows = Vec::new();
-        let stats = ingest(paths, |k, v| {
+        let stats = ingest(paths, |_addr20, k, v| {
             rows.push((k, v));
             Ok(())
         })?;
         Ok((rows, stats))
+    }
+
+    /// The raw address handed to the sink must be the actual pre-hash
+    /// address the row named, and it must agree with the hash the same
+    /// call also carries (`keccak256(addr20) == hash`) — the audit sampler
+    /// (ADR-0040) trusts both of those without re-deriving either.
+    #[test]
+    fn sink_receives_the_raw_address_matching_its_hash() {
+        let f = temp_file("rawaddr.csv", &format!("{A1},100\n"));
+        let mut seen = Vec::new();
+        ingest(std::slice::from_ref(&f), |raw, hash, balance| {
+            seen.push((raw, hash, balance));
+            Ok(())
+        })
+        .unwrap();
+        std::fs::remove_file(&f).unwrap();
+
+        assert_eq!(seen.len(), 1);
+        let (got_addr, got_hash, got_balance) = seen[0];
+        assert_eq!(got_addr, addr20(A1));
+        assert_eq!(got_hash, keccak256(&got_addr));
+        assert_eq!(got_balance, 100);
     }
 
     const A1: &str = "0x4838b106fce9647bdf1e7877bf73ce8b0bad5f97";
@@ -378,7 +407,7 @@ mod tests {
     #[test]
     fn sink_error_carries_file_and_line() {
         let f = temp_file("sink.csv", &format!("{A1},1\n{A2},2\n"));
-        let err = ingest(std::slice::from_ref(&f), |_, v| {
+        let err = ingest(std::slice::from_ref(&f), |_, _, v| {
             if v == 2 {
                 Err("table full".to_string())
             } else {

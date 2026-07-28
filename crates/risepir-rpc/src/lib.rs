@@ -49,8 +49,11 @@ pub mod rpc;
 pub mod autosave;
 pub mod demo;
 pub mod front;
+pub mod hard_refresh;
 pub mod journal;
 pub mod mainnet;
+pub mod snapshot_audit;
+pub mod snapshot_rewind;
 pub mod state;
 
 pub use error::RpcError;

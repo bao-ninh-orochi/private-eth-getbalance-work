@@ -2575,3 +2575,398 @@ live mock deployment both still pass unmodified (0 failing checks each) —
 `/metrics`/`/status` are additive and do not touch the query path those
 gates exercise. A real `curl /metrics` against a running `mock --web web`
 deployment is pasted in this change's PR description/commit message.
+
+### ADR-0040 — The snapshot export is not exact, at any distance from its boundary; three mechanisms, none of which close the population-wide gap alone **[NEW — supersedes deploy.md §2.1's "refreshes on UTC-day boundaries ⇒ canonical exact-at point" claim]**
+
+**The measurement, in full — this is what changed the picture.** §5.4's
+narrower finding ("6 of 27 accounts active immediately before the boundary
+were wrong") was re-run at scale, on the same 321-shard export the live
+deployment ingested, at its declared exact block **B = 25,613,233**
+(`2026-07-25T23:59:59Z`), 200,503,969 nonzero rows.
+
+*Method:* for every block in `(B−2000, B]`, `debug_traceBlockByNumber` with the
+prestate tracer in diffMode was folded, per account, to the **absolute**
+post-state balance at its last touch `<= B` — the same tracer this repo's own
+feed already trusts for the identical reason (`crates/risepir-feed/src/rpc.rs`).
+That value is the account's true balance at B; diffing it against the exported
+CSV row is diffing the export against the chain, not against this codebase.
+The fold was independently confirmed: `gateway.tenderly.co/public/mainnet`'s
+`eth_getBalance(a, B)` matched the folded value on 5/5 probed accounts.
+
+*Window result* — 149,987 accounts trace-touched in `(B−2000, B]`: 8,065 rows
+wrong, 2,273 accounts funded at B with **no row at all** in the export, 968
+further beacon-withdrawal recipients in the window with no trace touch ⇒
+**10,338 known-wrong accounts, 6.9% of the window-touched population**.
+
+*Error rate by depth of last touch before B* (disjoint bands — **the finding
+that matters**: it decays with distance from the boundary, but does not
+vanish):
+
+| depth of last touch | checked | wrong | absent & funded | wrong % |
+|---|---|---|---|---|
+| ≤1 | 343 | 86 | 10 | 27.99 |
+| (1,2] | 107 | 18 | 2 | 18.69 |
+| (2,5] | 411 | 81 | 12 | 22.63 |
+| (5,10] | 608 | 79 | 20 | 16.28 |
+| (10,25] | 1,481 | 179 | 31 | 14.18 |
+| (25,50] | 2,248 | 281 | 64 | 15.35 |
+| (50,100] | 3,776 | 406 | 72 | 12.66 |
+| (100,250] | 10,027 | 826 | 182 | 10.05 |
+| (250,500] | 18,448 | 1,149 | 296 | 7.83 |
+| (500,1000] | 33,726 | 1,700 | 531 | 6.62 |
+| (1000,2000] | 78,812 | 3,260 | 1,053 | 5.47 |
+
+*Population rate* — independent of any bounded window: 600 exported rows drawn
+at random, each verified at block B against **both**
+`gateway.tenderly.co/public/mainnet` and `eth-mainnet.public.blastapi.io`
+(agreement between both required or the sample was dropped; 0 dropped): **2
+wrong ⇒ 0.33%, Wilson 95% CI [0.09%, 1.21%]** ⇒ an implied **668,346** wrong
+accounts across the 200,503,969 (CI [183,376, 2,420,405]).
+
+Largest single error found: the beacon deposit contract
+`0x00000000219ab540356cbb839cbe05303d7705fa`, export says 88,453,361.5383 ETH,
+chain says 88,593,844.4457 ETH (**+140,482.91 ETH**). Largest absent-but-funded:
+`0xa9ac43f5b5e38155a288d1a01d2cbc4478e14573` holding **53,173.2441 ETH** with no
+row at all.
+
+**This is not a narrow boundary artifact.** §2.1's "refreshes on UTC-day
+boundaries, so the last block of the previous UTC day is the canonical
+'exact at' point" is measurably false. The 5.47%-at-depth-2000 tail proves the
+error is not confined to a thin boundary layer, and the 0.33% population rate
+— measured on accounts with **no** recency constraint at all — proves it is
+not confined to *any* bounded recency window. A window rewind, however wide,
+cannot close a population-wide error; disclosure of a measured residual is
+the honest replacement for a false claim of exactness.
+
+**What the source actually is — verified with `bq show`, not inferred.**
+`bq show bigquery-public-data:crypto_ethereum.balances` returns a materialized
+**table**, not a view: description *"This table contains Ether balances of
+all addresses, updated daily. Data is exported using
+https://github.com/medvedev1088/ethereum-etl"*, 453,102,032 rows,
+27,186,121,920 bytes, created 2020-01-22, `lastModifiedTime`
+2026-07-27T10:47:05Z. It has **one effective height per daily rebuild** —
+every row in one rebuild shares the same underlying instant; there is no
+per-row versioning and **no block-number column to check any of it against**.
+§2.1's gate query does not read that instant — it cannot, the table does not
+expose it — it *assumes* the instant equals the last block of the previous
+UTC day by the *blocks* table's own clock. That assumption is the actual root
+cause this whole measurement traces back to, and it **can fail in either
+direction**: the daily rebuild may have run before or after that assumed
+block, and nothing in the table itself says which, or by how much. This is
+also why the post-bootstrap audit (below) exists as a *check* rather than a
+formality — it is the only thing in this pipeline that can detect which way,
+and by how much, the assumption failed for a *given* bootstrap, rather than
+relying on this one measurement staying representative of every future export.
+
+**What the CSV gets wrong is not the same number as what the deployment ends
+up serving — both were measured, separately, and conflating them would
+mislead in either direction.** Everything above is a **CSV-vs-chain** diff:
+it says nothing about what a bootstrapped, replayed, currently-running
+deployment actually answers, because the ordinary forward replay heals a
+great many of these rows for free the moment it re-touches them
+(`docs/deploy.md` §5.4's own "the replay is what fixes it" finding). Re-running
+the population check directly against the **live server** — 200 addresses
+drawn at random, the deployment's own answer at its applied head (block
+25,630,125) against the identical tenderly+blastapi quorum, both required to
+agree — found **0 wrong of 200 (Wilson 95% CI [0.00%, 1.88%])**, against 2
+wrong of 600 for the CSV at block B. The deployment is measurably, and
+substantially, more correct than the export it was bootstrapped from; stating
+only the CSV's 0.33% and letting a reader assume it describes the deployment
+would overstate the live risk by roughly an order of magnitude.
+
+**But it would just as badly understate the risk to stop there — a hard
+residual is real, and a uniform sample this small cannot see it.** 0/200
+drawn uniformly from 200.5M accounts is not evidence the residual is zero; it
+is evidence that whatever residual exists is too small a fraction of the
+*whole* population for a 200-sample uniform draw to hit reliably — which is
+exactly what the causal model below predicts, since the residual is
+concentrated in the (tiny, relative to 200.5M) set of accounts that were
+active right at the boundary. Re-checking *those specific rows* — the ones
+the CSV-level pass already flagged as wrong — against the live server at head
+25,630,349 finds the residual directly:
+
+- window-wrong rows: **28 of 150 still wrong** — 18.7%, Wilson 95% CI
+  [13.2%, 25.7%];
+- funded-but-absent accounts: **22 of 100 still served as `0x0` while
+  funded** — 22.0%, Wilson 95% CI [15.0%, 31.1%];
+- of the 2 population-wrong rows the original 600-sample CSV pass found,
+  **1 is still wrong**.
+
+Put together: roughly 80% of what the CSV-level pass flagged has healed by
+the time of this re-check (days of ordinary replay); the ~19–22% that has not
+is not a random subset of the flagged rows — it is exactly the population the
+model below identifies, and it is exactly what `--hard-refresh` is for.
+
+**The model that explains all of it, and the real justification for
+`--snapshot-rewind`.** Every CSV-vs-chain disagreement is one of exactly two
+shapes, depending only on which side of the declared block B the export's row
+actually reflects:
+
+- **Export ahead of B** — the row already reflects some state *after* B (the
+  daily rebuild ran later than §2.1's assumption, or the account's pre-B state
+  coincidentally matched a later one). The account is touched again somewhere
+  in `(B, head]`, and the *ordinary* forward replay — which always runs from
+  wherever bootstrap starts through the current head, with or without any
+  rewind — re-applies that account's absolute post-state the instant it sees
+  the touch. This heals unconditionally; `--snapshot-rewind` neither helps nor
+  needs to help it. This is the ~80% the residual re-check above found already
+  fixed.
+- **Export behind B** — the row still reflects some state *before* B (the
+  rebuild ran earlier than assumed, or simply missed a late change). The
+  account's true last touch before B falls in some window the export's row
+  does not reflect, and the ordinary forward replay — which only ever runs
+  *forward* from its starting point — **never revisits that window**. The row
+  stays wrong permanently, for as long as the account is never touched again.
+  This is precisely, and only, the population `--snapshot-rewind <N>`
+  targets: moving the effective genesis back to `B−N` makes the *same*
+  forward-replay mechanism additionally cover `(B−N, B]`, so any behind-B
+  error whose true last touch falls inside that rewound window heals the same
+  way an ahead-of-B error always did. An error whose true last touch is
+  earlier than `B−N` stays out of reach — which is exactly why this is a
+  mitigation with a shrinking, further-out tail (the depth table above), not a
+  fix, and exactly why raising `N` only ever buys a smaller further increment.
+
+Two examples from the residual sample make both halves of "behind B" concrete:
+`0x67e11115a4173beda9ce1818de6dd2bbc57f7f80` — the deployment serves
+0.017472 ETH, the chain says 0. This account was emptied *before* B, in a
+window the replay from B onward never revisited (a rewind reaching back far
+enough would have caught it; the default 2000-block window in this
+particular case did not, since its true last touch is further back).
+`0xcd7f7cc5e7d037ef9fc9940e64fd083800518c94` — the deployment serves `0x0`,
+the chain says 0.000742 ETH: the export missed a pre-B credit outright, with
+the identical consequence — absent-but-funded, which ADR-0015/0017 already
+identify as the worst-shaped wrong answer this system can give.
+
+**One more honest caveat, about the audit's own blind spot.** The
+post-bootstrap audit (below) reservoir-samples *uniformly* from the ingested
+rows, the same shape as the 0.33%/0/200 population checks above — which means
+it inherits their exact blind spot. It will faithfully track the
+population-wide CSV-vs-chain baseline over time (catching, for instance, a
+future export whose daily rebuild drifted further from the declared block
+than this one did), but a default 512-sample uniform draw is no more likely to
+land on the boundary-concentrated residual than the 0/200 live check was.
+Finding that residual, as above, needed a *targeted* resample of rows already
+known suspect — exactly the operator judgment call `--hard-refresh` is built
+for and does not automate the discovery of (see "What this design does NOT
+close" below). The audit is real evidence about the export's general
+integrity; it is not, and is not meant to be, a detector for this specific
+concentrated residual.
+
+**Chosen: three complementary mechanisms, layered, none sufficient alone.**
+
+1. **`--snapshot-rewind <N>` (`crates/risepir-rpc/src/snapshot_rewind.rs`,
+   default **2000**, `0` disables) — bootstrap mitigation, targeted at exactly
+   one of the two populations above.** Passes `snapshot_block - N` as the
+   genesis block to `RisePirServer::new` instead of `snapshot_block` itself,
+   so the *existing* catch-up replay — unmodified — additionally re-derives
+   every account touched in `(B−N, B]` from the tracer's own absolute
+   post-state before the replay ever reaches the declared block. This is
+   arithmetically identical to passing a lower `--snapshot-block`, which §2.1
+   already gestured at ("getting `snapshot_block` slightly too low is safe");
+   what is new is that it is **on by default**, at a value chosen from the
+   table above (2000 blocks covers the (100,2000] bands, where depth-and-density
+   trade off — much denser than the population baseline, still cheap: ~2000
+   extra seconds of replay at ~1 s/block). Per the causal model above, this
+   is not "removing the densest part of a decaying error" in the abstract —
+   it is **precisely and only** reaching further back into the "export behind
+   B" population; it does nothing for, and needs to do nothing for, the
+   "export ahead of B" population, which the ordinary forward replay already
+   heals unconditionally regardless of `N`. By construction it cannot reach a
+   behind-B error whose true last touch predates `B−N` (the residual
+   measurement's `0x67e11115a4173beda9ce1818de6dd2bbc57f7f80` example is
+   exactly such a case at the deployed default), which is why this is a
+   mitigation with a shrinking, further-out tail, not a fix.
+   **Does not fix:** EIP-4895 withdrawal credits are relative
+   (`risepir_proto::BlockUpdate::credits`), resolved against the store's prior
+   at apply time. Inside the rewind window, that prior may itself be wrong
+   (the snapshot's own error), and a relative credit applied on top of a wrong
+   base stays wrong — unlike an absolute `changes` entry, which simply
+   replaces whatever was there, nothing about replaying more blocks self-heals
+   a relative credit's base. This is the residual `--hard-refresh` exists for.
+
+2. **Post-bootstrap snapshot audit (`crates/risepir-rpc/src/snapshot_audit.rs`,
+   `--snapshot-audit-samples`, default **512**, `0` disables) — measurement,
+   not mitigation.** A streaming reservoir sample (Algorithm R, one pass, a
+   dependency-free seeded `SplitMix64` so a run is reproducible from its
+   logged seed — never a second read of a ~200M-row export) of `(address,
+   ingested-balance)` pairs taken *during* ingest, verified after PIR setup
+   against the same quorum `--hard-refresh` uses, **at the snapshot's own
+   declared block** (deliberately not the rewound genesis — this measures
+   whether the export's own claim held up, independent of whatever extra
+   replay window the server additionally runs). Reports
+   `checked/disagreed/rate/Wilson-95%-CI` on the console, in a `<state>.audit`
+   sidecar (plain `checked=/disagreed=/block=/seed=` text — rate and CI are
+   recomputed from the counts on every read, never themselves persisted, so a
+   stored number can never drift from what the formula would say fresh), and
+   as one `snapshot_audit=…` line on `GET /healthz` (this crate does not
+   compute or interpret the number — `risepir_http::NodeState` only stores and
+   displays whatever line `risepir-rpc` hands it, keeping the Wilson-interval
+   arithmetic entirely on this feature's side of that seam). A rate whose 95%
+   lower bound clears a **1%** threshold (deliberately not "any rate above
+   zero" — the Wilson lower bound is provably >0 for **any** nonzero
+   `disagreed` count however large `checked` is, which would flag nearly every
+   real run including ones that merely reproduce this very ADR's own
+   disclosed 0.33% baseline; 1% is ~3x that baseline, loose enough to stay
+   quiet on the known number, tight enough to catch a real regression) escalates
+   to a startup `WARNING`, never a refusal to serve — the same posture ADR-0027
+   already took for the reconcile check: a third-party dataset's imperfection
+   must not become this deployment's outage, and disclosure with a number is
+   the honest alternative to either silent trust or self-inflicted downtime.
+   **This is what stops the boundary-error finding from silently reappearing,
+   undetected, in a *future* export** — every complete-set bootstrap now
+   measures its own residual instead of assuming the dataset is exact. It
+   tracks the population-wide baseline (the 0.33%-shaped number); per the
+   caveat above, its uniform sampling is not built to, and should not be
+   read as, a detector for the boundary-concentrated residual — that needs
+   the targeted resample `--hard-refresh` acts on.
+
+3. **`--hard-refresh <file>` (`crates/risepir-rpc/src/hard_refresh.rs`) — the
+   general-purpose correction mechanism.** A newline-delimited address list
+   (`#`-comments and blank lines skipped; every other line validated as a
+   lowercase `0x` + 40-hex-digit address, hard-failing with `file:line` on
+   anything else) is, at startup, checked against `--refresh-url`'s quorum
+   (repeatable; default two independent operators — `gateway.tenderly.co` and
+   `eth-mainnet.public.blastapi.io`, both distinct from the feed (dRPC/merkle)
+   and the reconcile check (publicnode); at least 2 distinct required or the
+   process exits 2) at **one explicit height** — the applied head at the
+   moment the check starts, via `RpcClient::balance_at`, which already reads
+   at an explicit block rather than `"latest"`. **Every** configured provider
+   must agree for a value to be trusted (`quorum`, generalized past exactly
+   two — an operator naming three or four providers gets unanimity across all
+   of them, not just the first two); any disagreement or any single fetch
+   error is *skip and count*, never a guess. An agreed value that differs from
+   the store's own current verified read (`NodeState::balance_of`) becomes a
+   [`Correction`], pushed **immediately** (not batched until the whole file
+   finishes) to a shared `CorrectionQueue`. The follow loop drains up to
+   `MAX_CORRECTIONS_PER_BLOCK = 2,000` corrections per applied block,
+   prepending them to that block's `changes` — **first**, so the feed's own
+   changes for the same block, appended after, always win for a shared key
+   (`BlockUpdate::changes`'s own documented last-entry-wins contract) — never
+   injecting more into one block regardless of how large the correction set
+   is (`RisePirServer::apply_block` is explicitly not transactional; an
+   oversized injected batch is exactly the failure mode the cap exists for).
+   Idempotent by construction: a write only ever happens where the store
+   currently disagrees, so re-running with the same file after corrections
+   have landed is a no-op re-verification.
+   **A real race, found while implementing the chunking cap, and closed rather
+   than left as a residual:** a correction set bigger than
+   `MAX_CORRECTIONS_PER_BLOCK` can sit queued across several subsequent
+   blocks before its turn to drain. If the feed legitimately touches that
+   same account in the meantime (an ordinary transaction, nothing to do with
+   this feature), that on-chain change is strictly fresher than a correction
+   decided against an earlier snapshot of the store — applying the queued
+   correction anyway would silently overwrite correct, current data with
+   stale data, which is precisely the wrong-answer class this mechanism
+   exists to prevent, not cause. Each `Correction` therefore also carries the
+   store's own balance *at the moment the correction was decided*
+   (`baseline`); `filter_stale_corrections` re-reads the store immediately
+   before a correction is actually injected and drops (never applies) any
+   whose live value no longer matches that baseline. Comparing against the
+   *baseline*, not against the correction's own new value, is what actually
+   closes the race — comparing against the new value alone would still let a
+   third, unrelated live value get overwritten. Pinned by a test that
+   reproduces the race with a real `NodeState`/`apply_block` (not a mock):
+   one account left untouched keeps its correction, a second one the feed
+   moves on to a fresh value in an intervening block has its correction
+   dropped, and the fresh value survives.
+   **Concurrency, measured:** a real address list this mechanism has been
+   asked to carry holds 11,306 addresses. Two providers, checked fully
+   serially, would cost roughly 1.9–4.7 hours at a plausible 0.3–0.8 s per
+   round trip against a free keyless endpoint — long enough that "does this
+   block the server" stops being a rounding-error question. It does not: the
+   whole check runs as a background `tokio::spawn` task that never touches the
+   PIR server's write lock (only brief reads via `balance_of`), so serving and
+   following continue unaffected regardless of how long checking takes.
+   Fetches additionally run with bounded concurrency (8 in flight,
+   `CONCURRENT_ADDRESS_CHECKS`) purely to shorten *how long an operator waits
+   to see corrections land* — bringing the same 11,306-address list to roughly
+   15–35 minutes instead of hours, a modest load on a free endpoint rather
+   than a firehose. The post-bootstrap audit (above) reuses the identical
+   quorum machinery at the same bounded concurrency for its own (smaller,
+   default 512-address) checks.
+
+**Rejected:**
+- **Re-reading every window-touched account from an archive RPC as a fix in
+  itself.** The prestate tracer the feed already calls gives the absolute
+  answer *for free* during ordinary replay (that is precisely what
+  `--snapshot-rewind` leverages) — a second, dedicated re-read pass would
+  duplicate work the replay already does, for accounts the replay already
+  heals.
+- **A statistical sweep alone, with no correction mechanism.** Sampling (the
+  audit) proves a rate exists; it can never prove an *individual* account is
+  right (absence of that account from a 512-sample draw is not evidence about
+  it specifically), and it certainly cannot fix one. Measurement and
+  correction are different jobs, hence three mechanisms, not one.
+- **Halting bootstrap, or downgrading a complete-set deployment to partial,
+  on discovering this.** Neither makes any caller safer — the exact same
+  accounts stay wrong (or become entirely unservable) either way — and both
+  destroy the demo this repo exists to provide. The honest alternative to "we
+  found an imperfect input" is disclosure with a number
+  (`snapshot audit: … disagreed … rate … Wilson 95% CI …`), not
+  self-inflicted downtime; this is the same reasoning ADR-0027 already
+  applied to a dark reconcile check, generalized to a dark/wrong *input
+  dataset* rather than a dark *reference provider*.
+
+**What this design does NOT close, stated plainly — and what is measured
+versus assumed, in both directions:** a complete-set deployment built from
+this snapshot family is only as correct as a **measured, disclosed
+residual** — not a claimed-exact set, and, symmetrically, not a claimed-broken
+one either. Overclaiming is possible in either direction here and both are
+wrong:
+
+- Reading the CSV's 0.33% as the deployment's own error rate **overstates**
+  the live risk by roughly an order of magnitude — the live 0/200 figure
+  measures the thing that is actually served, and it is real evidence the
+  deployment is substantially more correct than its source data.
+- Reading that same 0/200 (Wilson 95% CI up to 1.88%) as evidence the
+  deployment *is* correct **understates** the risk just as badly — it is a
+  uniform sample over 200.5M accounts, the residual is concentrated in a
+  population far smaller than that, and the targeted re-check (28/150,
+  22/100) is a direct measurement that the deployment is **not** fully
+  correct, days after bootstrap, for exactly the accounts the causal model
+  predicts. Both numbers are real; they describe different populations
+  (uniform-random vs. known-flagged-and-resampled), and citing only one would
+  mislead.
+
+`--snapshot-rewind` closes the "export behind B" half of the gap for accounts
+whose true last touch falls inside the rewound window, and does nothing for
+(because it needs to do nothing for) the "export ahead of B" half, which
+heals unconditionally either way. The audit measures and discloses the
+population-wide baseline on every bootstrap, continuously, but — per its own
+uniform sampling — is not built to catch the concentrated residual itself.
+`--hard-refresh` is a general tool for correcting a *known* suspect list (this
+repo does not build automatic collection of one — deciding which addresses
+are suspect enough to warrant a hard-refresh run is an operator judgment
+call, informed by the audit, by a targeted re-check like the one that
+produced the residual numbers above, and by whatever address lists a given
+incident turns up). None of the three, alone or together, is a proof that the
+served set is exact; the honest claim this repo can make, and the one
+`docs/deploy.md` and `docs/HANDOFF.md` are updated to make, is disclosure of
+what was actually measured — for both the export and the deployment,
+separately — not a claim of exactness in either direction.
+
+**Deliberate deviations from a strict reading of the brief, recorded rather
+than silent:**
+- **Quorum generalizes past exactly two providers.** The brief's prose
+  consistently says "two independent providers"; the flag design
+  (`--refresh-url`, repeatable, "at least 2 distinct required") reads as
+  tolerating more, so `quorum` requires **unanimous** agreement across
+  however many are configured, not just the first two. An operator who wants
+  the stricter two-provider shape gets it by simply not passing a third.
+- **The `GET /healthz` line packs several sub-fields into one value string**
+  (`checked=… disagreed=… block=… rate=… ci=[…,…]`) rather than one
+  `key=value` line per number, the convention every *other* `/healthz` field
+  uses. The brief's "keep it to one line" is the reason: this crate's
+  reconcile fields already establish "one `key=value` pair per line", and
+  adding five more lines for one feature would have been a bigger footprint
+  in a file explicitly owned mostly by another change in flight. Noted as a
+  minor style inconsistency, not reopened without a reason to.
+- **The alarm threshold is 1%, not "any measured disagreement."** Building
+  the Wilson-interval math surfaced a real property worth recording: the
+  interval's lower bound is `0.0` *only* when zero disagreements are found,
+  and is **strictly positive** for any nonzero count, however large the
+  sample — so "lower bound above zero" is not a meaningful threshold at all,
+  it is nearly "found at least one disagreement", which this very ADR's own
+  disclosed 0.33% baseline would trip on every single bootstrap forever. 1%
+  (~3x that baseline) is what actually distinguishes "reproduces the known
+  number" from "something got worse."

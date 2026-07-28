@@ -252,6 +252,20 @@ pub struct NodeState {
     /// just to report a handful of counters.
     reconcile: Mutex<ReconcileHealth>,
 
+    /// The one-line post-bootstrap snapshot-audit summary `GET /healthz`
+    /// reports (ADR-0040) — `"unknown"` until
+    /// [`Self::set_snapshot_audit_line`] is called (a deployment that
+    /// never ran the audit, or has not finished it yet). Owned entirely by
+    /// `risepir-rpc`'s mainnet module: this crate neither computes nor
+    /// interprets the numbers, it only stores and displays whatever
+    /// pre-formatted line it is given, the same "ADR-0027 rejected a
+    /// second endpoint/format for a handful of counters" reasoning applied
+    /// one level further — the Wilson-interval arithmetic lives with the
+    /// feature that owns it, not with the HTTP transport. Same `std::sync`
+    /// mutex reasoning as `reconcile` above: every access is a plain
+    /// string read/write with no `.await` inside it.
+    snapshot_audit: Mutex<String>,
+
     /// The shared `GET /setup` response cache (ADR-0028) — `None` until the
     /// first `/setup` request populates it. A **separate** lock from
     /// `inner`, same reasoning as `recent` above, with one addition: lock
@@ -359,6 +373,7 @@ impl NodeState {
             complete,
             recent: RwLock::new(VecDeque::new()),
             reconcile: Mutex::new(ReconcileHealth::default()),
+            snapshot_audit: Mutex::new("unknown".to_string()),
             setup_cache: AsyncMutex::new(None),
             setup_generation: AtomicUsize::new(0),
             epoch,
@@ -652,6 +667,25 @@ impl NodeState {
             answer_duration: counters.answer_duration,
         };
         crate::metrics::render(&snapshot)
+    }
+
+    /// Sets the one-line post-bootstrap snapshot-audit summary `GET
+    /// /healthz` reports (ADR-0040) — called at most once or twice per
+    /// process lifetime (a sidecar loaded at startup, and/or a fresh audit
+    /// completing some minutes later), by whichever bootstrap path
+    /// computed or loaded it (`risepir-rpc`'s mainnet module). Deployments
+    /// that never call this (mock/demo, or a deployment that never enabled
+    /// the audit) keep the default `"unknown"` line — never omitted, the
+    /// same reasoning `reconcile_configured` already applies: an absent
+    /// field reads as "healthy" to a monitor that does not know better.
+    pub fn set_snapshot_audit_line(&self, line: String) {
+        *self.snapshot_audit.lock().unwrap_or_else(|e| e.into_inner()) = line;
+    }
+
+    /// The current one-line snapshot-audit summary (`"unknown"` until/
+    /// unless [`Self::set_snapshot_audit_line`] has been called).
+    pub fn snapshot_audit_line(&self) -> String {
+        self.snapshot_audit.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Apply one block: the sole writer path. Applies to the server,
@@ -1281,7 +1315,8 @@ async fn recent(State(state): State<Arc<NodeState>>) -> Response {
 }
 
 /// `GET /healthz`: liveness + readiness, plus the reconcile check's own
-/// health (ADR-0027), as plain text — `200` with one value/line per line:
+/// health (ADR-0027) and the post-bootstrap snapshot audit's one-line
+/// summary (ADR-0040), as plain text — `200` with one value/line per line:
 ///
 /// ```text
 /// ok <head-block>
@@ -1297,12 +1332,22 @@ async fn recent(State(state): State<Arc<NodeState>>) -> Response {
 /// reconcile_deferred_total=<u64>
 /// reconcile_reservoir_checks_total=<u64>
 /// reconcile_reservoir_len=<u64>
+/// snapshot_audit=<"unknown" | "checked=.. disagreed=.. block=.. rate=.. ci=[..,..]">
 /// ```
 ///
-/// e.g. `ok 19123456` followed by twelve `reconcile_*=…` lines. The last
-/// three (`deferred_total`/`reservoir_checks_total`/`reservoir_len`) are an
-/// ADR-0036 addition, appended after `reconcile_halted` — every existing
-/// line above them is unchanged, in the same order.
+/// e.g. `ok 19123456` followed by twelve `reconcile_*=…` lines and one
+/// `snapshot_audit=…` line. The three `deferred_total`/
+/// `reservoir_checks_total`/`reservoir_len` lines are an ADR-0036 addition
+/// and `snapshot_audit` an ADR-0040 one, both appended after
+/// `reconcile_halted` — every existing line above them is unchanged, in the
+/// same order.
+///
+/// `snapshot_audit`'s *value* packs several numbers into itself rather than
+/// getting one line per number: this crate does not know (and should not
+/// need to know) what a Wilson interval is; it only stores and displays
+/// whatever pre-formatted line `risepir_rpc::snapshot_audit` hands it
+/// ([`NodeState::set_snapshot_audit_line`]), and keeping that to one line is
+/// the explicit contract between the two.
 ///
 /// # Compatibility guarantee
 ///
@@ -1344,7 +1389,8 @@ async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
          reconcile_halted={}\n\
          reconcile_deferred_total={}\n\
          reconcile_reservoir_checks_total={}\n\
-         reconcile_reservoir_len={}\n",
+         reconcile_reservoir_len={}\n\
+         snapshot_audit={}\n",
         u8::from(rh.configured),
         rh.last_checkpoint_block,
         rh.last_checkpoint_unix,
@@ -1357,6 +1403,7 @@ async fn healthz(State(state): State<Arc<NodeState>>) -> Response {
         rh.deferred_total,
         rh.reservoir_checks_total,
         rh.reservoir_len,
+        state.snapshot_audit_line(),
     );
     (StatusCode::OK, body).into_response()
 }

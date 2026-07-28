@@ -4,12 +4,22 @@
 //! risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
 //!                     [--web <dir>]
 //! risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]
+//!                     [--snapshot-rewind <N>] [--snapshot-audit-samples <N>]
+//!                     [--hard-refresh <file>] [--refresh-url <url>]...
 //!                     [--state <file>] [--save-interval <secs>] [--partial] [--partial-capacity <N>]
 //!                     [--feed-url <url>]... [--confirm-url <url>]
 //!                     [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
 //!                     [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]
 //!                     [--web <dir>]
 //! ```
+//!
+//! `--snapshot-rewind`/`--snapshot-audit-samples`/`--hard-refresh` are the
+//! three ADR-0040 mechanisms for `docs/deploy.md` §2.1's finding that the
+//! BigQuery snapshot export is measurably not exact at its own declared
+//! block: the first narrows the bootstrap's exposure by re-deriving a
+//! window from the chain itself, the second measures and discloses
+//! whatever residual error remains, and the third is the general-purpose
+//! quorum-verified correction tool for any known-suspect address list.
 //!
 //! `mock` is the Stage-0 demo (synthetic chain, small LWE dim, seeded
 //! demo accounts). `mainnet` is the real thing (`docs/deploy.md`):
@@ -252,12 +262,26 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
     // the command line — resolving eagerly would make the two flags'
     // relative order matter, which they must not.
     let mut save_interval_explicit = false;
+    // `--refresh-url` (ADR-0040) follows the identical replace-then-append
+    // convention as `--feed-url` above, for the identical reason.
+    let mut refresh_url_seen = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--snapshot" => cfg.snapshot.push(next_value(args, &mut i, "--snapshot").into()),
             "--snapshot-block" => cfg.snapshot_block = Some(parse_next(args, &mut i, "--snapshot-block")),
             "--snapshot-accounts" => cfg.snapshot_accounts = Some(parse_next(args, &mut i, "--snapshot-accounts")),
+            "--snapshot-rewind" => cfg.snapshot_rewind = parse_next(args, &mut i, "--snapshot-rewind"),
+            "--snapshot-audit-samples" => cfg.snapshot_audit_samples = parse_next(args, &mut i, "--snapshot-audit-samples"),
+            "--hard-refresh" => cfg.hard_refresh = Some(next_value(args, &mut i, "--hard-refresh").into()),
+            "--refresh-url" => {
+                let url = next_value(args, &mut i, "--refresh-url");
+                if !refresh_url_seen {
+                    cfg.refresh_urls.clear();
+                    refresh_url_seen = true;
+                }
+                cfg.refresh_urls.push(url);
+            }
             "--state" => cfg.state = Some(next_value(args, &mut i, "--state").into()),
             "--save-interval" => {
                 cfg.save_interval_secs = parse_next(args, &mut i, "--save-interval");
@@ -359,6 +383,8 @@ fn print_usage() {
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--web <dir>]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
+    eprintln!("                      [--snapshot-rewind <N>] [--snapshot-audit-samples <N>]");
+    eprintln!("                      [--hard-refresh <file>] [--refresh-url <url>]...");
     eprintln!("                      [--state <file>] [--save-interval <secs>]");
     eprintln!("                      [--journal-restore] [--no-journal-restore]");
     eprintln!("                      [--partial] [--partial-capacity <N>]");
@@ -382,6 +408,17 @@ fn print_usage() {
     eprintln!("since the journal then bounds an ungraceful kill's replay cost, not the full save; 1800");
     eprintln!("(30 min, ADR-0025) when restore is off, since the full save is what bounds it there. An");
     eprintln!("explicit --save-interval always wins over either default.");
+    eprintln!("--snapshot-rewind (default 2000, 0 disables) treats the snapshot as exact N blocks before");
+    eprintln!("--snapshot-block instead of exactly at it, so the ordinary replay re-derives the rewind");
+    eprintln!("window from the chain's own absolute post-state (ADR-0040) — narrows the boundary error,");
+    eprintln!("does not close it, and does not fix relative withdrawal credits (--hard-refresh does).");
+    eprintln!("--snapshot-audit-samples (default 512, 0 disables) reservoir-samples that many addresses");
+    eprintln!("during ingest and verifies them against --refresh-url's quorum after setup, reporting a");
+    eprintln!("measured disagreement rate (with a Wilson 95% CI) instead of assuming the export is exact.");
+    eprintln!("--hard-refresh <file> quorum-verifies a newline-delimited address list against --refresh-url");
+    eprintln!("(repeatable; default two independent providers) and corrects the store only where every");
+    eprintln!("configured provider agrees on a value differing from what is stored — runs in the background,");
+    eprintln!("never blocking serving or following; corrections drain into blocks 2000 at a time (ADR-0040).");
     eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
     eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
     eprintln!("--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind");
@@ -565,5 +602,74 @@ mod tests {
         ]));
         assert_eq!(cfg.confirm_url, "https://independent.test");
         assert_eq!(cfg.feed_urls, vec!["https://a.test".to_string()]);
+    }
+
+    // ── ADR-0040: --hard-refresh / --refresh-url / --snapshot-rewind /
+    // --snapshot-audit-samples ──────────────────────────────────────────
+
+    /// `--hard-refresh` is unset by default, and takes exactly one path
+    /// value.
+    #[test]
+    fn hard_refresh_defaults_off_and_parses_a_path() {
+        assert!(parse_mainnet(&args(&["--partial"])).hard_refresh.is_none());
+        let cfg = parse_mainnet(&args(&["--partial", "--hard-refresh", "addresses.txt"]));
+        assert_eq!(cfg.hard_refresh, Some(std::path::PathBuf::from("addresses.txt")));
+    }
+
+    /// The built-in default is two distinct providers — the floor
+    /// `hard_refresh::validate_refresh_urls` requires, satisfied without
+    /// any flag at all.
+    #[test]
+    fn default_refresh_urls_are_two_distinct_providers() {
+        let cfg = parse_mainnet(&args(&["--partial"]));
+        assert_eq!(cfg.refresh_urls.len(), 2);
+        assert_ne!(cfg.refresh_urls[0], cfg.refresh_urls[1]);
+    }
+
+    /// `--refresh-url` follows the identical replace-then-append
+    /// convention `--feed-url` already established: the first occurrence
+    /// replaces the built-in pair, later occurrences extend it.
+    #[test]
+    fn refresh_url_replaces_defaults_then_appends() {
+        let cfg = parse_mainnet(&args(&["--partial", "--refresh-url", "https://a.test"]));
+        assert_eq!(cfg.refresh_urls, vec!["https://a.test".to_string()]);
+
+        let cfg = parse_mainnet(&args(&[
+            "--partial",
+            "--refresh-url",
+            "https://a.test",
+            "--refresh-url",
+            "https://b.test",
+        ]));
+        assert_eq!(cfg.refresh_urls, vec!["https://a.test".to_string(), "https://b.test".to_string()]);
+    }
+
+    /// `--snapshot-rewind` parses and defaults to 2000 (ADR-0040) — an
+    /// accidental `0` default would silently disable the mitigation.
+    #[test]
+    fn snapshot_rewind_parses_and_defaults_to_2000() {
+        assert_eq!(parse_mainnet(&args(&["--partial"])).snapshot_rewind, 2_000);
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--snapshot-rewind", "500"])).snapshot_rewind,
+            500
+        );
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--snapshot-rewind", "0"])).snapshot_rewind,
+            0
+        );
+    }
+
+    /// `--snapshot-audit-samples` parses and defaults to 512 (ADR-0040).
+    #[test]
+    fn snapshot_audit_samples_parses_and_defaults_to_512() {
+        assert_eq!(parse_mainnet(&args(&["--partial"])).snapshot_audit_samples, 512);
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--snapshot-audit-samples", "1000"])).snapshot_audit_samples,
+            1_000
+        );
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--snapshot-audit-samples", "0"])).snapshot_audit_samples,
+            0
+        );
     }
 }

@@ -266,14 +266,17 @@ pub(crate) fn fsync_parent_dir(path: &Path) {
 /// lifetime. Two guards, both against operator accidents rather than
 /// attackers:
 ///
-/// 1. **Sibling-suffix self-collisions.** This module derives three
-///    sibling paths via `with_extension` — `.journal` (rotation),
-///    `.tmp` (save staging), `.lock` (this function) — so a `--state`
-///    path *already* ending in one of those derives a sibling equal to
-///    itself: rotation would rename a header-only journal **over the
-///    state file just saved**, a save would stage into its own target,
-///    and the lock's `File::create` would truncate the state file
-///    outright. Absurd inputs, one refusal for the family.
+/// 1. **Sibling-suffix self-collisions.** This module derives sibling
+///    paths via `with_extension` — `.journal` (rotation), `.tmp` (save
+///    staging), `.lock` (this function) — and `crate::snapshot_audit`
+///    derives a fourth, `.audit` (the post-bootstrap snapshot audit
+///    sidecar, ADR-0040) — so a `--state` path *already* ending in one of
+///    those derives a sibling equal to itself: rotation would rename a
+///    header-only journal **over the state file just saved**, a save
+///    would stage into its own target, the lock's `File::create` would
+///    truncate the state file outright, and an audit write would replace
+///    it with a few lines of `key=value` text. Absurd inputs, one refusal
+///    for the family.
 ///
 /// 2. **A second process on the same path.** Both would stage into the
 ///    same `<path>.tmp` and interleave writes; whichever renames last
@@ -288,14 +291,16 @@ pub(crate) fn fsync_parent_dir(path: &Path) {
 /// die with the process, so a stale file is harmless and never blocks a
 /// restart.
 pub fn acquire_state_path(path: &Path) -> Result<File, StateError> {
-    // Every sibling this module derives via `with_extension` collides
-    // with the state path itself when the path already carries that
-    // extension: `.journal` (rotation would rename a header-only journal
-    // over the state file), `.tmp` (the save would stage *into* its own
-    // target, voiding the previous-good-file atomicity), `.lock` (the
-    // `File::create` below would truncate the state file). One check
+    // Every sibling this module (or `crate::snapshot_audit`) derives via
+    // `with_extension` collides with the state path itself when the path
+    // already carries that extension: `.journal` (rotation would rename a
+    // header-only journal over the state file), `.tmp` (the save would
+    // stage *into* its own target, voiding the previous-good-file
+    // atomicity), `.lock` (the `File::create` below would truncate the
+    // state file), `.audit` (the snapshot-audit sidecar, ADR-0040, would
+    // overwrite the state file with a few lines of text). One check
     // covers the whole family.
-    for reserved in ["journal", "tmp", "lock"] {
+    for reserved in ["journal", "tmp", "lock", "audit"] {
         if path.extension().and_then(|e| e.to_str()) == Some(reserved) {
             return Err(StateError::Io(format!(
                 "--state {} ends in .{reserved}, which this server derives as a sibling file's \
@@ -1016,7 +1021,7 @@ mod tests {
 
     #[test]
     fn acquire_state_path_refuses_sibling_suffixed_paths() {
-        for reserved in ["journal", "tmp", "lock"] {
+        for reserved in ["journal", "tmp", "lock", "audit"] {
             let path = std::env::temp_dir()
                 .join(format!("risepir-state-{}-selfclobber.{reserved}", std::process::id()));
             match acquire_state_path(&path) {

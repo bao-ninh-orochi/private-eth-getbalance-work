@@ -118,7 +118,10 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
     be closer to replicable than "strict lockstep" suggests); C7's restore
     drill is documented, rehearse it on the VM once; E3 artifact-evaluation
     container if the paper pursues a badge; periodic re-pin of the SHA-
-    pinned CI actions; ADR-0019's deferred hint caching when the UX asks.
+    pinned CI actions. ~~ADR-0019's deferred hint caching when the UX
+    asks~~ — **done 2026-07-28** (ADR-0038: IndexedDB persistence keyed by
+    epoch, server-side `Range`/`If-Range` resume); the UX asked once the
+    complete-set hint reached 553.82 MB, so this left the tail early.
 
 ## 3. Already right — do not "fix" these
 

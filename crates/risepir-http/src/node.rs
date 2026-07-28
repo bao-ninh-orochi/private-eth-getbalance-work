@@ -845,17 +845,17 @@ async fn sync(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery) -> R
 /// re-cloned and re-encoded per request (ADR-0028; see
 /// [`NodeState::setup_bytes`] for the cache/freshness mechanics).
 ///
-/// Sets `ETag: "setup-<epoch>-<block>"` and `Cache-Control: no-cache`
-/// (always revalidate, *not* "never store") on every response. An
-/// `If-None-Match` that names the bundle currently being served gets `304
-/// Not Modified` with no body instead. The `304` path is correct *by
-/// construction*: it is checked against the exact block
-/// [`NodeState::setup_bytes`] just decided is still safe to serve, which
-/// is exactly a block the ring can still bridge forward — there is no
-/// second, separately-maintained "is this still valid" check to drift out
-/// of sync with the one that already gates the `200` path. The lineage
-/// epoch in the validator is what makes that argument hold across a
-/// server *restart* too: block numbers repeat across re-bootstraps, so a
+/// Sets `ETag: "setup-<epoch>-<block>"`, `Cache-Control: no-cache`
+/// (always revalidate, *not* "never store"), and `Accept-Ranges: bytes`
+/// on every response. An `If-None-Match` that names the bundle currently
+/// being served gets `304 Not Modified` with no body instead. The `304`
+/// path is correct *by construction*: it is checked against the exact
+/// block [`NodeState::setup_bytes`] just decided is still safe to serve,
+/// which is exactly a block the ring can still bridge forward — there is
+/// no second, separately-maintained "is this still valid" check to drift
+/// out of sync with the one that already gates the `200` path. The
+/// lineage epoch in the validator is what makes that argument hold across
+/// a server *restart* too: block numbers repeat across re-bootstraps, so a
 /// block-only validator could `304`-revalidate another lineage's bundle
 /// whenever the heights coincided (ADR-0033); `(epoch, block)` cannot
 /// collide across lineages.
@@ -872,6 +872,50 @@ async fn sync(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery) -> R
 /// `If-None-Match` is attacker-controlled request input: parsed defensively
 /// by [`if_none_match_hits`], never indexed blindly and never a panic on
 /// malformed bytes.
+///
+/// # Range requests: resuming an interrupted download (ADR-0038)
+///
+/// A single-range `Range: bytes=<first>-[<last>]` request gets a `206
+/// Partial Content` slice of the *same cached bytes* [`NodeState::setup_bytes`]
+/// just decided are safe to serve — `bytes::Bytes::slice` is a refcounted
+/// view, so this is O(1), never a copy of a potentially ~554 MB body.
+///
+/// **`If-Range` is required, and must name the *exact* `ETag` this
+/// response is about to send.** This is stricter than RFC 7233 permits (a
+/// bare `Range` with no `If-Range` is normally honoured unconditionally),
+/// and that is deliberate, not an oversight: [`NodeState::setup_bytes`]
+/// regenerates the cached bundle as the head advances (ADR-0028), and two
+/// regenerations under the *same* epoch are two *different* byte strings
+/// (the hint reflects every block patched in up to whichever block it is
+/// pinned at, and the epoch alone does not change across a regeneration —
+/// only the block does). A range computed against one regeneration's byte
+/// offsets, served by mistake against a later one, would silently splice
+/// two unrelated bundles into a single corrupt hint — bytes that decode to
+/// garbage, which a complete-mode client can surface as a wrong `0x0`
+/// (exactly the class of bug ADR-0033's epoch gate exists to prevent one
+/// layer up, and the same failure mode ADR-0028's `304` validator already
+/// had to fold the epoch into for the same reason). Requiring `If-Range`
+/// to match the *current* `ETag` — which already encodes both the epoch
+/// and the pinned block — makes a stale-regeneration range request fail
+/// closed onto the always-safe full body instead of a spliced one. An
+/// absent or mismatched `If-Range` therefore serves the ordinary full
+/// `200`, exactly as if no `Range` header were present at all.
+///
+/// A well-formed range that is out of bounds (`first >= total`) is the one
+/// case that *is* an error: `416 Range Not Satisfiable` with
+/// `Content-Range: bytes */<total>` (RFC 7233 §4.4). Multi-range
+/// (`bytes=0-1,2-3`, this server never emits a `multipart/byteranges`
+/// body) and suffix-range (`bytes=-500`) requests are unsupported and, like
+/// any other unparseable `Range` value, degrade to the full `200` — see
+/// [`parse_range`] for the exhaustive parsing rules and
+/// [`RangeOutcome`] for what each case means. Nothing here ever panics on
+/// attacker-controlled `Range`/`If-Range` bytes.
+///
+/// axum 0.8 derives `HEAD /setup` from this same handler by stripping the
+/// body afterward, so a `HEAD` request carrying a `Range` header reaches
+/// every branch below exactly like a `GET` does — nothing in this function
+/// is method-specific, and a test pins that a `HEAD` gets the right status
+/// and headers with (as always for `HEAD`) no body.
 async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Response {
     let (bytes, block) = state.setup_bytes().await;
     let etag = format!("\"setup-{}-{block}\"", state.epoch);
@@ -894,29 +938,97 @@ async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Respo
         }
     }
 
+    let total = bytes.len() as u64;
+
+    // Range/resume (ADR-0038) — only ever consulted once `If-Range` has
+    // proven this request is talking about the *exact* bundle above, never
+    // on `If-Range`'s absence or mismatch (see this fn's doc comment for
+    // why that gate is mandatory rather than a nicety).
+    if let Some(range_header) = headers.get(header::RANGE) {
+        let if_range_matches = headers
+            .get(header::IF_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v == etag);
+        if if_range_matches {
+            if let Ok(raw) = range_header.to_str() {
+                match parse_range(raw, total) {
+                    RangeOutcome::Satisfiable { first, last } => {
+                        let slice = bytes.slice(first as usize..=last as usize);
+                        let mut resp = octet_response(StatusCode::PARTIAL_CONTENT, slice);
+                        let h = resp.headers_mut();
+                        h.insert(
+                            header::CONTENT_RANGE,
+                            HeaderValue::from_str(&format!("bytes {first}-{last}/{total}"))
+                                .expect("first/last/total: plain ASCII decimal digits, always a valid header value"),
+                        );
+                        h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                        h.insert(header::ETAG, etag_header);
+                        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                        h.insert(HEADER_EPOCH, epoch_header);
+                        h.insert(HEADER_MODE, mode_header);
+                        return resp;
+                    }
+                    RangeOutcome::Unsatisfiable => {
+                        let mut resp = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+                        let h = resp.headers_mut();
+                        h.insert(
+                            header::CONTENT_RANGE,
+                            HeaderValue::from_str(&format!("bytes */{total}"))
+                                .expect("total: plain ASCII decimal digits, always a valid header value"),
+                        );
+                        h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                        return resp;
+                    }
+                    // Multi-range, a suffix range, or anything else this
+                    // parser does not recognise: fall through to the full
+                    // `200` below, exactly as if `Range` were absent.
+                    RangeOutcome::Unsupported => {}
+                }
+            }
+            // A `Range` value that fails to decode as UTF-8 also falls
+            // through to the full `200` below — never a panic.
+        }
+    }
+
     let mut resp = octet_response(StatusCode::OK, bytes);
     let h = resp.headers_mut();
     h.insert(header::ETAG, etag_header);
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     h.insert(HEADER_EPOCH, epoch_header);
     h.insert(HEADER_MODE, mode_header);
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     resp
 }
 
 /// `GET /head`: the server's current block, as an 8-byte little-endian
-/// `u64` body, plus an `x-risepir-epoch` header — a cheap way for a
-/// long-lived client to notice a lineage change on its next poll instead
-/// of on its next `/sync` `409` (informational; `/sync`/`/answer` remain
-/// the enforcement points, ADR-0033). Read lock only.
+/// `u64` body, plus `x-risepir-epoch` and `x-risepir-mode` headers — a
+/// cheap way for a long-lived client to notice a lineage change on its
+/// next poll instead of on its next `/sync` `409` (informational;
+/// `/sync`/`/answer` remain the enforcement points, ADR-0033).
+///
+/// `x-risepir-mode` is new here (ADR-0038): a persistent hint cache needs
+/// the *(epoch, mode)* pair before it can even decide whether a cached
+/// bundle applies, and asking for it here is far cheaper than a `/setup`
+/// request, which can pay `NodeState::setup_bytes`'s cache-regeneration
+/// cost (~10 s CPU at the complete set). Both headers are read from the
+/// same `NodeState` `/setup` already reads them from, so the pair still
+/// cannot straddle a restart the way two *separate* requests could — this
+/// preserves exactly the property ADR-0033 introduced the header for in
+/// the first place (there, putting mode *on* `/setup`'s own response
+/// closed the race between a freestanding `GET /mode` and a concurrent
+/// re-bootstrap; here, the same atomicity argument applies to `/head`
+/// instead of `/setup`, and for the same reason). Read lock only.
 async fn head(State(state): State<Arc<NodeState>>) -> Response {
     let inner = state.inner.read().await;
     let h = inner.server.block();
     drop(inner);
     let mut resp = octet_response(StatusCode::OK, h.to_le_bytes().to_vec());
-    resp.headers_mut().insert(
+    let hdrs = resp.headers_mut();
+    hdrs.insert(
         HEADER_EPOCH,
         HeaderValue::from_str(state.epoch()).expect("epoch: ascii hex only, always a valid header value"),
     );
+    hdrs.insert(HEADER_MODE, HeaderValue::from_static(if state.complete { "1" } else { "0" }));
     resp
 }
 
@@ -1118,6 +1230,96 @@ fn epoch_gate(state: &NodeState, raw_query: Option<&str>) -> Option<Response> {
     }
 }
 
+/// What [`parse_range`] decided about a `Range` request header, against a
+/// resource of some known `total` byte length.
+///
+/// Only a single `bytes=<first>-[<last>]` range is ever honoured — see
+/// [`setup`]'s doc comment for why a mandatory, matching `If-Range` gates
+/// this parser being consulted at all, and this type's own variants for
+/// what everything else degrades to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeOutcome {
+    /// No usable single-range request: a suffix range (`bytes=-500`), a
+    /// multi-range request (`bytes=0-1,2-3`), or anything that fails to
+    /// parse as `bytes=<u64>-[<u64>]` (including an integer too large for
+    /// `u64`, or a `last-byte-pos` before `first-byte-pos`). The caller
+    /// must serve the ordinary full response, exactly as if `Range` were
+    /// absent — never a panic, never a guess at what the client meant.
+    Unsupported,
+    /// `first-byte-pos` is at or past `total` — RFC 7233 §4.4: not
+    /// satisfiable regardless of `last-byte-pos`. The caller answers `416`.
+    Unsatisfiable,
+    /// A satisfiable, inclusive byte range within `0..=total-1`. `last`
+    /// already has an absent or over-long `last-byte-pos` clamped down to
+    /// `total - 1` (RFC 7233 §2.1: "the byte range is interpreted as the
+    /// remainder of the representation"), so the caller can slice
+    /// `first..=last` directly with no further bounds-checking.
+    Satisfiable {
+        /// First byte of the range, inclusive; always `< total`.
+        first: u64,
+        /// Last byte of the range, inclusive; always `>= first` and
+        /// `< total`.
+        last: u64,
+    },
+}
+
+/// Parses a `Range: bytes=<first>-[<last>]` request header (RFC 7233 §2.1)
+/// against a resource of `total` bytes. Never panics on any input —
+/// `Range` is attacker-controlled request data like every other header
+/// this crate reads off the wire, and a parser this small earns exhaustive
+/// unit tests rather than a general-purpose crate dependency: this file's
+/// other hand-rolled header/query parsers ([`if_none_match_hits`],
+/// [`parse_epoch_param`], [`parse_sync_query`]) all take the same
+/// approach.
+///
+/// Deliberately narrower than the RFC allows, in two ways, both of which
+/// degrade to [`RangeOutcome::Unsupported`] rather than an error: a
+/// suffix-length range (`bytes=-500`, "the last N bytes") is not
+/// implemented, and a multi-range request (`bytes=0-1,2-3`) is not
+/// implemented (this server never emits a `multipart/byteranges` body).
+/// Both are safe to leave unsupported because the caller's fallback is
+/// simply the ordinary full `200` — a client that asked for a range it
+/// cannot get here still gets a correct, complete bundle, just not a
+/// partial one.
+fn parse_range(raw: &str, total: u64) -> RangeOutcome {
+    let Some(spec) = raw.strip_prefix("bytes=") else {
+        return RangeOutcome::Unsupported;
+    };
+    if spec.contains(',') {
+        return RangeOutcome::Unsupported;
+    }
+    let Some((first_s, last_s)) = spec.split_once('-') else {
+        return RangeOutcome::Unsupported;
+    };
+    if first_s.is_empty() {
+        // A suffix range (`bytes=-500`) — unsupported, see the doc comment.
+        return RangeOutcome::Unsupported;
+    }
+    let Ok(first) = first_s.parse::<u64>() else {
+        return RangeOutcome::Unsupported;
+    };
+    if first >= total {
+        return RangeOutcome::Unsatisfiable;
+    }
+    let last = if last_s.is_empty() {
+        total - 1
+    } else {
+        match last_s.parse::<u64>() {
+            // An over-long `last-byte-pos` folds down to the end of the
+            // representation (RFC 7233 §2.1) rather than being rejected.
+            Ok(l) if l >= first => l.min(total - 1),
+            // `last < first` is a syntactically invalid byte-range-spec
+            // (RFC 7233 §2.1: "MUST be ignored"); anything that fails to
+            // parse as a plain `u64` (including a value too large to fit
+            // one) is simply not a range this parser understands. Both
+            // degrade to the same safe fallback as every other malformed
+            // case here.
+            _ => return RangeOutcome::Unsupported,
+        }
+    };
+    RangeOutcome::Satisfiable { first, last }
+}
+
 /// Parses `from=<u64>&to=<u64>` (order-independent, extra/unknown params
 /// ignored) out of a raw query string. `None` for anything that doesn't
 /// cleanly parse both — the caller maps that to `400`, never guessing a
@@ -1165,6 +1367,76 @@ mod tests {
         assert_eq!(parse_sync_query("from=abc&to=5"), None);
         assert_eq!(parse_sync_query("from=1&to=-5"), None);
         assert_eq!(parse_sync_query("garbage"), None);
+    }
+
+    #[test]
+    fn parse_range_open_ended_reaches_the_true_end() {
+        assert_eq!(parse_range("bytes=0-", 1000), RangeOutcome::Satisfiable { first: 0, last: 999 });
+        assert_eq!(parse_range("bytes=500-", 1000), RangeOutcome::Satisfiable { first: 500, last: 999 });
+    }
+
+    #[test]
+    fn parse_range_explicit_bounds() {
+        assert_eq!(parse_range("bytes=100-199", 1000), RangeOutcome::Satisfiable { first: 100, last: 199 });
+        assert_eq!(parse_range("bytes=0-0", 1000), RangeOutcome::Satisfiable { first: 0, last: 0 }, "a single byte");
+    }
+
+    #[test]
+    fn parse_range_over_long_last_clamps_to_total_minus_one() {
+        // RFC 7233 §2.1: an over-long last-byte-pos folds down to the end
+        // of the representation rather than being rejected.
+        assert_eq!(
+            parse_range("bytes=100-999999999999", 1000),
+            RangeOutcome::Satisfiable { first: 100, last: 999 }
+        );
+    }
+
+    #[test]
+    fn parse_range_suffix_is_unsupported() {
+        // "last N bytes" — deliberately not implemented; see the doc
+        // comment. Must degrade to the safe fallback, never guess N.
+        assert_eq!(parse_range("bytes=-500", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("bytes=-0", 1000), RangeOutcome::Unsupported);
+    }
+
+    #[test]
+    fn parse_range_malformed_is_unsupported_never_panics() {
+        assert_eq!(parse_range("bytes=abc", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("bytes=", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("garbage", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("bytes=100", 1000), RangeOutcome::Unsupported, "no hyphen at all");
+        assert_eq!(parse_range("Bytes=0-9", 1000), RangeOutcome::Unsupported, "unit token is case-sensitive here");
+    }
+
+    #[test]
+    fn parse_range_last_before_first_is_unsupported() {
+        assert_eq!(parse_range("bytes=5-1", 1000), RangeOutcome::Unsupported);
+    }
+
+    #[test]
+    fn parse_range_multi_range_is_unsupported() {
+        assert_eq!(parse_range("bytes=0-99,200-299", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("bytes=0-,", 1000), RangeOutcome::Unsupported, "a trailing comma is still multi-range shaped");
+    }
+
+    #[test]
+    fn parse_range_huge_numbers_never_panic_or_wrap() {
+        // Larger than u64::MAX by a wide margin, on either side of the
+        // hyphen — must not panic and must not silently wrap.
+        assert_eq!(parse_range("bytes=99999999999999999999999999-", 1000), RangeOutcome::Unsupported);
+        assert_eq!(parse_range("bytes=0-99999999999999999999999999", 1000), RangeOutcome::Unsupported);
+        assert_eq!(
+            parse_range("bytes=99999999999999999999999999-99999999999999999999999999", 1000),
+            RangeOutcome::Unsupported
+        );
+    }
+
+    #[test]
+    fn parse_range_first_at_or_past_total_is_unsatisfiable() {
+        assert_eq!(parse_range("bytes=1000-", 1000), RangeOutcome::Unsatisfiable, "first == total");
+        assert_eq!(parse_range("bytes=5000-", 1000), RangeOutcome::Unsatisfiable, "first > total");
+        assert_eq!(parse_range("bytes=0-", 0), RangeOutcome::Unsatisfiable, "an empty resource is never satisfiable");
     }
 
     #[test]

@@ -234,6 +234,25 @@ await send("Log.enable");
 await send("Page.enable");
 await waitForDocument();
 
+// Tracks every body-bearing GET /setup on the wire for the *whole* run —
+// shared by the capacity-gate sub-test (3.5) and the cache round-trip
+// test (3.6) below, both of which need to know how many real network
+// fetches of /setup happened during some specific window, not a
+// cumulative count since the process started. Each phase snapshots
+// `setupGetLog.length` before its own window and compares the delta after,
+// rather than an absolute count — section 1's own initial boot below
+// already puts at least one entry in this log before either sub-test
+// runs.
+await send("Network.enable");
+const setupGetLog = [];
+ws.addEventListener("message", (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.method === "Network.requestWillBeSent") {
+    const { url, method } = msg.params.request;
+    if (method === "GET" && new URL(url).pathname === "/setup") setupGetLog.push(url);
+  }
+});
+
 // Which deployment is this? The page adapts to `GET /mode` and so must
 // the gate: in a complete set an absent address is exactly 0, in a partial
 // one it must be an error. Asserting the wrong one would be asserting the
@@ -456,6 +475,72 @@ if (complete) {
   );
 }
 
+// ── 3.4 the cached hint round-trip (ADR-0038) ─────────────────────────
+//
+// Section 1's own boot just cached this origin's hint bytes in
+// IndexedDB, keyed by epoch. This is the point of the whole feature: a
+// second visit — modelled here as `Page.navigate` reloading the same page
+// in the same browser profile (IndexedDB persists across a navigation
+// within one run, which is what makes this testable at all — a fresh
+// `mkdtemp` profile is what makes it *not* leak between separate re-runs
+// of this whole script) — must boot without a single body-bearing
+// `GET /setup`, and must still answer a real query correctly.
+//
+// Deliberately runs *before* section 3.5 below: that sub-test injects a
+// persistent `Page.addScriptToEvaluateOnNewDocument` hook (faking
+// `deviceMemory` and the HEAD `/setup` probe) that survives every
+// subsequent navigation for the rest of this process, which would force
+// the capacity gate open again here and stop `boot()` from running
+// automatically — this phase needs the page in its ordinary, unrigged
+// state.
+{
+  const setupGetsBefore = setupGetLog.length;
+  const t0 = Date.now();
+  await send("Page.navigate", { url: `${base}/` });
+
+  const rebooted = await pollForBoot(BOOT_BUDGET_MS);
+  const cachedBootMs = Date.now() - t0;
+  check("a second visit boots successfully from the cached hint", rebooted?.ok === true, rebooted?.error ?? "");
+  check(
+    "...with no body-bearing GET /setup at all — the whole point of caching the hint",
+    setupGetLog.length === setupGetsBefore,
+    setupGetLog.slice(setupGetsBefore).join(" | "),
+  );
+
+  const readyNote = await evaluate(`return document.getElementById("ready-note").textContent;`);
+  console.log(`        cached reboot: ${cachedBootMs} ms wall clock (navigate → query box visible); page says: "${readyNote}"`);
+  check(
+    "the ready line says the hint came from this browser's cache",
+    /cache/i.test(readyNote ?? ""),
+    JSON.stringify(readyNote ?? ""),
+  );
+
+  // And it still answers correctly — a cache hit must be functionally
+  // identical to a fresh download, not merely fast. Reuses `probe` (the
+  // same address section 2 queried) so the comparison is apples to apples.
+  const cachedLookup = await evaluate(`
+    const input = document.getElementById("address");
+    input.value = "${probe}";
+    document.getElementById("form").requestSubmit();
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      const box = document.getElementById("result");
+      const wei = box.querySelector(".wei");
+      const err = box.querySelector(".error");
+      if (wei) return { ok: true, wei: wei.textContent };
+      if (err) return { ok: false, error: err.textContent };
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return { ok: false, error: "timed out waiting for a result" };
+  `);
+  check("a lookup completes after the cached boot", cachedLookup?.ok === true, cachedLookup?.error ?? "");
+  check(
+    "...and matches the original session's answer for the same address exactly",
+    cachedLookup?.wei === lookup?.wei,
+    `got ${JSON.stringify(cachedLookup?.wei)} vs original ${JSON.stringify(lookup?.wei)}`,
+  );
+}
+
 // ── 3.5 the capacity gate actually gates (mock only) ─────────────────
 //
 // ADR-0032's REFUSE path is a designed no-op against mock's ~1.77 MB
@@ -470,15 +555,26 @@ if (complete) {
 // lives entirely inside the page (CDP-injected before its scripts run),
 // so the network assertions below observe the real wire.
 if (expectMock) {
-  await send("Network.enable");
-  const setupGets = [];
-  ws.addEventListener("message", (event) => {
-    const msg = JSON.parse(event.data);
-    if (msg.method === "Network.requestWillBeSent") {
-      const { url, method } = msg.params.request;
-      if (method === "GET" && new URL(url).pathname === "/setup") setupGets.push(url);
+  // Section 1's own boot already cached this origin's hint in IndexedDB
+  // (ADR-0038) — left in place, "Download anyway" below would be a cache
+  // hit and legitimately fetch *zero* bytes, which would be the caching
+  // feature working, not a broken gate, but would make the "exactly one
+  // GET /setup followed consent" check below meaningless. Clearing it
+  // first restores this sub-test's original, narrower question: does
+  // consent actually trigger the network fetch it is supposed to gate?
+  // The cache round-trip itself is section 3.6's job, not this one's.
+  await evaluate(`
+    if (typeof indexedDB !== "undefined" && indexedDB.databases) {
+      const dbs = await indexedDB.databases();
+      await Promise.all(dbs.map((d) => new Promise((res) => {
+        const req = indexedDB.deleteDatabase(d.name);
+        req.onsuccess = req.onerror = req.onblocked = () => res();
+      })));
     }
-  });
+    return true;
+  `);
+
+  const setupGetsBefore = setupGetLog.length;
 
   await send("Page.enable");
   await send("Page.addScriptToEvaluateOnNewDocument", {
@@ -526,8 +622,8 @@ if (expectMock) {
   check("the setup panel is hidden while the gate is up", gate?.bootHidden === true);
   check(
     "no GET /setup fired before consent — the whole point of the gate",
-    setupGets.length === 0,
-    setupGets.join(" | "),
+    setupGetLog.length === setupGetsBefore,
+    setupGetLog.slice(setupGetsBefore).join(" | "),
   );
 
   // "Download anyway" must be a real door, not a label: one click, and
@@ -535,7 +631,11 @@ if (expectMock) {
   await evaluate(`document.getElementById("capacity-continue").click(); return true;`);
   const rebooted = await pollForBoot(BOOT_BUDGET_MS);
   check("Download anyway boots the client end-to-end", rebooted?.ok === true, rebooted?.error ?? "");
-  check("and exactly one GET /setup followed consent", setupGets.length === 1, setupGets.join(" | "));
+  check(
+    "and exactly one GET /setup followed consent",
+    setupGetLog.length === setupGetsBefore + 1,
+    setupGetLog.slice(setupGetsBefore).join(" | "),
+  );
 }
 
 // ── 4. nothing broke quietly ─────────────────────────────────────────

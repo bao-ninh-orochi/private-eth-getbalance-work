@@ -105,16 +105,28 @@ the superseded `(3,4)` lineage is stale.
   close (35.43 GB DB alone), and even at the deployed `(2,4)` geometry's
   ~24.7 GB working set it is still ~0.7 GB over — a real no, just no longer a
   1.6× one. `docs/deploy.md` §2.3/§3.6.)
-- **Hint caching is now the front end's binding constraint, not a nicety.** At
-  the deployed `(arity 2, bucket_size 4)` geometry (ADR-0034), `/setup`
-  computes to **553.82 MB** and a client holds **1.11 GB** resident (was
-  **830.73 MB** / **1.66 GB** at the `(arity 3, bucket_size 4)` geometry the
-  live box still serves until it is re-bootstrapped — `docs/numbers.md` §4c) —
-  versus 46.51 MB at `--partial-capacity 1000000`. Every page load pays that
-  download again. ADR-0019 lists caching as deferred-with-conditions (it is
-  sound only against the delta-ring retention check — a `409` must force a
-  re-download); even at the smaller 554 MB figure it is still what decides
-  whether the browser front end is usable against the complete set at all.
+- ~~Hint caching is now the front end's binding constraint, not a nicety~~ —
+  **built 2026-07-28 (ADR-0038).** The browser client now persists the raw
+  `/setup` bytes in IndexedDB, keyed by the hint-lineage epoch, and
+  `GET /setup` gained server-side `Range`/`If-Range` support
+  (`crates/risepir-http/src/node.rs`) so a reload, a return visit, or a
+  connection dropped mid-transfer resumes or reads from cache instead of
+  paying for the whole thing again. Proven end to end against `mock`
+  (`web/test/browser.mjs`: a second navigation issues **zero** further
+  body-bearing `GET /setup` requests and still answers correctly; measured
+  1022 ms wall clock for that second boot). What this does **not** fix: the
+  *first-ever* visit to a given deployment still pays the full transfer —
+  **553.82 MB** at the deployed `(arity 2, bucket_size 4)` geometry
+  (ADR-0034; was **830.73 MB** at `(arity 3, bucket_size 4)`,
+  `docs/numbers.md` §4c) versus 46.51 MB at `--partial-capacity 1000000` —
+  and a client's resident memory once the hint decodes and `A` expands is
+  unchanged at **1.11 GB** (was 1.66 GB), since that cost comes from what
+  wasm holds once decoded, not from the network — ADR-0032's capacity
+  pre-flight therefore still runs unconditionally, cache hit or not. ADR-0019
+  originally listed caching as deferred-with-conditions (sound only against
+  the delta-ring retention check — a `409` must force a re-download);
+  ADR-0033 supplied the sharper lineage-epoch revalidation ADR-0038 is
+  actually built against.
 - **Web front end, remaining deferrals** (ADR-0019 records why, and what each
   needs): ~~public exposure~~ (shipped, PR #5); and serving the page from a
   *different* party than the PIR server, which is the stronger arrangement for

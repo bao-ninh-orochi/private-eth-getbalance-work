@@ -140,15 +140,266 @@ function entropyImport(getInstance, counter) {
   };
 }
 
+// ── persistent hint cache (IndexedDB, ADR-0038) ─────────────────────────
+//
+// `GET /setup` is the one large transfer this page ever makes — up to
+// 553.82 MB at the deployed complete-mainnet geometry (docs/numbers.md
+// §4c) — and until this section existed nothing on this page persisted
+// it: a reload, a return visit, or a connection dropped at 99% each paid
+// the full cost again. This persists the raw encoded bytes in IndexedDB,
+// keyed by the hint-lineage epoch (ADR-0033), in ~16 MiB chunks.
+//
+// IndexedDB, not the Cache API, and deliberately so. Caching a response
+// whose body can run to hundreds of MB via `caches.put(request,
+// response)` needs the platform to buffer the whole body somewhere before
+// the entry is committed — either `response.clone()`/`body.tee()` (an
+// unbounded second in-flight copy racing the first) or reading the body
+// fully into a `Blob` first. Either shape adds a second ~554 MB buffer at
+// exactly the moment ADR-0032's capacity pre-flight is budgeting the wasm
+// init peak (`ESTIMATED_PEAK_MULTIPLE` below) against the device's
+// memory — precisely the number this project already had to fight hard to
+// keep honest. A chunked IndexedDB store writes one ~16 MiB chunk at a
+// time (bounded transient memory, no second whole-body buffer) and gets
+// resume-across-*sessions* for free, as a side effect of being keyed by
+// byte offset at all.
+//
+// The epoch — never the block a bundle happens to be pinned at — is the
+// cache key, and the server, never the cache, stays the authority on
+// whether a cached entry is still usable:
+//
+//   - A *complete* entry is only ever read after confirming the live
+//     `x-risepir-mode` (from a cheap, fresh `GET /head`) agrees with what
+//     was cached; a disagreement evicts rather than trusts the cache.
+//   - Every partial-download resume sends `If-Range` naming the exact
+//     `ETag` the bytes were downloaded against; the server refuses to
+//     bridge a `Range` across a cache regeneration
+//     (`crates/risepir-http/src/node.rs`'s `setup` handler, ADR-0038), so a
+//     stale resume falls back to a full re-download rather than splicing
+//     two bundles together.
+//   - Every `/sync`/`/answer` `409` (`StaleSetupError`) evicts this
+//     epoch's cache entry immediately, and the decoded bundle's *own*
+//     `risepir_epoch()` is asserted against the epoch the cache was keyed
+//     on as a hard error, never a warning — so a corrupt or mismatched
+//     cache entry can only ever become a slower answer, never a wrong one.
+//
+// At most one epoch's data is ever retained: starting a fresh download for
+// a new epoch clears the whole store first, so a browser tab can never
+// accumulate an unbounded history of past bootstraps.
+//
+// Every function below degrades to "as if no cache existed" on any
+// failure — `indexedDB` undefined (required: `web/test/e2e.mjs` runs this
+// file under plain Node, which has none), an open failure, a
+// `QuotaExceededError` mid-write, a missing or short chunk, a byte count
+// that disagrees with what was recorded — none of these ever throw out of
+// this section into the boot path; see each function's own try/catch.
+
+const IDB_NAME = "risepir-hint-cache";
+const IDB_VERSION = 1;
+const IDB_META_STORE = "meta";
+const IDB_CHUNK_STORE = "chunks";
+
+/// ~16 MiB: large enough that flushing to IndexedDB is a rare event on a
+/// multi-hundred-MB hint (tens of writes, not thousands), small enough
+/// that a stall mid-chunk loses at most one chunk's worth of otherwise-
+/// uncommitted bytes on resume.
+const CHUNK_SIZE = 16 * 1024 * 1024;
+
+/// How many times a stalled `/setup` transfer may resume itself with a
+/// `Range` continuation (ADR-0038 point 7) before giving up and surfacing
+/// the same `TimeoutError` a stall always has. Bounds a flapping
+/// connection to a handful of retries rather than an unbounded loop.
+const MAX_SETUP_RESUME_ATTEMPTS = 3;
+
+/// Where the hint bytes now backing a session came from — surfaced via
+/// `connect`'s `onSource` callback so the boot UI can say so truthfully
+/// instead of showing a download rate/ETA that means nothing for a cache
+/// hit.
+export const HINT_SOURCE = Object.freeze({ CACHE: "cache", NETWORK: "network", RESUME: "resume" });
+
+function idbRequest(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function idbTxDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
+    tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
+  });
+}
+
+/// Opens (and, on first use, creates) the hint cache database. `null` on
+/// anything short of success — no `indexedDB` global, a blocked or
+/// refused open, or any other failure — which every caller treats
+/// identically to "no cache is available", never an exception that could
+/// reach the boot path.
+///
+/// Two stores: `meta` keyed by `epoch` (one record:
+/// `{epoch, mode, pinnedBlock, etag, totalBytes, bytesWritten, complete,
+/// updatedAt}`), and `chunks` keyed by the compound `[epoch, index]` (one
+/// record per ~[`CHUNK_SIZE`] slice: `{epoch, index, bytes}`).
+async function idbOpen() {
+  if (typeof indexedDB === "undefined") return null;
+  try {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_META_STORE)) {
+        db.createObjectStore(IDB_META_STORE, { keyPath: "epoch" });
+      }
+      if (!db.objectStoreNames.contains(IDB_CHUNK_STORE)) {
+        db.createObjectStore(IDB_CHUNK_STORE, { keyPath: ["epoch", "index"] });
+      }
+    };
+    return await idbRequest(req);
+  } catch {
+    return null;
+  }
+}
+
+async function idbGetMeta(db, epoch) {
+  if (!db) return null;
+  try {
+    const tx = db.transaction(IDB_META_STORE, "readonly");
+    const rec = await idbRequest(tx.objectStore(IDB_META_STORE).get(epoch));
+    return rec ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/// `false` on any failure — including a mid-write `QuotaExceededError`,
+/// which is expected rather than exceptional: a browser is always free to
+/// refuse or evict a disposable cache under storage pressure, and the
+/// caller's only obligation is to keep working without it, never to retry
+/// or let the failure surface.
+async function idbPutMeta(db, meta) {
+  if (!db) return false;
+  try {
+    const tx = db.transaction(IDB_META_STORE, "readwrite");
+    tx.objectStore(IDB_META_STORE).put(meta);
+    await idbTxDone(tx);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function idbGetChunk(db, epoch, index) {
+  if (!db) return null;
+  try {
+    const tx = db.transaction(IDB_CHUNK_STORE, "readonly");
+    const rec = await idbRequest(tx.objectStore(IDB_CHUNK_STORE).get([epoch, index]));
+    return rec ? rec.bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+async function idbPutChunk(db, epoch, index, bytes) {
+  if (!db) return false;
+  try {
+    const tx = db.transaction(IDB_CHUNK_STORE, "readwrite");
+    tx.objectStore(IDB_CHUNK_STORE).put({ epoch, index, bytes });
+    await idbTxDone(tx);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/// Wipes both stores unconditionally — safe because at most one epoch's
+/// data is ever retained (see the section docs above), so "clear
+/// everything" and "clear whichever other epoch was here" are the same
+/// operation. Called before the first byte of a *fresh* download for a
+/// new epoch; never called when resuming that same epoch's own partial
+/// entry.
+async function idbClearAll(db) {
+  if (!db) return;
+  try {
+    const tx = db.transaction([IDB_META_STORE, IDB_CHUNK_STORE], "readwrite");
+    tx.objectStore(IDB_META_STORE).clear();
+    tx.objectStore(IDB_CHUNK_STORE).clear();
+    await idbTxDone(tx);
+  } catch {
+    // Best-effort: a failure here only risks retaining a foreign epoch's
+    // bytes until the next successful clear, never a correctness problem
+    // — every read is re-validated against the live epoch before use.
+  }
+}
+
+/// Deletes the cached entry for `epoch` specifically — used when the live
+/// server has just said (a `409`, or a mode disagreement) that this
+/// epoch's cached bytes can no longer be trusted. Guarded on the stored
+/// meta actually naming `epoch`, so this can never clobber a *different*
+/// epoch's legitimately fresher entry (e.g. another tab already moved on).
+async function idbEvictEpoch(db, epoch) {
+  if (!db || !epoch) return;
+  const meta = await idbGetMeta(db, epoch);
+  if (!meta || meta.epoch !== epoch) return;
+  await idbClearAll(db);
+}
+
+/// Pulls the block number out of a `"setup-<epoch>-<block>"` ETag —
+/// informational only (recorded in the cache metadata so a stored entry
+/// is legible without decoding the bundle), never load-bearing: the ETag
+/// *string itself*, not this parsed number, is what `If-Range` echoes back
+/// to the server. `null` for anything that does not match, rather than a
+/// guess.
+function blockFromEtag(etag) {
+  const m = /^"?setup-[0-9a-f]+-([0-9]+)"?$/.exec(etag ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+/// A crude sanity bound on any byte-length read back from IndexedDB before
+/// it is ever used to size a wasm allocation (`risepir_in_reserve`) — this
+/// project's "validate every length before allocating" discipline
+/// (`CLAUDE.md`), applied here to a store that is nominally trusted
+/// (written by this same code) but not immune to disk corruption or a
+/// curious user editing it by hand in DevTools. 16 GiB is arbitrary but
+/// generous: comfortably above any hint this project has ever measured
+/// (553.82 MB at the complete mainnet set, `docs/numbers.md` §4c) with
+/// headroom for years of account growth, while still catching a clearly-
+/// impossible value before it reaches a wasm call that would otherwise
+/// attempt to honour it literally.
+const MAX_SANE_CACHE_BYTES = 16 * 1024 * 1024 * 1024;
+
+function isSaneByteLength(n) {
+  return Number.isInteger(n) && n > 0 && n <= MAX_SANE_CACHE_BYTES;
+}
+
 export class PirSession {
   #inst;
   #base;
   #fetch;
+  /// The hint cache database this session opened at `load()` time, or
+  /// `null` if unavailable — kept so a later `/sync`/`/answer` `409` can
+  /// evict this session's own cached entry (see `#evictCacheOnStale`).
+  #db = null;
+  /// The epoch this session's cache entry (if any) was keyed on, so the
+  /// same eviction path can name the right record.
+  #cacheEpoch = null;
   /// Counts of entropy-shim invocations; surfaced so the page (and the
   /// e2e test) can show that fresh randomness really is being drawn.
   entropy = { calls: 0, bytes: 0 };
   /// Byte counters for the "what actually left your browser" panel.
-  traffic = { setupBytes: 0, queryBytes: 0, responseBytes: 0, deltaBytes: 0 };
+  traffic = {
+    setupBytes: 0,
+    queryBytes: 0,
+    responseBytes: 0,
+    deltaBytes: 0,
+    /// `true` when `setupBytes` came from this browser's IndexedDB cache
+    /// rather than the network (ADR-0038).
+    setupFromCache: false,
+    /// `true` when the hint download resumed a previous attempt — either
+    /// a partial entry left over from an earlier session, or an
+    /// in-session retry after a stall (ADR-0035/ADR-0038) — rather than
+    /// starting at byte 0.
+    setupResumed: false,
+  };
   /// Hex of the last 32 bytes of the most recent query bundle — deep in
   /// the LWE payload, past all framing. Kept so the page can show what
   /// actually went out, and so a test can assert that two queries for the
@@ -187,6 +438,33 @@ export class PirSession {
     return bytes.length;
   }
 
+  /// Reserves the wasm input buffer for exactly `len` bytes and returns a
+  /// fresh `Uint8Array` view over it, ready for the caller to `.set()`
+  /// into at arbitrary offsets — the pattern the `/setup` streaming and
+  /// cache-replay paths both need, factored out of what used to be
+  /// `#getWatched`'s own inline reserve/view pair. Must be called at most
+  /// once per logical write (any further wasm call can move memory and
+  /// detach the view — see the class docs above `#writeIn`).
+  #reserveInput(len) {
+    const e = this.exports;
+    e.risepir_in_reserve(len);
+    const ptr = e.risepir_in_ptr();
+    return new Uint8Array(e.memory.buffer, ptr, len);
+  }
+
+  /// A `/sync` or `/answer` `409` (`StaleSetupError`) means this session's
+  /// hint is no longer bridgeable — the only sound recovery is a fresh
+  /// `/setup`, so whatever this session cached under its own epoch must go
+  /// with it: keeping it around would just make the *next* boot replay the
+  /// same now-useless bytes before falling back to the network anyway.
+  /// Best-effort and never thrown from: a cache that fails to evict is not
+  /// a new failure, only a slightly slower future boot.
+  async #evictCacheOnStale() {
+    if (this.#db && this.epoch) {
+      await idbEvictEpoch(this.#db, this.epoch).catch(() => {});
+    }
+  }
+
   #readOut() {
     const e = this.exports;
     const ptr = e.risepir_out_ptr();
@@ -204,10 +482,16 @@ export class PirSession {
 
   // ── HTTP ─────────────────────────────────────────────────────────────
 
-  async #get(path, { onProgress, intoWasm, onResponse } = {}) {
+  /// Every plain (small-body) `GET` this class makes — `/head`, `/mode`,
+  /// `/recent`, `/sync`. `/setup` is the one exception: its own streaming,
+  /// resumable, cache-aware fetch lives entirely in
+  /// `#attemptSetupDownload`/`#tryReadCacheIntoWasm` (ADR-0038), since none
+  /// of those bodies are small enough — or safe enough to retry naively —
+  /// to share this path.
+  async #get(path, { onResponse } = {}) {
     const watch = stallWatchdog(this.stallTimeoutMs);
     try {
-      return await this.#getWatched(path, watch, { onProgress, intoWasm, onResponse });
+      return await this.#getWatched(path, watch, { onResponse });
     } catch (e) {
       throw watch.fired ? new TimeoutError(`GET ${path}: no response for ${this.stallTimeoutMs / 1000}s`) : e;
     } finally {
@@ -215,55 +499,22 @@ export class PirSession {
     }
   }
 
-  async #getWatched(path, watch, { onProgress, intoWasm, onResponse } = {}) {
+  async #getWatched(path, watch, { onResponse } = {}) {
     const resp = await this.#fetch(`${this.#base}${path}`, { signal: watch.signal });
     watch.progress();
     if (resp.status === 409) {
-      throw new StaleSetupError(await resp.text());
+      const text = await resp.text();
+      await this.#evictCacheOnStale();
+      throw new StaleSetupError(text);
     }
     if (!resp.ok) {
       throw new PirError(`GET ${path}: ${resp.status} ${await resp.text()}`);
     }
     // After the status checks, before any body byte: the one caller that
-    // uses this (load()) reads response *headers* whose meaning is
+    // uses this (`#probeHead`) reads response *headers* whose meaning is
     // defined only for a 200.
     if (onResponse) onResponse(resp);
-    if (!intoWasm) {
-      return new Uint8Array(await resp.arrayBuffer());
-    }
-
-    // The ~50 MB case: stream straight into the wasm input buffer rather
-    // than building a second copy in JS. No wasm call happens during the
-    // loop, so the pointer and the ArrayBuffer both stay valid.
-    const total = Number(resp.headers.get("content-length") ?? 0);
-    if (!total || !resp.body) {
-      const bytes = new Uint8Array(await resp.arrayBuffer());
-      if (onProgress) onProgress(bytes.length, bytes.length);
-      return bytes;
-    }
-    const e = this.exports;
-    e.risepir_in_reserve(total);
-    const ptr = e.risepir_in_ptr();
-    const dest = new Uint8Array(e.memory.buffer, ptr, total);
-    const reader = resp.body.getReader();
-    let off = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      // Every chunk re-arms the watchdog: this is what makes the bound
-      // "no progress for 45 s" rather than "553.82 MB in 45 s".
-      watch.progress();
-      if (off + value.length > total) {
-        throw new PirError(`GET ${path}: body longer than its Content-Length (${total})`);
-      }
-      dest.set(value, off);
-      off += value.length;
-      if (onProgress) onProgress(off, total);
-    }
-    if (off !== total) {
-      throw new PirError(`GET ${path}: truncated (${off} of ${total} bytes)`);
-    }
-    return { streamedInto: off };
+    return new Uint8Array(await resp.arrayBuffer());
   }
 
   async #post(path, body) {
@@ -287,8 +538,11 @@ export class PirSession {
     watch.progress();
     if (resp.status === 409) {
       // /answer's lineage gate (ADR-0033) — same recovery as a stale
-      // /sync: only a fresh /setup is sound.
-      throw new StaleSetupError(await resp.text());
+      // /sync: only a fresh /setup is sound, so this epoch's cache entry
+      // (if any) is evicted right alongside the error (ADR-0038).
+      const text = await resp.text();
+      await this.#evictCacheOnStale();
+      throw new StaleSetupError(text);
     }
     if (!resp.ok) {
       throw new PirError(`POST ${path}: ${resp.status} ${await resp.text()}`);
@@ -298,57 +552,361 @@ export class PirSession {
 
   // ── lifecycle ────────────────────────────────────────────────────────
 
-  /// One GET /setup: the completeness flag is read from that response's
-  /// own `x-risepir-mode` header (ADR-0033) — mode and bundle from one
-  /// atomic response, so the pair cannot straddle a server restart — and
-  /// the wasm module still refuses to initialise without the flag, so
-  /// "absent means zero" can never be a browser-side default
-  /// (ADR-0015/0017). A server predating the header gets the old
-  /// two-request sequence as a fallback (`GET /mode`), which reopens
-  /// exactly the pre-ADR-0033 race and nothing more.
-  async load({ onProgress } = {}) {
-    let modeSet = false;
-    const streamed = await this.#get("/setup", {
-      onProgress,
-      intoWasm: true,
+  /// A cheap `GET /head` solely to learn this deployment's current
+  /// `(epoch, mode)` pair (ADR-0038) before deciding whether a cached
+  /// `/setup` entry even applies — far cheaper than asking `/setup`
+  /// itself, which can pay `NodeState::setup_bytes`'s cache-regeneration
+  /// cost (~10 s CPU at the complete set). Either field can come back
+  /// `null` against a server predating ADR-0033/ADR-0038's headers; every
+  /// caller treats that exactly like "no cache decision is possible from
+  /// this alone" rather than guessing.
+  async #probeHead() {
+    let epoch = null;
+    let mode = null;
+    const bytes = await this.#get("/head", {
       onResponse: (resp) => {
+        epoch = resp.headers.get("x-risepir-epoch");
         const m = resp.headers.get("x-risepir-mode");
-        if (m === "0" || m === "1") {
-          // Buffer-free setter on purpose: this fires while the same
-          // response's body is about to stream into the wasm input
-          // buffer, which risepir_set_mode would clobber.
-          if (this.exports.risepir_set_mode_byte(m === "1" ? 1 : 0) !== 0) {
-            throw new PirError(`x-risepir-mode: ${this.#lastError()}`);
-          }
-          modeSet = true;
-        } else if (m !== null) {
-          // A garbled flag is fatal, never defaulted: it decides whether
-          // absence means 0x0.
-          throw new PirError(`x-risepir-mode header was ${JSON.stringify(m)} (expected "0" or "1")`);
-        }
+        mode = m === "0" ? 0 : m === "1" ? 1 : null;
       },
     });
-    if (!modeSet) {
-      // Legacy server. Deliberately after the /setup download: /mode is
-      // fetched without touching the wasm input buffer (plain
-      // arrayBuffer path) and set via the buffer-free setter, so the
-      // setup bytes already streamed in stay intact.
-      const mode = await this.#get("/mode");
-      if (!(mode.length === 1 && (mode[0] === 0 || mode[0] === 1))) {
-        throw new PirError(`GET /mode returned ${mode.length} bytes; expected exactly one byte, 0 or 1`);
+    return { block: readU64LE(bytes), epoch, mode };
+  }
+
+  /// Replays a *complete* cached entry straight into the wasm input
+  /// buffer — no network at all. Returns `{ mode }` on success, or `null`
+  /// on absolutely any failure (a mode disagreement with the live `/head`
+  /// header, a missing/short chunk, a byte count that does not match what
+  /// was recorded): every failure here just means "not a cache hit after
+  /// all", falling through to the ordinary network path in
+  /// `#loadSetupBytes`, never an exception that reaches the boot path.
+  ///
+  /// `head.mode` — the *live* header, not the cache record — is the
+  /// authority: a disagreement evicts the entry rather than trusting
+  /// stale metadata (the entry may be old enough that this deployment's
+  /// completeness has since changed under a fresh re-bootstrap sharing an
+  /// improbable epoch collision, or, more mundanely, may simply be
+  /// corrupt — either way, absence-means-zero is never a browser-side
+  /// guess, ADR-0015/0017).
+  async #tryReadCacheIntoWasm(db, head, meta, onProgress) {
+    try {
+      if (head.mode !== null && head.mode !== meta.mode) {
+        await idbEvictEpoch(db, meta.epoch);
+        return null;
       }
-      if (this.exports.risepir_set_mode_byte(mode[0]) !== 0) {
-        throw new PirError(`GET /mode: ${this.#lastError()}`);
+      if (!isSaneByteLength(meta.totalBytes)) {
+        // A corrupt or hand-edited record — never pass this straight to a
+        // wasm allocation. Falls through like any other cache failure.
+        await idbEvictEpoch(db, meta.epoch);
+        return null;
+      }
+      const mode = head.mode !== null ? head.mode : meta.mode;
+      const dest = this.#reserveInput(meta.totalBytes);
+      const chunkCount = Math.ceil(meta.totalBytes / CHUNK_SIZE);
+      let off = 0;
+      for (let i = 0; i < chunkCount; i++) {
+        const chunk = await idbGetChunk(db, meta.epoch, i);
+        if (!chunk || chunk.length === 0) throw new Error(`missing cached chunk ${i} of ${chunkCount}`);
+        if (off + chunk.length > meta.totalBytes) throw new Error("cached bytes exceed the recorded total");
+        dest.set(chunk, off);
+        off += chunk.length;
+        if (onProgress) onProgress(off, meta.totalBytes);
+      }
+      if (off !== meta.totalBytes) throw new Error(`assembled ${off} of ${meta.totalBytes} cached bytes`);
+      return { mode };
+    } catch {
+      return null;
+    }
+  }
+
+  /// Drives `/setup` to completion into the wasm input buffer, retrying up
+  /// to [`MAX_SETUP_RESUME_ATTEMPTS`] times if the connection stalls
+  /// partway through (ADR-0035's watchdog; ADR-0038 point 7) — a stall
+  /// with genuine bytes already in hand resumes with `Range`/`If-Range`
+  /// rather than paying for the whole transfer again. `resumeFrom`, when
+  /// given, is a *previous session's* cached partial entry
+  /// (`{epoch, etag, totalBytes, bytesWritten}`); its already-cached
+  /// prefix is replayed from IndexedDB before the network is asked for
+  /// anything.
+  ///
+  /// Flushes completed ~[`CHUNK_SIZE`] chunks to IndexedDB as it goes (when
+  /// `db`/`epoch` are available) — never one write per network chunk, see
+  /// the module docs above `HINT_SOURCE`. If a `Range` continuation ever
+  /// comes back `200` instead of `206`, the bundle was regenerated since
+  /// the offset this method holds was valid (ADR-0028): rather than splice
+  /// bytes from two different bundles, this discards whatever it had (in
+  /// IndexedDB and in the wasm buffer) and restarts the whole transfer at
+  /// byte 0 using that very `200`'s own body.
+  ///
+  /// Returns `{ total, mode, resumed }` on success. `mode` is `null` if
+  /// this deployment never sent `x-risepir-mode` on `/setup` (a legacy
+  /// server) — the caller (`#resolveMode`) falls back to `GET /mode`.
+  async #attemptSetupDownload({ db, epoch, onProgress, resumeFrom }) {
+    let off = 0;
+    let total = null;
+    let etag = null;
+    let mode = null;
+    let dest = null;
+    let nextChunk = 0;
+    let resumed = false;
+
+    const resumeFromIsSane =
+      resumeFrom &&
+      isSaneByteLength(resumeFrom.totalBytes) &&
+      Number.isInteger(resumeFrom.bytesWritten) &&
+      resumeFrom.bytesWritten > 0 &&
+      resumeFrom.bytesWritten <= resumeFrom.totalBytes;
+
+    if (resumeFrom && !resumeFromIsSane) {
+      // A corrupt or hand-edited record — never pass these straight to a
+      // wasm allocation or an arithmetic offset. Evict and fall straight
+      // through to an ordinary fresh download below.
+      await idbEvictEpoch(db, epoch);
+    } else if (resumeFromIsSane) {
+      total = resumeFrom.totalBytes;
+      etag = resumeFrom.etag;
+      dest = this.#reserveInput(total);
+      const cachedChunks = Math.floor(resumeFrom.bytesWritten / CHUNK_SIZE);
+      let replayOk = true;
+      for (let i = 0; i < cachedChunks; i++) {
+        const chunk = await idbGetChunk(db, epoch, i);
+        if (!chunk || chunk.length !== CHUNK_SIZE) {
+          replayOk = false;
+          break;
+        }
+        dest.set(chunk, i * CHUNK_SIZE);
+      }
+      if (replayOk) {
+        off = cachedChunks * CHUNK_SIZE;
+        nextChunk = cachedChunks;
+        resumed = true;
+      } else {
+        // The cached prefix cannot be trusted — never guess at the
+        // missing bytes. Wipe it and fall back to an ordinary fresh
+        // download instead.
+        await idbEvictEpoch(db, epoch);
+        total = null;
+        etag = null;
+        dest = null;
       }
     }
 
-    let len;
-    if (streamed instanceof Uint8Array) {
-      len = this.#writeIn(streamed);
-    } else {
-      len = streamed.streamedInto;
+    for (let attempt = 0; ; attempt++) {
+      const watch = stallWatchdog(this.stallTimeoutMs);
+      try {
+        const headers = {};
+        if (off > 0) {
+          headers["range"] = `bytes=${off}-`;
+          headers["if-range"] = etag ?? "";
+        }
+        const resp = await this.#fetch(`${this.#base}/setup`, { headers, signal: watch.signal });
+        watch.progress();
+        // `/setup` itself carries no epoch gate (it is the *source* of the
+        // epoch, so it cannot be gated on one) and so does not emit this
+        // today — handled anyway, defensively, the same way every other
+        // endpoint here is.
+        if (resp.status === 409) {
+          throw new StaleSetupError(await resp.text());
+        }
+        if (resp.status !== 200 && resp.status !== 206) {
+          throw new PirError(`GET /setup: ${resp.status} ${await resp.text()}`);
+        }
+
+        if (off > 0 && resp.status === 200) {
+          // Regenerated meanwhile (ADR-0028): the bytes already held are
+          // from a different bundle than this response. Discard
+          // everything for this epoch and restart against this response.
+          if (epoch) await idbEvictEpoch(db, epoch);
+          off = 0;
+          nextChunk = 0;
+          dest = null;
+          total = null; // this 200's own Content-Length is the new total
+          resumed = false;
+        }
+
+        const m = resp.headers.get("x-risepir-mode");
+        if (m === "0" || m === "1") {
+          mode = m === "1" ? 1 : 0;
+        } else if (m !== null) {
+          throw new PirError(`x-risepir-mode header was ${JSON.stringify(m)} (expected "0" or "1")`);
+        }
+        const respEtag = resp.headers.get("etag");
+        if (respEtag) etag = respEtag;
+
+        if (dest === null) {
+          const contentLength = Number(resp.headers.get("content-length") ?? 0);
+          if (contentLength > 0) {
+            total = contentLength;
+            dest = this.#reserveInput(total);
+            if (db && epoch) await idbClearAll(db);
+          } else {
+            // No declared length anywhere: read the whole body up front.
+            // Rare in practice (this deployment's own server always sets
+            // Content-Length on its fully-materialized body); caching is
+            // simply skipped for this one response rather than adding a
+            // third bookkeeping path for a case that should not occur
+            // against this project's own server.
+            const buf = new Uint8Array(await resp.arrayBuffer());
+            total = buf.length;
+            dest = this.#reserveInput(total);
+            dest.set(buf, 0);
+            off = buf.length;
+            if (onProgress) onProgress(off, total);
+            return { total, mode, resumed };
+          }
+        }
+
+        if (resp.body) {
+          const reader = resp.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            watch.progress();
+            if (off + value.length > total) {
+              throw new PirError(`GET /setup: body longer than its Content-Length (${total})`);
+            }
+            dest.set(value, off);
+            off += value.length;
+            if (onProgress) onProgress(off, total);
+            // Flush every full ~16 MiB chunk as it completes — never one
+            // IDB write per network chunk (module docs above).
+            if (db && epoch) {
+              while ((nextChunk + 1) * CHUNK_SIZE <= off) {
+                const start = nextChunk * CHUNK_SIZE;
+                const ok = await idbPutChunk(db, epoch, nextChunk, dest.slice(start, start + CHUNK_SIZE));
+                if (!ok) break; // a write failed; keep downloading, stop trying to cache this session
+                nextChunk += 1;
+                await idbPutMeta(db, {
+                  epoch,
+                  mode,
+                  pinnedBlock: blockFromEtag(etag),
+                  etag,
+                  totalBytes: total,
+                  bytesWritten: nextChunk * CHUNK_SIZE,
+                  complete: false,
+                  updatedAt: Date.now(),
+                });
+              }
+            }
+          }
+        } else {
+          const buf = new Uint8Array(await resp.arrayBuffer());
+          if (off + buf.length > total) {
+            throw new PirError(`GET /setup: body longer than its Content-Length (${total})`);
+          }
+          dest.set(buf, off);
+          off += buf.length;
+          if (onProgress) onProgress(off, total);
+        }
+
+        if (off !== total) {
+          throw new PirError(`GET /setup: truncated (${off} of ${total} bytes)`);
+        }
+
+        // Done: flush the final (possibly short) tail chunk and mark the
+        // entry complete.
+        if (db && epoch) {
+          if (nextChunk * CHUNK_SIZE < total) {
+            await idbPutChunk(db, epoch, nextChunk, dest.slice(nextChunk * CHUNK_SIZE, total));
+            nextChunk += 1;
+          }
+          await idbPutMeta(db, {
+            epoch,
+            mode,
+            pinnedBlock: blockFromEtag(etag),
+            etag,
+            totalBytes: total,
+            bytesWritten: total,
+            complete: true,
+            updatedAt: Date.now(),
+          });
+        }
+
+        return { total, mode, resumed };
+      } catch (e) {
+        const isStall = watch.fired;
+        if (isStall && off > 0 && attempt < MAX_SETUP_RESUME_ATTEMPTS) {
+          // The partially-filled wasm input buffer (and whatever is
+          // already flushed to IndexedDB) is still valid after a stall —
+          // resume with Range/If-Range rather than paying for the whole
+          // transfer again (ADR-0038 point 7).
+          resumed = true;
+          continue;
+        }
+        throw isStall ? new TimeoutError(`GET /setup: no response for ${this.stallTimeoutMs / 1000}s`) : e;
+      } finally {
+        watch.stop();
+      }
     }
+  }
+
+  /// Resolves the `{ len, mode, fromCache, resumed }` tuple `load()` needs
+  /// from whichever path `#loadSetupBytes` took. Falls back to the legacy
+  /// `GET /mode` request only when nothing along the way ever supplied a
+  /// mode (a server predating ADR-0033's `x-risepir-mode` header) —
+  /// fetched without touching the wasm input buffer, so whatever is
+  /// already staged there (from cache or from the network) stays intact.
+  async #resolveMode({ len, mode, fromCache, resumed }) {
+    if (mode === null) {
+      const body = await this.#get("/mode");
+      if (!(body.length === 1 && (body[0] === 0 || body[0] === 1))) {
+        throw new PirError(`GET /mode returned ${body.length} bytes; expected exactly one byte, 0 or 1`);
+      }
+      mode = body[0];
+    }
+    return { len, mode, fromCache, resumed };
+  }
+
+  /// Gets the `/setup` bytes into the wasm input buffer by whichever route
+  /// is cheapest and still safe (ADR-0038): a complete IndexedDB cache
+  /// hit (no network at all), a resumed partial download (a `Range`
+  /// continuation of a previous session's attempt), or a plain fresh
+  /// download — falling back one step further at the first sign of
+  /// trouble in each. `indexedDB` being unavailable (plain Node, some
+  /// locked-down browser contexts) collapses this straight to "plain
+  /// fresh download, exactly as before ADR-0038" with no special-casing
+  /// needed at any call site, since every `idb*` helper already treats a
+  /// `null` db as a no-op.
+  async #loadSetupBytes({ onProgress, onSource } = {}) {
+    const head = await this.#probeHead();
+    const db = await idbOpen();
+    this.#db = db;
+    this.#cacheEpoch = null;
+
+    if (db && head.epoch) {
+      const meta = await idbGetMeta(db, head.epoch);
+      if (meta && meta.complete && meta.totalBytes > 0) {
+        const hit = await this.#tryReadCacheIntoWasm(db, head, meta, onProgress);
+        if (hit) {
+          if (onSource) onSource(HINT_SOURCE.CACHE);
+          this.#cacheEpoch = head.epoch;
+          return this.#resolveMode({ len: meta.totalBytes, mode: hit.mode, fromCache: true, resumed: false });
+        }
+      }
+    }
+
+    const partial = db && head.epoch ? await idbGetMeta(db, head.epoch) : null;
+    const resumeFrom = partial && !partial.complete && partial.etag && partial.bytesWritten > 0 ? partial : null;
+    if (onSource) onSource(resumeFrom ? HINT_SOURCE.RESUME : HINT_SOURCE.NETWORK);
+
+    const dl = await this.#attemptSetupDownload({ db, epoch: head.epoch, onProgress, resumeFrom });
+    return this.#resolveMode({ len: dl.total, mode: dl.mode, fromCache: false, resumed: dl.resumed });
+  }
+
+  /// One `/setup`, from whichever source `#loadSetupBytes` finds cheapest
+  /// (ADR-0038). The wasm module still refuses to initialise without a
+  /// validated completeness flag, so "absent means zero" can never be a
+  /// browser-side default (ADR-0015/0017) regardless of which path
+  /// supplied the bytes — cache, resume, or network alike.
+  async load({ onProgress, onSource } = {}) {
+    const { len, mode, fromCache, resumed } = await this.#loadSetupBytes({ onProgress, onSource });
     this.traffic.setupBytes = len;
+    this.traffic.setupFromCache = fromCache;
+    this.traffic.setupResumed = resumed;
+
+    if (this.exports.risepir_set_mode_byte(mode) !== 0) {
+      throw new PirError(`mode: ${this.#lastError()}`);
+    }
     // risepir_init frees the encoded input buffer itself, between
     // decoding and building — the one point where releasing it actually
     // lowers the tab's permanent footprint (wasm memory never shrinks;
@@ -359,12 +917,27 @@ export class PirSession {
 
     // The lineage token every /sync and /answer must echo (ADR-0033) —
     // derived by the wasm from the bundle's own seeds, so it cannot
-    // disagree with what was just initialised.
+    // disagree with what was just initialised, *unless* the bytes it was
+    // initialised from came from a corrupted cache entry — exactly what
+    // the check below exists to catch.
     const elen = this.exports.risepir_epoch();
     if (elen < 0n) {
       throw new PirError(`epoch: ${this.#lastError()}`);
     }
     this.epoch = new TextDecoder().decode(this.#readOut());
+
+    if (fromCache && this.epoch !== this.#cacheEpoch) {
+      // A cache entry that decodes to a *different* epoch than the one it
+      // was keyed on is corrupt, not merely stale — a hard error, never a
+      // warning, because trusting it would mean serving a hint under the
+      // wrong lineage token. Evict immediately so the next boot does not
+      // trip over the same entry.
+      await idbEvictEpoch(this.#db, this.#cacheEpoch).catch(() => {});
+      throw new PirError(
+        `cached hint decoded to epoch ${this.epoch}, but the cache was keyed on ${this.#cacheEpoch} — ` +
+          `evicted the corrupt entry; reload to fetch a fresh hint`,
+      );
+    }
     return this;
   }
 
@@ -473,9 +1046,15 @@ export class PirSession {
 /// `wasmBytes` may be supplied directly (Node); otherwise `wasmUrl` is
 /// fetched. Streaming instantiation is used when the server sends the
 /// right content type, which our own does.
+///
+/// `onSource`, when given, is called once with a [`HINT_SOURCE`] value as
+/// soon as `load()` has decided where the hint bytes are coming from
+/// (ADR-0038) — before any of them have necessarily arrived — so a caller
+/// can label a cache hit or a resumed download honestly instead of
+/// showing a download rate/ETA that would mean nothing for either.
 export async function connect(
   base,
-  { wasmUrl = "client.wasm", wasmBytes, fetchImpl, onProgress, stallTimeoutMs = STALL_TIMEOUT_MS } = {},
+  { wasmUrl = "client.wasm", wasmBytes, fetchImpl, onProgress, onSource, stallTimeoutMs = STALL_TIMEOUT_MS } = {},
 ) {
   const doFetch = fetchImpl ?? ((...args) => fetch(...args));
   let instance = null;
@@ -500,7 +1079,7 @@ export async function connect(
 
   const session = new PirSession(instance, base, doFetch, stallTimeoutMs);
   session.entropy = counter;
-  await session.load({ onProgress });
+  await session.load({ onProgress, onSource });
   return session;
 }
 

@@ -449,8 +449,10 @@ but it is one more correctness argument standing between a user and a balance, f
 UX win that a local deployment does not need. Not built; the requirement for building
 it safely is recorded here. (ADR-0028 later built the *server*-side half of this idea —
 one shared, cached `/setup` encode reused across requests, on this same
-DeltaRing-bridgeability argument; a client-side persistent cache across browser visits
-remains deferred.)
+DeltaRing-bridgeability argument; **[REVISED by ADR-0038]** the client-side persistent
+cache across browser visits described here as deferred is now built — ADR-0033 supplied
+the sharper revalidation this paragraph's own DeltaRing argument was missing, and
+ADR-0038 is the persistent IndexedDB cache built on top of it.)
 
 **`GET /recent` (new endpoint).** A partial deployment only knows accounts touched
 since bootstrap, so a visitor typing an arbitrary address gets an honest error and
@@ -1513,7 +1515,9 @@ a stale cache that skipped revalidation is caught at its first `/sync` or
 a ring-covered range requested with the other lineage's epoch is refused;
 a block-only validator never revalidates) and
 `crates/risepir-rpc/tests/rebootstrap.rs` (the 409 → re-bootstrap → correct
-answer path).
+answer path). **[REVISED by ADR-0038]** That client-side cache is now
+built — keyed on exactly the epoch this ADR derives, per the argument
+above.
 
 ### ADR-0034 — Deploy `(arity 2, bucket_size 4)` at target `min(0.90, 0.95 × MAX_LOAD_FACTOR)`: the top fillable rung, and the cheapest hint on it **[NEW — supersedes ADR-0030's `(3,3)` recommendation; retunes ADR-0031's constants]**
 
@@ -2118,3 +2122,191 @@ described above (`crates/risepir-rpc/tests/journal.rs`). `cargo clippy
 --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` all pass — see
 this change's commit for the literal output.
+
+### ADR-0038 — Persist the hint in IndexedDB, keyed by epoch, with server-side `Range`/`If-Range` resume **[NEW — builds ADR-0019's deferred hint caching, unblocked by ADR-0033]**
+
+**Chosen:** the browser client persists the raw `GET /setup` bytes in
+IndexedDB, in ~16 MiB chunks, keyed by the hint-lineage epoch
+(`wire::lineage_epoch`, ADR-0033) — never the block a bundle happens to be
+pinned at. `GET /head` now also carries `x-risepir-mode` (it already carried
+`x-risepir-epoch`), so a fresh page load learns the live `(epoch, mode)` pair
+for the price of one 8-byte body, cheap enough to pay before deciding whether
+a cached entry even applies — far cheaper than a `/setup` request, which can
+pay `NodeState::setup_bytes`'s cache-regeneration cost (~10 s CPU at the
+complete set). `GET /setup` gained `Accept-Ranges: bytes` and single-range
+`Range` support, gated on a matching `If-Range` (below), so a client can
+resume an interrupted download — across a page reload *or* mid-session,
+after a stall — by asking only for the bytes it does not already have.
+`PirSession.load()` now tries, in order: a complete cache hit (no network at
+all), a resumed partial download (`Range` from the last committed chunk
+boundary), then a plain fresh download — falling back one step further at
+the first sign of trouble in each. Every download, of any kind, writes
+completed chunks to IndexedDB as it goes, and every `/sync`/`/answer` `409`
+(`StaleSetupError`) evicts that epoch's cached entry immediately.
+
+**Rejected:**
+- **The Cache API** (`caches.put(request, response)`), the obvious first
+  reach for "cache an HTTP response" in a browser. Caching a response whose
+  body can run to 553.82 MB needs the platform to buffer the *whole* body
+  somewhere before the entry commits — either `response.clone()`/
+  `body.tee()` (an unbounded second in-flight copy racing the first) or
+  reading the body fully into a `Blob` first. Either shape adds a second
+  ~554 MB buffer at exactly the moment ADR-0032's capacity pre-flight is
+  budgeting the wasm init peak (`ESTIMATED_PEAK_MULTIPLE`) against the
+  device's memory — the number this project already fought hard to keep
+  honest (ADR-0032's own regression: a 4 GB-phone estimate that quietly
+  missed the true peak). A chunked IndexedDB store writes one ~16 MiB chunk
+  at a time — bounded transient memory, no second whole-body buffer — and
+  gets resume-across-*sessions* for free, as a side effect of being keyed by
+  byte offset at all. Cache Storage also has no notion of resuming a
+  half-written entry; IndexedDB's per-chunk records are naturally resumable.
+- **Caching keyed by block**, matching `/setup`'s own pre-ADR-0033 `ETag`
+  shape. Wrong for the same reason ADR-0033 folded the epoch into that
+  `ETag`: `NodeState::setup_bytes` regenerates the cached bundle as the head
+  advances (ADR-0028), so two regenerations under the *same* epoch are two
+  *different* byte strings at two different block numbers, while a
+  re-bootstrap can trivially collide on a block number some earlier lineage
+  already used. A block-keyed cache would either evict correct entries
+  constantly (treating every regeneration as a new bundle) or, worse, serve
+  a stale block's bytes as if they were current. The epoch is stable across
+  every regeneration of the *same* bootstrap and changes on every
+  re-bootstrap — exactly the granularity a persistent cache needs.
+- **A per-download total-duration deadline**, the same rejection ADR-0035
+  made for the stall watchdog and for the same reason: a legitimate
+  complete-set transfer runs for minutes, so any deadline generous enough
+  for it is no bound on a truly dead connection. Resume reuses ADR-0035's
+  existing silence-based watchdog rather than inventing a second timeout
+  policy.
+- **Grandfathering a cache entry across a mode disagreement.** Even though
+  mode cannot change within one deployment's process lifetime (`complete` is
+  fixed at `NodeState::new`), the live `x-risepir-mode` header is trusted
+  over the cached record on principle, not merely by construction — matching
+  ADR-0015/0017's "never guessed, never assumed" treatment of the
+  completeness flag everywhere else in this codebase. A disagreement evicts
+  and re-downloads; it is never resolved by trusting whichever side is
+  more convenient.
+
+**Why the epoch is the cache key, and why the server stays the authority.**
+Every design question here reduces to the same one ADR-0033 already
+answered for the *protocol*: a cached hint is only as trustworthy as the
+check that revalidates it, and that check must live on the server, which is
+the only party that knows whether a lineage is still bridgeable. This ADR
+adds no new trust of its own — it reuses ADR-0033's epoch gate and ADR-0028's
+`ETag` machinery for a second purpose (a client-held cache) rather than
+inventing a parallel validity story:
+
+- A **complete** cache hit still requires the *live* `x-risepir-mode` (read
+  fresh off `GET /head`, never off the cached record) to agree with what was
+  cached, and the bundle's own `risepir_epoch()` — derived from the decoded
+  hint's LWE seeds, the same way it always has been — is asserted equal to
+  the epoch the cache was keyed on as a **hard error, not a warning**, once
+  `risepir_init` has run. A cache entry that decodes to a different epoch
+  than its own key is corrupt, and ADR-0015/0017's discipline is that a
+  corrupt or ambiguous state fails loudly rather than being silently
+  patched over — so this evicts the entry and refuses to proceed on it,
+  exactly like `risepir-server`'s `FingerprintAmbiguity` refuses a colliding
+  store scan rather than guessing which candidate is right.
+- A **partial** download's resume is gated on `If-Range` matching the
+  server's *current* `ETag` for the reason below.
+- Every `/sync`/`/answer` `409` evicts the current epoch's cache entry
+  immediately (`PirSession#evictCacheOnStale`) — the same signal that already
+  told a pre-cache client "your hint is stale, reload" now also clears the
+  thing that would otherwise keep offering that same stale hint back on the
+  next boot.
+
+None of this is new trust surface: the operator the page already trusts
+(ADR-0019's disclosed code-delivery trust) is the same operator whose
+`/head`, `/setup`, and `409` responses this cache defers to. A dishonest
+server could already serve a wrong hint before this ADR; it gains no new
+way to do so by this cache existing, because the cache never overrides what
+the live server says.
+
+**Why `If-Range` is mandatory, not merely honoured.** This is stricter than
+RFC 7233 permits — a bare `Range` with no `If-Range` is normally serviced
+unconditionally — and that narrowing is deliberate. `NodeState::setup_bytes`
+regenerates the cached bundle as the head advances (ADR-0028's eighth-window
+rule), and two regenerations under the *same* epoch are two *different* byte
+strings: the hint reflects every block patched in up to whichever block it
+is pinned at, so byte offset 100 in yesterday's regeneration is not byte
+offset 100 in today's. A `Range` request served against the wrong
+regeneration would splice two unrelated bundles into a single corrupt hint
+— bytes that decode to garbage, which a complete-mode client can surface as
+a wrong `0x0`, precisely the failure class ADR-0033's epoch gate exists to
+prevent one layer up (and the same hazard ADR-0028's own `ETag` had to fold
+the epoch into, for `304`, before this). Requiring `If-Range` to name the
+*exact* `ETag` — which already encodes both the epoch and the pinned block —
+makes a stale-regeneration range request fail closed onto the ordinary full
+`200` instead of a spliced `206`. Proven directly:
+`crates/risepir-http/tests/setup_range.rs`'s
+`a_stale_if_range_from_before_a_regeneration_never_unlocks_a_206` forces a
+regeneration between two requests and asserts the second, stale `If-Range`
+gets the full current body, never a `206`.
+
+**What happens on quota refusal or any other cache failure.** Every
+IndexedDB call in `web/pir.js` is wrapped so a rejection can never escape
+into the boot path — `idbOpen`/`idbGetMeta`/`idbPutMeta`/`idbGetChunk`/
+`idbPutChunk`/`idbClearAll`/`idbEvictEpoch` each catch internally and
+degrade to `null`/`false`/a no-op, never a thrown exception. A
+`QuotaExceededError` mid-write is treated exactly like a browser choosing to
+evict a disposable cache under storage pressure: the chunk write simply
+fails, downloading continues into the wasm buffer regardless (the hint
+still boots this session; only the *next* boot loses the benefit), and no
+further chunks are attempted once one write has failed. A missing or
+short chunk, a chunk count that disagrees with the recorded total, or a byte
+count that does not match `Content-Length` are all treated as "this cache
+entry cannot be trusted" and fall through to an ordinary network path —
+never a guess at the missing bytes. `indexedDB` being entirely undefined
+(plain Node — `web/test/e2e.mjs` runs this file under exactly that — and
+some locked-down browser contexts) is the same code path as every other
+failure: every `idb*` helper's very first line is `if (!db) return
+null/false`, so the whole cache collapses to a no-op with no special-casing
+needed at any call site. At most one epoch's data is ever retained — writing
+a new epoch's first chunk clears the whole store first — so a tab can never
+accumulate an unbounded history of past bootstraps regardless of how many
+re-bootstraps it lives through.
+
+**What this does not fix.** The client's resident memory once the hint is
+decoded and `A` is expanded is unchanged — **1.11 GB** at the deployed
+complete-mainnet geometry (ADR-0034, `docs/numbers.md` §4c) — because that
+cost comes from holding the *decoded* bundle plus the expanded matrix in
+wasm linear memory, not from re-fetching bytes; a cache hit still pays the
+full `risepir_init` decode-and-build sequence and its transient peak, which
+is exactly why ADR-0032's capacity pre-flight still runs unconditionally
+before every boot, cache hit or not (unchanged by this ADR — see `web/app.js`
+and its own comment on the point). The **first-ever visit** to a given
+epoch is unchanged too: nothing here shrinks the initial 553.82 MB transfer
+itself, only what a *second* visit, a reload, or a resumed interruption
+costs. And wasm linear memory never shrinks, so a cache hit does not lower
+a tab's floor below what a fresh decode would have set it to — it only
+removes the network wait beforehand.
+
+**Measured (`mock`, this repo's own tiny demo deployment, 2026-07-28):** a
+second page load — same browser profile, same origin, a `Page.navigate`
+reload — booted from the IndexedDB cache in **1022 ms** wall clock
+(navigation start to the query box becoming visible; `web/test/browser.mjs`)
+with **zero** body-bearing `GET /setup` requests on the wire, against
+**1.18 MB** of hint at mock's scale. The in-page boot timer (which starts
+*after* the wasm module is already instantiated, so it excludes that fetch)
+reported "Ready in 0.0 s". Both numbers are demo-scale, not complete-set
+evidence — no state large enough to make a network transfer itself
+observable was exercised here — but the wire count is the property that
+actually matters and it is exact regardless of scale: a cache hit issues
+`GET /head` and nothing else.
+
+**Pinned by:** `crates/risepir-http/tests/setup_range.rs` (`Range`/`If-Range`
+handler behaviour, including the regeneration-splice hazard above and a
+`HEAD` request behaving identically to `GET` minus the body) and
+`crates/risepir-http/src/node.rs`'s own `parse_range` unit tests
+(exhaustive: open-ended, explicit bounds, over-long clamping, suffix and
+multi-range unsupported, malformed and overflowing integers, `first == 0`
+against an empty resource); `web/test/e2e.mjs` (no-`indexedDB` parity under
+plain Node, and a stub-fetch test that truncates a `/setup` body then
+asserts the retry's `Range`/`If-Range` and a byte-exact functional result
+through the resumed session); `web/test/browser.mjs` (a real second
+navigation against a real IndexedDB, asserting zero further `GET /setup`
+traffic and a correct answer afterward — plus the pre-existing capacity-gate
+sub-test, updated to clear IndexedDB before its own "Download anyway" step,
+since that sub-test's own question — does consent actually trigger the
+network fetch it gates — is now a different question from whether caching
+works, and conflating the two would have made a passing cache hit look like
+a broken gate).

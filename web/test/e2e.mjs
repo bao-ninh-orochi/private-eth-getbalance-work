@@ -34,6 +34,7 @@ import {
   STATUS,
   assessCapacity,
   CAPACITY_VERDICT,
+  HINT_SOURCE,
 } from "../pir.js";
 
 const base = process.argv[2] ?? "http://127.0.0.1:8645";
@@ -213,6 +214,13 @@ const wasmBytes = readFileSync(wasmPath);
 }
 
 // ── 3. bring up a session ─────────────────────────────────────────────
+//
+// This is the load-bearing precondition for ADR-0038's hint cache: plain
+// Node has no IndexedDB at all, so every cache code path in pir.js must be
+// feature-detected to degrade to a plain download here, exactly as it did
+// before the cache existed. Asserted first, not assumed — the "everything
+// still works" claim below means nothing if this is false.
+check("sanity: this environment has no IndexedDB (the precondition for every check below)", typeof indexedDB === "undefined");
 
 console.log(`\nconnecting to ${base} ...`);
 let session;
@@ -240,6 +248,16 @@ check(
   "the lineage epoch is exposed for /sync and /answer (ADR-0033)",
   /^[0-9a-f]{16}$/.test(session.epoch),
   `epoch=${JSON.stringify(session.epoch)}`,
+);
+check(
+  "with no IndexedDB, the hint came from the network, not a phantom cache (ADR-0038)",
+  session.traffic.setupFromCache === false,
+  `setupFromCache=${session.traffic.setupFromCache}`,
+);
+check(
+  "...and was not reported as resumed on a clean first boot",
+  session.traffic.setupResumed === false,
+  `setupResumed=${session.traffic.setupResumed}`,
 );
 
 // ── 4. a real lookup ──────────────────────────────────────────────────
@@ -407,6 +425,169 @@ check(
     session.traffic.setupBytes === setupBytesAtBoot,
     `${session.traffic.setupBytes} vs ${setupBytesAtBoot}`,
   );
+}
+
+// ── 9. a stalled /setup resumes with Range + If-Range (ADR-0038) ───────
+//
+// Before this landed, any stall during the hint download — mid-transfer
+// or not — cost the whole 553.82 MB again on retry. This proves the
+// within-session resume directly: a *fresh* session's very first `/setup`
+// request is truncated then hangs — a real stalled connection looks
+// exactly like this to `fetch` (nothing more ever arrives, and only the
+// AbortSignal settles it, the same stub shape section 8 uses) — and the
+// retry must ask for exactly the missing tail with `Range`/`If-Range`
+// naming the first response's own `ETag`.
+//
+// The strongest proof the reassembled bytes are byte-identical to the
+// real full body is functional, not introspective: the wasm buffer that
+// held them is gone by the time `connect()` returns (freed inside
+// `risepir_init`), but `crates/risepir-http/src/wire.rs`'s per-segment
+// *exact*-length checks would reject a misaligned or spliced bundle
+// outright, and a correct, byte-exact balance lookup afterward is
+// impossible against corrupted hint cells — so matching the already-
+// booted `session`'s answer for the same address is conclusive.
+{
+  const realResp = await fetch(`${base}/setup`);
+  const fullSetupBytes = new Uint8Array(await realResp.arrayBuffer());
+  const etagValue = realResp.headers.get("etag");
+  const modeHeaderValue = realResp.headers.get("x-risepir-mode");
+  check(
+    "sanity: the real /setup response carries an ETag and a mode header to stub against",
+    Boolean(etagValue) && (modeHeaderValue === "0" || modeHeaderValue === "1"),
+    `etag=${JSON.stringify(etagValue)} mode=${JSON.stringify(modeHeaderValue)}`,
+  );
+
+  const truncateAt = Math.floor(fullSetupBytes.length * 0.6);
+  const setupCalls = [];
+  let firstSetupCall = true;
+
+  // What a real stalled connection looks like: some bytes arrive, then
+  // nothing more — until the watchdog's own AbortSignal fires, at which
+  // point the stream must actually settle (error out) or the retry logic
+  // downstream would wait on a promise that never resolves.
+  function truncatedThenHangStream(signal) {
+    return new ReadableStream({
+      start(controller) {
+        const mid = Math.floor(truncateAt / 2);
+        controller.enqueue(fullSetupBytes.subarray(0, mid));
+        controller.enqueue(fullSetupBytes.subarray(mid, truncateAt));
+        const onAbort = () => controller.error(new DOMException("aborted", "AbortError"));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      },
+    });
+  }
+
+  async function stubFetch(input, init) {
+    const url = String(input);
+    if (!url.includes("/setup")) return fetch(url, init);
+
+    const h = new Headers(init?.headers ?? {});
+    const range = h.get("range");
+    const ifRange = h.get("if-range");
+    setupCalls.push({ range, ifRange });
+
+    if (firstSetupCall) {
+      firstSetupCall = false;
+      return new Response(truncatedThenHangStream(init.signal), {
+        status: 200,
+        headers: {
+          "content-length": String(fullSetupBytes.length),
+          "x-risepir-mode": modeHeaderValue,
+          etag: etagValue,
+        },
+      });
+    }
+
+    // Every retry after the first must ask for exactly the missing tail,
+    // naming the exact bundle the truncated response already committed to
+    // — never a guess, never the whole thing again.
+    if (range !== `bytes=${truncateAt}-` || ifRange !== etagValue) {
+      return new Response(`test stub: unexpected retry range=${range} if-range=${ifRange}`, { status: 400 });
+    }
+    const tail = fullSetupBytes.subarray(truncateAt);
+    return new Response(tail, {
+      status: 206,
+      headers: {
+        "content-range": `bytes ${truncateAt}-${fullSetupBytes.length - 1}/${fullSetupBytes.length}`,
+        "content-length": String(tail.length),
+        "x-risepir-mode": modeHeaderValue,
+        etag: etagValue,
+      },
+    });
+  }
+
+  const HUNG = Symbol("hung-resume-test");
+  const stallMs = 1200;
+  let sawSource = null;
+  let bootError = null;
+  const raced = await Promise.race([
+    connect(base, {
+      wasmBytes,
+      fetchImpl: stubFetch,
+      stallTimeoutMs: stallMs,
+      onProgress: () => {},
+      onSource: (s) => {
+        sawSource = s;
+      },
+    }).catch((e) => {
+      bootError = e;
+      return null;
+    }),
+    new Promise((resolve) => setTimeout(() => resolve(HUNG), stallMs * 10)),
+  ]);
+
+  if (raced === HUNG) {
+    check(
+      "a truncated-then-resumed /setup boots within a bounded time",
+      false,
+      "still pending after 10x the stall budget — did the resume retry actually fire?",
+    );
+  } else if (bootError || !raced) {
+    check("a truncated-then-resumed /setup boots successfully", false, String(bootError?.message ?? bootError));
+  } else {
+    const resumedSession = raced;
+    check("a truncated-then-resumed /setup boots successfully", true);
+    check("exactly one retry was needed", setupCalls.length === 2, `${setupCalls.length} /setup calls`);
+    check(
+      "the retry carried Range for exactly the missing tail",
+      setupCalls[1]?.range === `bytes=${truncateAt}-`,
+      JSON.stringify(setupCalls[1]),
+    );
+    check(
+      "...and If-Range naming the first response's own ETag",
+      setupCalls[1]?.ifRange === etagValue,
+      JSON.stringify(setupCalls[1]),
+    );
+    check("traffic.setupResumed reflects the retry", resumedSession.traffic.setupResumed === true);
+    check(
+      "traffic.setupBytes reports the full length, not just the tail",
+      resumedSession.traffic.setupBytes === fullSetupBytes.length,
+      `${resumedSession.traffic.setupBytes} vs ${fullSetupBytes.length}`,
+    );
+    // `onSource` fires once, *before* any bytes move — it can only reflect
+    // what is knowable up front (a cross-session IndexedDB resume, which
+    // there is none of here, since this environment has no IndexedDB at
+    // all). The stall this test injects happens mid-transfer, so from
+    // `onSource`'s vantage point this legitimately started as a plain
+    // network download; `traffic.setupResumed` (asserted above) is the
+    // field that reflects what actually happened once the stall hit.
+    check(
+      "onSource reported the honest upfront decision (a plain network download, since no prior partial existed)",
+      sawSource === HINT_SOURCE.NETWORK,
+      `saw ${sawSource}`,
+    );
+
+    // The functional byte-identity proof (see the section header): a
+    // lookup through the resumed session must match the already-booted
+    // session's answer for the same address, exactly.
+    const viaResumed = await resumedSession.getBalance(target);
+    check(
+      "a lookup through the resumed session matches the already-booted session exactly",
+      viaResumed.status === result.status && viaResumed.balanceWei === result.balanceWei,
+      `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${result.status}/${String(result.balanceWei)}`,
+    );
+  }
 }
 
 console.log(

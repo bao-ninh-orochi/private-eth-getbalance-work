@@ -147,8 +147,12 @@ impl WebAssets {
 /// Deliberately **not** cached: the whole point of `client.wasm` is that
 /// the user is running the code they think they are, and a stale cached
 /// copy of a client that has since been fixed is the wrong trade for a
-/// ~150 KB file. The ~50 MB thing worth caching is `/setup`, and the page
-/// caches that itself, keyed by the block its hint is pinned at.
+/// ~150 KB file. The up-to-553.82 MB thing worth caching is `/setup`, and
+/// the page caches that itself in IndexedDB, keyed by the hint-lineage
+/// epoch rather than the block its hint happens to be pinned at (ADR-0038)
+/// — the block moves under an unchanged epoch every time this crate's own
+/// `/setup` cache regenerates (ADR-0028), so an epoch key is what actually
+/// identifies "the same bootstrap" across those regenerations.
 fn asset_response(body: &Arc<Vec<u8>>, content_type: &'static str) -> Response {
     let mut resp = (StatusCode::OK, body.as_ref().clone()).into_response();
     let h = resp.headers_mut();

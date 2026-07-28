@@ -15,6 +15,7 @@ import {
   STATUS,
   assessCapacity,
   CAPACITY_VERDICT,
+  HINT_SOURCE,
 } from "./pir.js";
 
 const $ = (id) => document.getElementById(id);
@@ -51,6 +52,28 @@ function bootFetch(input, init) {
       "Downloading the hint — the one large transfer this page ever makes.";
   }
   return fetch(input, init);
+}
+
+/// A distinct boot stage for "this browser already has the hint"
+/// (ADR-0038): fired once, as soon as `pir.js` has decided where the hint
+/// is coming from — before any of it has necessarily arrived, since a
+/// cache read is not a network transfer `bootFetch` above would ever see.
+/// A rate/ETA display that meant nothing for a cache hit (or a resumed
+/// download, which starts partway through a nonexistent "0%") would be a
+/// wrong answer with a nice font, exactly the failure mode this file
+/// exists to avoid.
+function onHintSource(source) {
+  if (source === HINT_SOURCE.CACHE) {
+    setStage("hint");
+    $("boot-status-text").textContent =
+      "Loading the hint from this browser's cache — no network transfer needed this time.";
+  } else if (source === HINT_SOURCE.RESUME) {
+    setStage("hint");
+    $("boot-status-text").textContent =
+      "Resuming the hint download from where an earlier visit left off.";
+  }
+  // HINT_SOURCE.NETWORK: bootFetch above already sets the "Downloading
+  // the hint…" text the moment the real request goes out; nothing to add.
 }
 
 // Rolling-window transfer rate, so the ETA reflects the link as it is
@@ -111,6 +134,7 @@ async function boot() {
       wasmUrl: "client.wasm",
       fetchImpl: bootFetch,
       onProgress,
+      onSource: onHintSource,
     });
   } catch (e) {
     $("boot").classList.add("is-failed");
@@ -127,8 +151,17 @@ async function boot() {
   $("boot-progress").setAttribute("aria-valuenow", "100");
 
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  // Where the hint came from — a cache hit or a resumed download are both
+  // materially different experiences from a plain cold download, and
+  // saying so in one clause is cheaper than leaving it to be inferred
+  // from how fast "Ready" appeared (ADR-0038).
+  const source = session.traffic.setupFromCache
+    ? "loaded from this browser's cache"
+    : session.traffic.setupResumed
+      ? "downloaded, resumed"
+      : "downloaded";
   $("ready-note").textContent =
-    `Ready in ${secs} s — ${fmtMB(session.traffic.setupBytes)} MB of hint held locally, ` +
+    `Ready in ${secs} s — ${fmtMB(session.traffic.setupBytes)} MB of hint held locally (${source}), ` +
     `pinned at finalized block ${session.pinnedBlock}.`;
 
   // Populate before revealing: the deployment's mode, head, and freshness

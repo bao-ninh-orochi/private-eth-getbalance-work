@@ -951,19 +951,37 @@ impl NodeState {
             .route("/recent", get(recent))
             .route("/healthz", get(healthz))
             .route("/metrics", get(metrics))
+            // These two bound the *API* routes only: a body limit and a
+            // request timeout are about `/answer`'s attacker-controlled
+            // blob, not about handing back a preloaded static file.
             .layer(DefaultBodyLimit::max(MAX_ANSWER_BODY_BYTES))
             .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
-            // Outermost (added last): wraps the body-limit/timeout layers
-            // above too, so a 413/408 still counts against
-            // `risepir_requests_total` (ADR-0039) — see `track_metrics`'s
-            // docs for why route classification here is a fixed literal
-            // match on the request path rather than `axum::extract::MatchedPath`.
-            .layer(middleware::from_fn_with_state(state.clone(), track_metrics))
-            .with_state(state);
-        match web {
+            .with_state(state.clone());
+
+        // The web assets are attached *before* the metrics layer goes on,
+        // and that ordering is the whole point. `Router::layer` wraps only
+        // the routes registered up to that moment — a route added
+        // afterwards is not wrapped, silently. Attaching the front end
+        // after the layer (as this did until 2026-07-29) left all eight of
+        // `crate::web::MANIFEST`'s routes — `/`, `/status`, `client.wasm`
+        // and the rest — serving real traffic while incrementing nothing,
+        // which made `route_label`'s own `"index"`/`"asset"`/`"status"`
+        // arms unreachable and left `/status`'s request table reporting
+        // zero page loads for the very page being read. Measured against
+        // the live deployment 2026-07-29: 200s on `/`, `/status`,
+        // `/status.css` and `/status.js` moved no counter at all.
+        let routed = match web {
             Some(assets) => assets.attach(api),
             None => api,
-        }
+        };
+
+        // Outermost (added last): wraps the body-limit/timeout layers and
+        // the static assets alike, so a 413/408 and a page load both count
+        // against `risepir_requests_total` (ADR-0039) — see
+        // `track_metrics`'s docs for why route classification here is a
+        // fixed literal match on the request path rather than
+        // `axum::extract::MatchedPath`.
+        routed.layer(middleware::from_fn_with_state(state, track_metrics))
     }
 }
 

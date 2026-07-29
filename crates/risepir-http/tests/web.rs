@@ -245,6 +245,71 @@ async fn the_pir_endpoints_still_answer_alongside_the_assets() {
     assert_eq!(body.len(), 8);
 }
 
+/// Every front-end route must be counted by `risepir_requests_total`
+/// (ADR-0039) — the property `tests/metrics.rs` structurally cannot
+/// see, because it builds its router with [`NodeState::router`] (no web
+/// assets) and so never exercises this seam at all.
+///
+/// The bug this pins is an ordering one, and it is silent: `Router::layer`
+/// wraps only the routes registered before it is called, so attaching the
+/// static assets *after* the metrics middleware left all eight of them
+/// serving 200s while incrementing nothing. `route_label`'s `"index"`,
+/// `"asset"` and `"status"` arms became unreachable code, and `/status`'s
+/// own request table reported zero page loads for the page being read.
+/// Nothing about that is visible from a response — only from the counter
+/// that failed to move — which is why it survived until it was measured
+/// against the live deployment.
+#[tokio::test]
+async fn every_front_end_route_is_counted_in_the_request_metrics() {
+    let Some(dir) = web_dir() else {
+        eprintln!("skipping: web/client.wasm not built (cargo run -p xtask --release -- web)");
+        return;
+    };
+    let app = NodeState::router_with_web(build_node(), Some(WebAssets::load(&dir).expect("load")));
+
+    // Every route in `web::MANIFEST`, with the label `route_label` owes it.
+    let routes = [
+        ("/", "index"),
+        ("/app.js", "asset"),
+        ("/pir.js", "asset"),
+        ("/style.css", "asset"),
+        ("/client.wasm", "asset"),
+        ("/status", "status"),
+        ("/status.css", "asset"),
+        ("/status.js", "asset"),
+    ];
+    for (route, _) in routes {
+        let (status, _, _) = get(&app, route).await;
+        assert_eq!(status, StatusCode::OK, "{route}");
+    }
+
+    let (status, body, _) = get(&app, "/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body).expect("metrics is UTF-8 text");
+
+    // `asset` covers five of the eight routes, so assert per-label totals
+    // rather than one sample per route: index 1, status 1, asset 5.
+    let mut expected: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
+    for (_, label) in routes {
+        *expected.entry(label).or_default() += 1;
+    }
+    for (label, count) in expected {
+        let needle = format!("risepir_requests_total{{route=\"{label}\",outcome=\"ok\"}} {count}");
+        assert!(
+            text.lines().any(|l| l.trim() == needle),
+            "expected `{needle}` in the served exposition — a front-end route served a 200 without \
+             being counted, which is exactly the layer-ordering regression this test exists for.\n{text}"
+        );
+    }
+
+    // And the negative half: a served asset must never fall through to the
+    // `unmatched` bucket, which is reserved for genuinely unknown paths.
+    assert!(
+        !text.contains("route=\"unmatched\""),
+        "no request in this test used an unknown path, so `unmatched` must not appear:\n{text}"
+    );
+}
+
 fn tempdir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "risepir-web-test-{}-{:?}",

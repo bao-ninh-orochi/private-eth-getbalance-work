@@ -195,8 +195,13 @@ old 3-ary binary is therefore *refused*, not silently loaded and not
 misreported as `Corrupt` — the error names the cause (a previous geometry
 lineage) and the fix (move `--state` aside, re-bootstrap). This fired for real
 on 2026-07-27, exactly as designed — `exit 1` with that message, before any of
-the 36 GB was read — and the box was re-bootstrapped past it (deploy.md §5.4;
-the old file is kept as `~/risepir-state.bin.arity3-20260727`). Both lineages
+the 36 GB was read — and the box was re-bootstrapped past it (deploy.md §5.4).
+The superseded 3-ary file was kept on the box as a rollback until **2026-07-29,
+when it was deleted** to reclaim its 33.77 GB (deploy.md §5.4): no binary built
+from this tree can load it — that is precisely what `STORE_ARITY` guarantees —
+so the "rollback" it offered was never a restart, it was a code revert to the
+3-ary lineage *plus* hours of replay onto a by-then-stale file. A fresh
+bootstrap is the honest path if `(2,4)` ever needs reverting. Both lineages
 now agree on `(2,4)`, so a plain restart works again; the trap is live for the
 *next* geometry change, not for this one.
 

@@ -1280,10 +1280,24 @@ answer being wrong.
 too (**0 failing checks** at block 25,626,269), so the gates cover both ends of
 the replay, not just the bootstrap.
 
-Housekeeping: the superseded 36.26 GB `(3,4)` state file is kept on the box as
-`~/risepir-state.bin.arity3-20260727` (disk is at 70 G of 246 G) — it is the
-rollback if `(2,4)` ever needs reverting, and nothing else can regenerate it
-without another ~33 min bootstrap.
+Housekeeping: the superseded 36.26 GB `(3,4)` state file was kept on the box as
+`~/risepir-state.bin.arity3-20260727` (disk was at 70 G of 246 G) as the
+rollback if `(2,4)` ever needed reverting.
+
+**Deleted 2026-07-29** — disk went **92 G → 58 G of 246 G** (39% → 25%), with
+the live 24,176,139,523 B state file verified byte-for-byte unchanged either
+side of the `rm`. The rollback it offered was always weaker than it sounded:
+`STORE_ARITY` (ADR-0034 §6) means *no* binary built from this tree can load a
+3-ary file, so reverting was never "point `--state` at it and restart" — it was
+a code revert to the 3-ary lineage *and* a replay onto a file that grows staler
+every day (it was pinned at block 25,613,233 + change, days behind head by the
+time it was removed). `~/bootstrap-complete.sh` regenerates the `(2,4)` set in
+~16 min; regenerating a `(3,4)` set would need the old geometry constants back
+first. If `(2,4)` ever does need reverting, a fresh bootstrap is the honest
+path, and this file would not have shortened it.
+
+The same-lineage backup `~/risepir-state.bin.pre0728` (22.52 GB) is **kept** —
+that one the current binary *can* load.
 
 ### 5.5 An autosave is invisible to serving, measured (2026-07-28)
 
@@ -1542,6 +1556,89 @@ and `drpc` all independently reported `finalized` = 25,630,637 while the public
 deployment follows `finalized` by design (ADR-0007), so a finality lag looks
 exactly like a stalled head unless you check. `risepir_finalized_block` is the
 field that tells the two apart, and it is new in ADR-0039.
+
+### 5.7 Three defects only a live deployment could show (2026-07-29)
+
+A health check of the running box turned up three defects, all fixed, merged
+and then verified against the redeployed binary (PRs #38–#40). They share one
+cause worth stating first, because it is the reusable lesson: **CI runs the
+gates against `mock`**, which has no real latency, no rate limits and no page
+traffic. All three were green everywhere CI ran them and broken everywhere they
+mattered.
+
+**Starting state, all healthy:** up 1 d 22 h, head = finalized = 25,638,703
+(`risepir_block_lag` 0), 201,022,150 items at load 0.749, `GET /mode` = 1,
+reconcile 8/8 exact per checkpoint with `risepir_reconcile_consecutive_dark` 0
+and zero mismatches ever, 47 saves and `risepir_state_save_failures_total` 0.
+The 21 `CRITICAL` lines in the log are all §5.4's catch-up dark-reconcile
+window, long since recovered.
+
+**(1) Eight front-end routes were served outside the metrics layer.**
+`Router::layer` wraps only the routes registered *before* it is called, and
+`router_with_web` attached the static assets *after*. Measured on the live box
+before the fix — every request a 200, not one counter moved:
+
+| request | status | counter |
+|---|---|---|
+| `GET /` | 200 | — none — |
+| `GET /status` | 200 | — none — |
+| `GET /status.css` | 200 | — none — |
+| `GET /status.js` | 200 | — none — |
+| `GET /index.html` | 404 | `unmatched` +1 (via the fallback) |
+
+The exposition carried no `route="index"`, `"asset"` or `"status"` sample at
+all after two days of serving a public page, so `route_label`'s arms for them
+were unreachable code and `/status`'s own request table read zero page loads
+for the page being read. After redeploying, five requests produced exactly
+`asset` 3, `index` 1, `status` 1.
+
+**(2) `--hard-refresh` was rate-limit-bound, not disagreement-bound**
+(ADR-0041). The §5.6 pass reported 50,813 of 57,646 skipped and the log says
+why without ambiguity: **all 67,791 fetch-failure lines were HTTP 429**, and
+there were **zero** `providers disagree` warnings. Every skip was a fetch that
+never landed. Retrying each fetch 4× with per-address-jittered backoff, then
+re-running the same 57,646-address file at block 25,638,862:
+
+| run | checked | skipped | rate |
+|---|---|---|---|
+| before (full pass, block 25,630,606) | 57,646 | 50,813 | **88.1%** |
+| after | 1,000 | 80 | 8.0% |
+| after | 3,000 | 208 | **6.9%** |
+
+~12.8× better, and *improving* with run length rather than decaying, so it is
+not an artifact of unexhausted quota. Per provider after 3,000 addresses:
+`blastapi` 50,596 → 208, `tenderly` **17,195 → 0**. The backoff fully absorbs
+tenderly's throttling. 1,013 corrections were found in the first 3,000
+addresses, against 2,633 in all 57,646 before.
+
+**(3) `web/test/e2e.mjs` crashed against a real deployment instead of
+reporting.** The resume section builds its session with `stallTimeoutMs: 1200`
+— chosen so its *abort stub* settles fast — then does a real `/answer` through
+it. Live answer latency is p50 ≈ 0.37 s with a tail past 1 s (the `/metrics`
+histogram that same day: 111 of 114 ≤ 0.5 s, one in (1, 2.5]), so the real
+lookup blew the stub's budget. The `await` was unguarded, so the rejection
+escaped the module and killed the process *before* the PASS/FAIL summary —
+silently discarding 29 already-passing checks, including the real private
+lookup:
+
+```
+0xfe0c760cbcb9da239b9ba805f0aeaed3be84f65a
+  = 462867589957615167 wei (0.462867589957615167 ETH) at block 25638735
+```
+
+Because the crash was at the *last* check in the file, nothing after it had
+ever run against a live deployment. With the budget restored and the call
+guarded, the full gate reports `PASS: 0 failing checks` — confirming no second
+live-only defect was hiding behind the first.
+
+**Housekeeping.** The 33.77 GB `(3,4)` rollback file was deleted (§5.4), disk
+92 G → 58 G of 246 G. The box was then stopped after a clean SIGINT save at
+block 25,638,894 — 24.18 GB in 121.8 s (198 MB/s), `state saved; exiting`. Note
+the shutdown probe trap from §5.4 fired again in a harmless form: `pgrep -f
+"risepir-rp[c]"` still returned a PID after the server was gone, because the
+bracketed pattern does not stop the `gcloud … --command` *wrapper* from
+matching itself. `pgrep -af "^\./target/release/risepir-rpc"` is the probe that
+answers the question actually being asked.
 
 ## 6. Who does what, explicitly
 

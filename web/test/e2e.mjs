@@ -578,14 +578,45 @@ check(
       `saw ${sawSource}`,
     );
 
+    // Hand the budget back before doing any *real* network I/O through
+    // this session — the same restore §8 does at the end of its own stub
+    // (`session.stallTimeoutMs = STALL_TIMEOUT_MS`).
+    //
+    // `stallMs` (1.2 s) was chosen to make the *stub* above abort quickly;
+    // it is far below what a real `/answer` costs at the complete set,
+    // where `RisePirServer::answer` alone measures p50 ~0.37 s with a tail
+    // past 1 s (live `/metrics` histogram, 2026-07-29) before TLS and the
+    // round trip are counted. Leaving the short budget in place made the
+    // lookup below time out against the real deployment while passing
+    // against `mock`, which is the only thing CI runs this against — so
+    // the gate was green everywhere it ran and broken everywhere it
+    // mattered.
+    resumedSession.stallTimeoutMs = STALL_TIMEOUT_MS;
+
     // The functional byte-identity proof (see the section header): a
     // lookup through the resumed session must match the already-booted
     // session's answer for the same address, exactly.
-    const viaResumed = await resumedSession.getBalance(target);
+    //
+    // Guarded: an unhandled rejection here escapes the module and kills
+    // the process *before* the PASS/FAIL summary and `process.exit`
+    // below, so a single throw silently discards every check's result
+    // rather than reporting one failure. A gate that crashes instead of
+    // failing is not reporting.
+    let viaResumed = null;
+    let lookupError = null;
+    try {
+      viaResumed = await resumedSession.getBalance(target);
+    } catch (e) {
+      lookupError = e;
+    }
     check(
       "a lookup through the resumed session matches the already-booted session exactly",
-      viaResumed.status === result.status && viaResumed.balanceWei === result.balanceWei,
-      `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${result.status}/${String(result.balanceWei)}`,
+      lookupError === null &&
+        viaResumed.status === result.status &&
+        viaResumed.balanceWei === result.balanceWei,
+      lookupError
+        ? `threw ${lookupError?.constructor?.name ?? "Error"}: ${lookupError?.message ?? String(lookupError)}`
+        : `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${result.status}/${String(result.balanceWei)}`,
     );
   }
 }

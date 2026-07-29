@@ -2970,3 +2970,109 @@ than silent:**
   disclosed 0.33% baseline would trip on every single bootstrap forever. 1%
   (~3x that baseline) is what actually distinguishes "reproduces the known
   number" from "something got worse."
+
+---
+
+### ADR-0041 — A hard-refresh fetch is retried with jittered backoff; the binding constraint on ADR-0040's re-verification was rate limiting, not disagreement **[NEW — makes ADR-0040's `--hard-refresh` mechanism effective; changes none of its invariants]**
+
+**The measurement.** The first real `--hard-refresh` pass on the live
+deployment (`~/server-complete.log`, done line at block **25,630,606**,
+2026-07-28) reported:
+
+```
+57646 checked, 6833 agreed, 50813 skipped (disagreement or fetch error),
+4200 already correct, 2633 corrected, 3105078215573031991516 wei total
+absolute correction
+```
+
+**88.1% of the window was skipped.** The log says exactly why, and the answer
+is not ambiguous:
+
+| signal | count |
+|---|---|
+| `hard-refresh: fetch for … failed` lines | 67,791 |
+| …of those, HTTP 429 / "rate limit" | **67,791 (100%)** |
+| `hard-refresh: WARNING: providers disagree` lines | **0** |
+| from `eth-mainnet.public.blastapi.io` | 50,596 |
+| from `gateway.tenderly.co/public/mainnet` | 17,195 |
+
+So every one of the 50,813 skips was `Quorum::Errored` — a fetch that never
+landed — and **not one** was a genuine cross-provider disagreement. The
+mechanism was not finding the export wrong and declining to guess; it was
+mostly not getting to look.
+
+**Why this was invisible.** ADR-0040's three invariants held perfectly
+throughout, which is precisely the problem: a rate-limited pass and a clean
+pass report the *same* thing at the correctness layer — no correction,
+never a guess. Only the skip count distinguishes "verified, agreed" from
+"never asked". Nothing was ever wrong; the re-verification was simply
+seeing 12% of its own window while reporting success.
+
+The proximate cause is one line of policy: `spawn_check` made exactly one
+attempt per provider per address, fired `CONCURRENT_ADDRESS_CHECKS`-wide
+(8 addresses × 2 providers = 16 in flight) with no pacing, at two *free
+keyless* endpoints. `RpcClient`'s own docs say "no retries — the follow
+loop's own cadence is the retry", which is true for the follow loop, whose
+cadence really does re-ask for the same finalized block. A hard-refresh
+pass has no such cadence: it asks once, and a refused address is not
+revisited until an operator runs the whole file again.
+
+**Decision.** Retry each provider fetch up to `MAX_FETCH_ATTEMPTS` (4:
+one try plus three retries) with exponential backoff — `RETRY_BASE_DELAY`
+(500 ms) doubling per attempt, so ~0.5 s / 1 s / 2 s, worst case ~3.5 s of
+waiting before an address is abandoned. A depth refusal
+(`FeedError::is_depth_refusal`, ADR-0036) is **not** retried: the endpoint
+is saying it does not hold state at that height, which waiting does not
+change, and spending attempts on it starves the rate-limited fetches this
+exists for.
+
+**The jitter is the load-bearing part, and it is per-address.** Concurrent
+checks are rate-limited *together* — a burst arrives, the endpoint refuses
+all of it at once. Backing off by an identical interval would re-synchronize
+that whole burst onto one instant and reproduce the 429 that caused it,
+indefinitely; the retries would be decoration. `backoff_delay` therefore
+adds up to one whole base delay of jitter derived from the **address**
+(SplitMix64's finalizer over the first 8 bytes, mixed with the attempt
+number), not from a clock or an RNG. Deriving it from the address keeps the
+function pure and its behaviour reproducible in a test, which `OsRng` or a
+`SystemTime` read would not; mixing in the attempt number is what stops one
+address from drawing the same offset on each of its own retries. Both
+properties are pinned by tests, including one asserting that 64 distinct
+addresses yield more than 32 distinct delays.
+
+**What this explicitly does not change.** Every ADR-0040 invariant is
+untouched, and none of them is weakened to buy coverage:
+
+1. A correction still comes only from unanimous agreement. A retry can turn
+   "no usable answer" into "a usable answer"; it can never turn a
+   disagreement into an agreement, because `quorum` is evaluated once, over
+   the final per-provider results, and still requires unanimity.
+2. `MAX_CORRECTIONS_PER_BLOCK` is untouched.
+3. `filter_stale_corrections` is untouched — and matters *more* now, since a
+   pass that skips less produces more corrections to drain.
+
+Skipping also remains free: an address given up on after 4 attempts is
+simply re-verified on the next run, exactly as before.
+
+**Consequences.**
+
+- **`CONCURRENT_ADDRESS_CHECKS` stays at 8**, deliberately not lowered.
+  Lowering fan-out trades throughput for a *guess* at whatever rate the
+  endpoint tolerates today; backoff lets each address discover that rate
+  itself, and the per-address jitter is what keeps a refused burst from
+  retrying as a burst. Fan-out is the wrong knob for a limit we do not know.
+- **One log line per abandoned address, not one per attempt.** The old code
+  logged every failure and produced **67,791 lines in a single pass** — the
+  dominant contributor to a 70 MB server log — which buried the run's actual
+  outcome. Retrying without this change would have quadrupled that. The line
+  now names the attempt count and whether the cause was unretryable, which
+  says strictly more in ~4% of the volume.
+- **The residual risk is an honest one:** if a provider is hard-down rather
+  than throttling, a pass now takes ~3.5 s per address longer to conclude
+  that. Bounded, logged, and far cheaper than the failure it replaces.
+- **Not addressed here:** two free keyless providers remain a weak
+  foundation for a quorum that requires unanimity from *all* of them —
+  either one throttling is enough to skip an address. A keyed endpoint, or
+  a third provider with a majority rule instead of unanimity, is a real
+  design question this ADR does not open. The unanimity rule is the
+  conservative choice and stays.

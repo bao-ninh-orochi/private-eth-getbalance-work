@@ -70,6 +70,20 @@
 //! never batched until the whole file finishes — so the follow loop can
 //! start draining real corrections into blocks long before a large file
 //! is fully checked.
+//!
+//! # Rate limits are the binding constraint, not correctness (ADR-0041)
+//!
+//! Every fetch is retried with exponential, per-address-jittered backoff
+//! (`MAX_FETCH_ATTEMPTS`, `backoff_delay`) before the address is given
+//! up on. This is not defensive padding: the first real pass on the live
+//! deployment skipped **88% of its window** purely to HTTP 429s from the
+//! two default keyless providers, with not one disagreement among them —
+//! see `MAX_FETCH_ATTEMPTS` for the measured numbers. The three
+//! invariants above are untouched by it. A retry can only turn "no usable
+//! answer" into "a usable answer"; it can never turn a disagreement into
+//! an agreement, because [`quorum`] is re-evaluated over the final
+//! per-provider results and still requires unanimity. Skipping remains
+//! free — the address is simply re-verified on the next run.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -110,11 +124,84 @@ pub const MAX_CORRECTIONS_PER_BLOCK: usize = 2_000;
 /// correctness: every single check is still exactly the same
 /// [`quorum`]/[`decide_correction`] gate, independent of how many run
 /// side by side.
+///
+/// Left at 8 even after ADR-0041 made every fetch retryable, rather than
+/// lowered to dodge the 429s that motivated it. Lowering fan-out trades
+/// throughput for a *guess* at whatever rate the endpoint happens to
+/// tolerate today; [`backoff_delay`] instead lets each address find that
+/// rate on its own and, because the jitter is per-address, keeps a burst
+/// that was refused together from retrying together. The retries do
+/// stretch the estimate above — worst case ~3.5 s of waiting per
+/// fully-failing address, amortized across this many in flight.
 const CONCURRENT_ADDRESS_CHECKS: usize = 8;
 
 /// Log a progress line every this many addresses checked, so a long run
 /// is visible in the log rather than silent for tens of minutes.
 const PROGRESS_LOG_INTERVAL: u64 = 1_000;
+
+/// How many times one provider fetch is attempted before the address is
+/// given up on for this run (1 initial try + `MAX_FETCH_ATTEMPTS - 1`
+/// retries).
+///
+/// # Why this exists at all (ADR-0041)
+///
+/// The first real `--hard-refresh` pass on the live deployment checked
+/// 57,646 addresses and **skipped 50,813 of them — 88%** (server log,
+/// block 25,630,606, 2026-07-28). Every one of those skips was
+/// [`Quorum::Errored`], not a disagreement: the run logged zero
+/// `providers disagree` warnings, and **all 67,791 fetch failures were
+/// HTTP 429 rate limits** from the two default keyless providers
+/// (50,596 from `eth-mainnet.public.blastapi.io`, 17,195 from
+/// `gateway.tenderly.co`). A single unretried attempt against a free
+/// endpoint, fired [`CONCURRENT_ADDRESS_CHECKS`]-wide with no pacing, is
+/// simply not a fetch that usually lands.
+///
+/// Nothing about that was *unsafe* — the "never guess" invariant held
+/// perfectly, which is exactly why it was invisible from the outside: a
+/// rate-limited pass and a clean pass both report "no correction", and
+/// only the skip count tells them apart. But a re-verification that can
+/// only see 12% of its own window is not doing the job ADR-0040 built it
+/// for. Retrying a failed fetch changes **only** how many addresses get a
+/// usable answer; it cannot change what a usable answer means, because
+/// every retry still feeds the same unanimous-[`quorum`] gate.
+const MAX_FETCH_ATTEMPTS: u32 = 4;
+
+/// Base delay for the exponential backoff between fetch attempts —
+/// attempt *n* waits roughly `RETRY_BASE_DELAY * 2^(n-1)`, so a
+/// four-attempt address spends at most ~0.5 + 1 + 2 = 3.5 s waiting
+/// before it is given up on. Deliberately unhurried: the whole point is
+/// to stop hammering an endpoint that has just said "too many requests".
+const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Backoff before the next attempt, after `attempt` (1-based) has just
+/// failed: `RETRY_BASE_DELAY * 2^(attempt-1)`, plus up to one whole base
+/// delay of **per-address** jitter.
+///
+/// The jitter is the part that matters, and it is derived from the
+/// address rather than from a clock or an RNG. [`CONCURRENT_ADDRESS_CHECKS`]
+/// checks run side by side and tend to be rate-limited *together* — a
+/// burst arrives, the endpoint refuses all of it at once. Backing off by
+/// an identical amount would re-synchronize that whole burst onto the
+/// same instant and reproduce the 429 that caused it, indefinitely.
+/// Spreading each address across a different point in the window is what
+/// actually breaks the lockstep. Deriving it from the address keeps this
+/// function pure and its behaviour reproducible in a test, which an
+/// `OsRng` or a `SystemTime` read would not.
+fn backoff_delay(attempt: u32, addr: &[u8; 20]) -> std::time::Duration {
+    // Saturating, so an (unreachable) large `attempt` cannot overflow into
+    // a tiny or absurd delay.
+    let factor = 1u32.checked_shl(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    let base = RETRY_BASE_DELAY.saturating_mul(factor);
+    // SplitMix64's finalizer over the address plus the attempt number, so
+    // the same address jitters differently on each of its own retries.
+    let mut z = u64::from_le_bytes([addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7]])
+        .wrapping_add(u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let jitter_millis = z % (RETRY_BASE_DELAY.as_millis() as u64).max(1);
+    base.saturating_add(std::time::Duration::from_millis(jitter_millis))
+}
 
 // ─── Address file parsing ────────────────────────────────────────────────
 
@@ -600,20 +687,53 @@ fn spawn_check(join_set: &mut tokio::task::JoinSet<([u8; 20], Quorum)>, clients:
     join_set.spawn(async move {
         let mut results = Vec::with_capacity(clients.len());
         for c in &clients {
-            match c.balance_at(&addr, height).await {
-                Ok(b) => results.push(Ok(b)),
-                Err(e) => {
-                    eprintln!(
-                        "risepir-rpc mainnet: hard-refresh: fetch for 0x{} at {height} from {} failed ({e})",
-                        hex20(&addr),
-                        c.url()
-                    );
-                    results.push(Err(()));
-                }
-            }
+            results.push(fetch_with_retry(c, &addr, height).await);
         }
         (addr, quorum(&results))
     });
+}
+
+/// One provider's balance read for one address, retried with the
+/// [`backoff_delay`] schedule until it succeeds or [`MAX_FETCH_ATTEMPTS`]
+/// is exhausted (ADR-0041).
+///
+/// A depth refusal ([`risepir_feed::FeedError::is_depth_refusal`],
+/// ADR-0036) is **not** retried: it is the endpoint saying it does not
+/// hold state at this height at all, which no amount of waiting changes —
+/// retrying it would only spend requests that the rate-limited fetches
+/// this function exists for actually need.
+///
+/// Only the final give-up is logged, not each attempt. The unretried
+/// version logged every failure and produced **67,791 lines in a single
+/// pass** — the dominant contributor to a 70 MB server log — which buried
+/// the run's actual outcome. One line per genuinely-abandoned address,
+/// naming the attempt count, says strictly more.
+///
+/// `Err(())` rather than the real error: [`quorum`] only distinguishes
+/// "answered" from "did not", and discarding the error type here is what
+/// keeps that function free of a `Debug` bound on every caller's error
+/// (see its own docs).
+async fn fetch_with_retry(client: &RpcClient, addr: &[u8; 20], height: u64) -> Result<Balance, ()> {
+    for attempt in 1..=MAX_FETCH_ATTEMPTS {
+        let err = match client.balance_at(addr, height).await {
+            Ok(b) => return Ok(b),
+            Err(e) => e,
+        };
+        let unretryable = err.is_depth_refusal();
+        if unretryable || attempt == MAX_FETCH_ATTEMPTS {
+            eprintln!(
+                "risepir-rpc mainnet: hard-refresh: fetch for 0x{} at {height} from {} failed after {attempt} \
+                 attempt(s){}: {err}",
+                hex20(addr),
+                client.url(),
+                if unretryable { " (depth refusal — not retryable)" } else { "" },
+            );
+            return Err(());
+        }
+        tokio::time::sleep(backoff_delay(attempt, addr)).await;
+    }
+    // Unreachable: the loop above always returns on its last iteration.
+    Err(())
 }
 
 /// Lowercase hex of a 20-byte address, for log lines. `pub(crate)` — also
@@ -704,6 +824,66 @@ mod tests {
         let path = std::path::Path::new("/nonexistent/definitely-not-here/addresses.txt");
         let err = parse_address_file(path).unwrap_err();
         assert!(matches!(err, AddressFileError::Io(_)), "{err:?}");
+    }
+
+    // ── backoff_delay (ADR-0041) ────────────────────────────────────────
+
+    #[test]
+    fn backoff_grows_exponentially_with_the_attempt_number() {
+        let addr = [0x11u8; 20];
+        let d1 = backoff_delay(1, &addr);
+        let d2 = backoff_delay(2, &addr);
+        let d3 = backoff_delay(3, &addr);
+        // Each attempt's floor is the previous one's, doubled. Jitter is
+        // bounded by one base delay, so compare against the floors rather
+        // than against each other.
+        assert!(d1 >= RETRY_BASE_DELAY && d1 < RETRY_BASE_DELAY * 2, "{d1:?}");
+        assert!(d2 >= RETRY_BASE_DELAY * 2 && d2 < RETRY_BASE_DELAY * 3, "{d2:?}");
+        assert!(d3 >= RETRY_BASE_DELAY * 4 && d3 < RETRY_BASE_DELAY * 5, "{d3:?}");
+    }
+
+    #[test]
+    fn jitter_desynchronizes_addresses_that_were_rate_limited_together() {
+        // The property that matters: a burst of concurrent checks refused
+        // at the same instant must not all wake at the same instant. Over
+        // a realistic fan-out, the delays must actually differ.
+        let delays: std::collections::BTreeSet<_> = (0u8..64)
+            .map(|i| backoff_delay(1, &[i; 20]))
+            .collect();
+        assert!(
+            delays.len() > 32,
+            "64 distinct addresses collapsed to {} distinct delays — the burst would re-synchronize",
+            delays.len()
+        );
+    }
+
+    #[test]
+    fn the_same_address_jitters_differently_on_each_of_its_own_retries() {
+        let addr = [0x42u8; 20];
+        // Strip the exponential floor to compare the jitter component alone.
+        let j1 = backoff_delay(1, &addr) - RETRY_BASE_DELAY;
+        let j2 = backoff_delay(2, &addr) - RETRY_BASE_DELAY * 2;
+        assert_ne!(j1, j2, "attempt number must feed the jitter, not just the floor");
+    }
+
+    #[test]
+    fn backoff_is_deterministic_for_a_given_address_and_attempt() {
+        let addr = [0x7fu8; 20];
+        assert_eq!(backoff_delay(2, &addr), backoff_delay(2, &addr));
+    }
+
+    #[test]
+    fn a_whole_address_gives_up_in_a_bounded_time() {
+        // Every retry an address can make, summed: this is the worst case
+        // one address adds to a pass, and it must stay small enough that
+        // MAX_FETCH_ATTEMPTS cannot quietly turn a 35-minute run into an
+        // overnight one.
+        let addr = [0xffu8; 20];
+        let total: std::time::Duration = (1..MAX_FETCH_ATTEMPTS).map(|a| backoff_delay(a, &addr)).sum();
+        assert!(
+            total < std::time::Duration::from_secs(10),
+            "worst-case wait per address is {total:?}"
+        );
     }
 
     // ── quorum: agree / disagree / error ────────────────────────────────

@@ -181,6 +181,44 @@ the superseded `(3,4)` lineage is stale.
   the delta-ring retention check — a `409` must force a re-download);
   ADR-0033 supplied the sharper lineage-epoch revalidation ADR-0038 is
   actually built against.
+- **The IKPIR pin is one lineage behind, and the analysis for crossing it is
+  already done** *(new, 2026-07-31 — ADR-0042)*. Upstream corrected RisePIR's
+  Lemma 2, widened `fingerprint_bits` to u64, and replaced the
+  `plaintext_bits` selectors with δ_cell-targeted ones. **ADR-0042 re-derived
+  this repo's operating point under the corrected lemma and concluded nothing
+  moves**: κ ≈ 61 today (filter-bound, index term 278 bits slacker), 21 bits
+  past the κ = 40 the lemma targets, and the new selector picks the *same*
+  `plaintext_bits` at all four scales this repo builds. So the bump is a
+  compile-time change here, **not** an operational one — no geometry change,
+  no re-bootstrap, `docs/numbers.md`'s geometry rows unaffected.
+
+  **It is deferred, not declined, and the blocker is not ours.** As of
+  2026-07-31 `orochi-network/IKPIR` `main` is still `8032a2c`, PR #27 (the
+  u64 fingerprint core) is open but cannot go green because that repo's
+  GitHub Actions allocates no runner, and the parameter-selector PR is
+  unopened. There is therefore **no new `perf/optimized` SHA to pin** — this
+  repo stays at `3d60fa7`, which is correct and still builds. Do not re-pin
+  speculatively.
+
+  When a SHA does land, the work is mechanical and scoped: bump `rev` in
+  **both** `Cargo.toml` (3 deps; also fix the stale `042d868` comment at
+  line 11) and `fuzz/Cargo.toml` (2 deps) — a mismatch compiles two
+  different filters into one workspace — keep `ikpir-common`'s
+  `default-features = false`, then adapt **20 `*_max_plaintext_bits` call
+  sites across 9 files** (both selectors gain `arity`; `frodo_*` also gains
+  `bucket_size`/`fingerprint_bits`/`value_bits`). Only **two** of those are
+  production code — both in `Geometry::for_num_buckets`, which ADR-0042
+  factored out of `for_accounts` precisely so the selector is called in one
+  place; the other 18 are test fixtures. Then widen every fingerprint
+  *value* to `u64` (`risepir-server/src/fold.rs`'s `SlotMutation` fields are
+  the non-test ones). Two traps that no compiler will catch: the item hash
+  moves `xxh3_64` → `xxh3_128`, so **every stored artifact and fuzz corpus
+  seed is invalid and must be re-derived, not patched**; and
+  `risepir-proto/src/value.rs`'s comment that the fingerprint is "32 bits
+  (unchanged upstream)" becomes false — that same paragraph is what
+  documents the fp/`key_tag` hash independence ADR-0042 shows is
+  load-bearing, so it must be rewritten to describe `xxh3_128`'s low 64
+  bits, not merely deleted.
 - **Web front end, remaining deferrals** (ADR-0019 records why, and what each
   needs): ~~public exposure~~ (shipped, PR #5); and serving the page from a
   *different* party than the PIR server, which is the stronger arrangement for

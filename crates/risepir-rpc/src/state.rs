@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend, SimplePirBackend};
 use risepir_http::wire;
-use risepir_proto::{BlockDelta, ValueCodec};
+use risepir_proto::{Backend, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{RisePirServer, SetupBundle};
 use segmented_cuckoo::{CuckooParams, Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
@@ -365,14 +365,84 @@ pub(crate) fn load_raw(path: &Path, codec: &ValueCodec) -> Result<RawState, Stat
     parse_raw(BufReader::new(file), total_len, codec)
 }
 
+/// Rejects a state file whose stored geometry is not the one this binary
+/// would build (ADR-0042).
+///
+/// [`parse_raw`] already refuses a mismatched **arity** ([`STORE_ARITY`],
+/// ADR-0034) and a mismatched **[`ValueCodec`]** field-by-field from the
+/// header. This closes the rest: `bucket_size`, `fingerprint_bits` and
+/// `plaintext_bits` all ride in the file's own setup bundle, and until this
+/// check existed they were only validated for self-consistency against
+/// `cells_len` — so a file written at one `(bucket_size, f, pb)` loaded
+/// happily into a binary compiled for another.
+///
+/// That is **not** a wrong-answer bug: the store, `GET /setup` and every
+/// client all take the geometry from the file, so the deployment stays
+/// internally consistent. It is a *silent wrong operating point* — the same
+/// class as ADR-0034's arity trap and the partial-state-file trap, and the
+/// exact mode by which a geometry decision can be believed-deployed and not
+/// be. Erroring is fine; silence is not.
+///
+/// Two things this deliberately does not do:
+///
+/// - **It does not pin `num_buckets`.** That legitimately varies with
+///   `--partial-capacity`, so the expected geometry is derived *at the
+///   file's own* `num_buckets` — the guard asks "would this binary have
+///   built this geometry at this size?", not "is this the deployment size?".
+/// - **It does not hardcode `plaintext_bits`.** The expectation comes from
+///   [`Geometry::for_num_buckets`], the same selector
+///   `Geometry::for_accounts` uses on the bootstrap path, so if the pinned
+///   primitive ever retunes that selector this guard tracks it instead of
+///   going stale. That is the case worth guarding against: a `pb` that
+///   moves under a binary nobody edited.
+fn check_geometry_lineage(params: &CuckooParams, codec: &ValueCodec) -> Result<(), StateError> {
+    let expected = Geometry::for_num_buckets(
+        params.num_buckets,
+        STORE_ARITY as u32,
+        crate::mainnet::BUCKET_SIZE,
+        crate::mainnet::FINGERPRINT_BITS,
+        codec,
+        Backend::Simple,
+    )
+    .map_err(|e| {
+        StateError::Corrupt(format!(
+            "state file declares num_buckets {}, which is not a geometry this binary can \
+             describe: {e}",
+            params.num_buckets
+        ))
+    })?;
+
+    if params.bucket_size == expected.bucket_size
+        && params.fingerprint_bits == expected.fingerprint_bits
+        && params.plaintext_bits == expected.plaintext_bits
+    {
+        return Ok(());
+    }
+    Err(StateError::Corrupt(format!(
+        "state file geometry is (bucket_size {}, fingerprint_bits {}, plaintext_bits {}) but \
+         this binary derives (bucket_size {}, fingerprint_bits {}, plaintext_bits {}) at that \
+         file's own num_buckets ({}) — this is not disk corruption, it is an intact state file \
+         from a previous geometry lineage (ADR-0042); move the --state file aside and \
+         re-bootstrap from a fresh snapshot (do not restore from backup, the file itself is fine)",
+        params.bucket_size,
+        params.fingerprint_bits,
+        params.plaintext_bits,
+        expected.bucket_size,
+        expected.fingerprint_bits,
+        expected.plaintext_bits,
+        params.num_buckets,
+    )))
+}
+
 /// The single decode path behind [`load`] / [`load_bytes`] / [`load_raw`].
 /// `total_len` is the input's real size, used to bound every
 /// header-declared length *before* it sizes an allocation — a corrupt or
 /// hostile file must produce a clean [`StateError`], never an OOM (the
 /// repo's validate-every-length rule applies to state files too, not just
 /// the network). Also rejects a state file of the wrong arity lineage (see
-/// [`STORE_ARITY`]) right after the header decodes, before the cells
-/// section is even read, let alone allocated. Stops short of store
+/// [`STORE_ARITY`]) or of any other mismatched geometry (see
+/// [`check_geometry_lineage`]) right after the header decodes, before the
+/// cells section is even read, let alone allocated. Stops short of store
 /// reconstruction — see [`RawState`] and [`assemble`].
 fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<RawState, StateError> {
     let mut r = HashingReader {
@@ -442,6 +512,7 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
             params.arity(),
         )));
     }
+    check_geometry_lineage(&params, codec)?;
 
     let cells_len = read_u64(&mut r)?;
     let cells_len = usize::try_from(cells_len).map_err(|_| StateError::Corrupt("cells_len overflow".to_string()))?;
@@ -1167,6 +1238,180 @@ mod tests {
             // so the success case is just named directly rather than
             // formatted.
             Ok(_) => panic!("a state file from a different arity lineage must not load successfully"),
+        }
+    }
+
+    // ── ADR-0042: the geometry-lineage guard ────────────────────────────
+
+    /// Builds a structurally valid RPST2 state file at an arbitrary
+    /// [`CuckooParams`] — cells sized to that geometry, whole-file checksum
+    /// correct — so anything that rejects it is rejecting the *geometry*,
+    /// never the shape. (`wrong_arity_state_file_rejected_by_name_not_by_shape`
+    /// above hand-assembles its own because it must also fake a 3-ary
+    /// `SchemeKind` this crate's `Server` alias can no longer produce.)
+    fn state_bytes_at(params: CuckooParams, codec: &ValueCodec) -> Vec<u8> {
+        use ikpir_common::backend::simple::{SimpleHint, SimpleServerParams};
+
+        assert_eq!(codec.value_bits(), params.value_bits, "fixture: codec must match params");
+        let arity = params.arity();
+        let lwe_dim = 4u32;
+        let reshape_row_width = 6u32;
+        let backend_params: Vec<SimpleServerParams> = (0..arity)
+            .map(|i| SimpleServerParams {
+                params: SimpleParams::new(
+                    lwe_dim,
+                    params.plaintext_bits,
+                    SimpleParams::DEFAULT_SIGMA,
+                    [i as u8; 16],
+                ),
+                n_rows: 10,
+                row_width: 3,
+                k: 2,
+                reshape_rows: 5,
+                reshape_row_width,
+            })
+            .collect();
+        let hints: Vec<SimpleHint> = (0..arity)
+            .map(|i| SimpleHint {
+                data: (0..lwe_dim * reshape_row_width).map(|j| (i as u32) * 1_000 + j).collect(),
+            })
+            .collect();
+        let setup_bytes = wire::encode_setup(&SetupBundle { params, backend_params, hints, block: 0 });
+        let cells_len =
+            params.num_buckets as usize * params.bucket_size as usize * params.cells_per_slot() as usize;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(1); // complete
+        for w in [codec.key_tag_bits, codec.balance_bits, codec.checksum_bits] {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // num_items
+        bytes.extend_from_slice(&(setup_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&setup_bytes);
+        bytes.extend_from_slice(&(cells_len as u64).to_le_bytes());
+        for _ in 0..cells_len {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        hasher.update(&bytes);
+        bytes.extend_from_slice(&hasher.digest().to_le_bytes());
+        bytes
+    }
+
+    /// [`CuckooParams`] for the geometry *this binary* builds at
+    /// `num_buckets` — derived, never hand-written, so these fixtures track
+    /// the selector instead of pinning a number that could go stale.
+    fn deployed_params_at(num_buckets: u32, codec: &ValueCodec) -> CuckooParams {
+        let geom = Geometry::for_num_buckets(
+            num_buckets,
+            STORE_ARITY as u32,
+            crate::mainnet::BUCKET_SIZE,
+            crate::mainnet::FINGERPRINT_BITS,
+            codec,
+            Backend::Simple,
+        )
+        .expect("fixture geometry must be derivable");
+        CuckooParams {
+            scheme_kind: segmented_cuckoo::SchemeKind::Segmented2ary,
+            num_buckets: geom.num_buckets,
+            bucket_size: geom.bucket_size,
+            fingerprint_bits: geom.fingerprint_bits,
+            value_bits: geom.value_bits,
+            plaintext_bits: geom.plaintext_bits,
+        }
+    }
+
+    /// Positive control. Without it the two rejection tests below would
+    /// still pass if the guard rejected *everything*.
+    #[test]
+    fn matching_geometry_passes_the_lineage_guard() {
+        let codec = codec();
+        assert!(check_geometry_lineage(&deployed_params_at(128, &codec), &codec).is_ok());
+    }
+
+    /// `--partial-capacity` moves `num_buckets`, so the guard derives its
+    /// expectation at the *file's own* size rather than pinning the
+    /// deployment's. Pinning it would refuse every partial-mode state file.
+    #[test]
+    fn lineage_guard_does_not_pin_num_buckets() {
+        let codec = codec();
+        for num_buckets in [64u32, 128, 4096, 1 << 20] {
+            assert!(
+                check_geometry_lineage(&deployed_params_at(num_buckets, &codec), &codec).is_ok(),
+                "num_buckets {num_buckets} is a legitimate --partial-capacity size"
+            );
+        }
+    }
+
+    /// A state file from a `fingerprint_bits = 64` lineage — the upgrade
+    /// ADR-0042 considered and rejected — must be refused *by name*. The
+    /// fixture is well-formed at its own geometry, so without the guard it
+    /// would load and the server would serve the previous operating point
+    /// while every constant in this binary said otherwise.
+    #[test]
+    fn wrong_fingerprint_bits_state_file_rejected_by_name() {
+        let codec = codec();
+        let geom =
+            Geometry::for_num_buckets(128, STORE_ARITY as u32, crate::mainnet::BUCKET_SIZE, 64, &codec, Backend::Simple)
+                .unwrap();
+        assert_ne!(
+            geom.fingerprint_bits,
+            crate::mainnet::FINGERPRINT_BITS,
+            "sanity: this fixture must actually differ from what this binary builds"
+        );
+        let params = CuckooParams {
+            scheme_kind: segmented_cuckoo::SchemeKind::Segmented2ary,
+            num_buckets: geom.num_buckets,
+            bucket_size: geom.bucket_size,
+            fingerprint_bits: geom.fingerprint_bits,
+            value_bits: geom.value_bits,
+            plaintext_bits: geom.plaintext_bits,
+        };
+        let bytes = state_bytes_at(params, &codec);
+
+        match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec) {
+            Err(StateError::Corrupt(msg)) => {
+                assert!(msg.contains("fingerprint_bits"), "must name the mismatched field: {msg}");
+                assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
+                assert!(
+                    msg.contains("do not restore from backup"),
+                    "the file is intact, not corrupt — must not steer to a backup restore: {msg}"
+                );
+                assert!(
+                    !msg.contains("store reconstruction"),
+                    "must be rejected by the explicit guard, not by upstream's from_cells fallback \
+                     (which would prove the check ran after the cells were read): {msg}"
+                );
+            }
+            Err(StateError::Io(msg)) => panic!("must be rejected as Corrupt, not Io: {msg}"),
+            Ok(_) => panic!("a state file from a different fingerprint lineage must not load"),
+        }
+    }
+
+    /// The sharper case, and the reason the guard derives rather than
+    /// hardcodes: nobody edits this binary, but the pinned primitive's
+    /// `plaintext_bits` selector retunes, so the geometry it derives today
+    /// differs from the one the file was written at. No compiler can see
+    /// that drift; this guard can.
+    #[test]
+    fn wrong_plaintext_bits_state_file_rejected_by_name() {
+        let codec = codec();
+        let mut params = deployed_params_at(128, &codec);
+        params.plaintext_bits += 1;
+        let bytes = state_bytes_at(params, &codec);
+
+        match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec) {
+            Err(StateError::Corrupt(msg)) => {
+                assert!(msg.contains("plaintext_bits"), "must name the mismatched field: {msg}");
+                assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
+                assert!(
+                    !msg.contains("store reconstruction"),
+                    "must be rejected before the cells section is read: {msg}"
+                );
+            }
+            Err(StateError::Io(msg)) => panic!("must be rejected as Corrupt, not Io: {msg}"),
+            Ok(_) => panic!("a state file from a different plaintext_bits lineage must not load"),
         }
     }
 }

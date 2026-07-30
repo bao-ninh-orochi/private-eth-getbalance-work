@@ -119,7 +119,7 @@ which kills the classic "walk plain state" enumeration recipe — *except for us
 because `HashedAccountState` is already in our key space. A decision the brief made
 for other reasons turns out to solve a problem it didn't know existed.
 
-### ADR-0009 — Value = `key_tag ‖ balance ‖ checksum`; 64-bit-effective fingerprint; hard-fail on overflow **[REVISED — folds in the 64-bit-fingerprint decision]**
+### ADR-0009 — Value = `key_tag ‖ balance ‖ checksum`; 64-bit-effective fingerprint; hard-fail on overflow **[REVISED — folds in the 64-bit-fingerprint decision; u64 rejection RE-EXAMINED and UPHELD under the corrected Lemma 2, ADR-0042]**
 
 **Chosen:** the SCF keeps its 32-bit positioning fingerprint; the **value** carries
 `key_tag(32b) ‖ balance(96b) ‖ checksum(16b)` (widths tunable). `key_tag = H₂(address)`
@@ -153,6 +153,26 @@ single combined tag `H(address‖balance)` would make a corrupted real account l
 the untagged DB). Tunable: narrower tags trade FP/corruption resistance for size.
 **Residual:** if noise corrupts an SCF-*fingerprint* cell the scan misses and we answer
 `0x0` — inherent to the filter layer, documented, not fixable here.
+**Re-examined under RisePIR's corrected Lemma 2 (2026-07-31, ADR-0042 — read that for
+the derivation).** Upstream widened `fingerprint_bits` to u64 for its own paper-parity
+reasons, which forced the question of whether the rejection above still holds against
+the corrected bound `δ, ξ ≤ d·δ_idx + |H|·2⁻ᶠ/s` rather than the one it was written
+against. It does, and the rejection stands — but three things in the paragraphs above
+are now stated more precisely, and one of them is a genuine correction of emphasis:
+- The `key_tag` composes with the corrected lemma exactly, because it is independent of
+  everything that lemma models: `|H|·2⁻⁽ᶠ⁺³²⁾/s = 2⁻⁶¹·⁴²` at the deployed geometry.
+  **That independence — a second xxh3 hash of the same address under a distinct nonzero
+  seed, against the store's seed-0 digest — is a load-bearing correctness assumption**,
+  not the implementation detail this ADR originally treated it as.
+- The quoted rates are close but were reasoned without an occupancy term: "~2⁻⁶⁰" is
+  **2⁻⁶¹·⁴²** and the bare-fingerprint "~2⁻²⁸" is **2⁻²⁹·⁴²** at this repo's actual
+  `|H|/s`.
+- **The emphasis was wrong.** This ADR presented `key_tag` as defence-in-depth over an
+  already-adequate 32-bit fingerprint. Under the corrected lemma the bare fingerprint
+  gives κ ≈ 29.4 — *below* the κ = 40 the lemma targets — so `key_tag` is not
+  hardening, it is the entire margin between this deployment and a correctness budget
+  it would otherwise miss. Widening `value_bits` at the cost of the tag would be a
+  security regression, not a size trade.
 
 ### ADR-0010 — Strict lockstep behind a `Mutex` **[DEVIATES from §8]**
 
@@ -3076,3 +3096,202 @@ simply re-verified on the next run, exactly as before.
   a third provider with a majority rule instead of unanimity, is a real
   design question this ADR does not open. The unanimity rule is the
   conservative choice and stays.
+
+### ADR-0042 — RisePIR's corrected Lemma 2 moves nothing here: keep `f = 32` + `key_tag`, κ ≈ 61 **[NEW — re-derives ADR-0009's operating point under the corrected lemma; rejects the u64-fingerprint upgrade for this deployment]**
+
+**Context.** RisePIR corrected its correctness lemma. The bound is now
+
+```
+δ, ξ  ≤  d·δ_idx  +  |H|·2^−f/s  ≤  d·δ_idx + (1 + τ_ins/m)·d·b·2^−f
+```
+
+(`f` fingerprint bits, `d` arity, `b` bucket_size, `s = n_b/d` buckets per
+segment, `|H|` the key history, `δ_idx` the per-read index-PIR error).
+Upstream re-derived its parameters against it for **κ = 40**, widened
+`fingerprint_bits` to `1..=64` (default **64** for the *paper's* configs), and
+replaced the `plaintext_bits` selectors with **δ_cell-targeted** ones
+(`δ_cell ≤ 2^−(κ+1)/(d·row_width)`). That is a change to the primitive this
+repo pins, so the question is what it means *here* — and this repo's setting is
+nothing like the paper's: ℓ = 144 (not 2048/8192), `row_width` = 88 (not
+940–4128), `segment_rows` = 2²⁵ (≈100× the paper's), and, decisively, **this
+repo does not rely on the SCF fingerprint alone** (ADR-0009).
+
+**Chosen: nothing moves.** Keep `fingerprint_bits = 32`, keep the 32-bit
+`key_tag` in the value, keep `plaintext_bits = 8` (still derived, never
+hardcoded). Adopt the new selector when the pin bump lands, because at this
+repo's geometry it **selects the same `plaintext_bits` the old one did, at
+every scale this repo builds** — so the upgrade is a no-op for the deployed
+operating point and needs no re-bootstrap.
+
+**The derivation** (arity 2, bucket_size 4, `num_buckets` 2²⁶, `segment_rows`
+2²⁵, SimplePIR σ = 6.4, ℓ = 144, 200,503,969 accounts; computed with the same
+formula replica that machine-checks the upstream memo, cross-validated against
+this repo's own `Geometry`):
+
+| term | value | vs the paper's 2⁻⁴¹ budget |
+|---|---|---|
+| achieved δ_cell at pb = 8 | 2⁻³⁴⁶·⁷¹ (target 2⁻⁴⁸·⁴⁶) | — |
+| **index term** `d·row_width·δ_cell` | **2⁻³³⁹·²⁵** | passes by **298 bits** |
+| **filter term**, SCF fingerprint alone | 2⁻²⁹·⁴² | **fails** by 12 bits |
+| **filter term**, fp ∧ `key_tag` (64-bit-effective) | **2⁻⁶¹·⁴²** exact, 2⁻⁶¹·⁰⁰ generic | passes by **20 bits** |
+| **total (δ, ξ)** | **2⁻⁶¹·⁰⁰** | **κ ≈ 61** |
+
+Two things follow. First, **the filter term binds and the index term does not,
+by 278 bits** — the opposite of the paper's configs, where the two are within a
+few bits. Second, **`key_tag` is not a nicety here, it is the whole margin**:
+without it this repo sits at κ ≈ 29.4, *below* the κ = 40 the corrected lemma
+targets. ADR-0009's tag is what puts this deployment over the line, and the
+corrected lemma is what makes that legible for the first time.
+
+**Does ADR-0009's argument survive the corrected lemma? Yes — and more cleanly
+than it was originally stated.** ADR-0009 rejected a u64 fingerprint on the
+grounds that "a 32-bit SCF fingerprint plus a 32-bit `key_tag` requires 64-bit
+agreement to accept a slot, giving identical resistance at identical size". The
+corrected lemma's `|H|·2⁻ᶠ/s` form is not the one that argument was written
+against, so it was re-run rather than assumed. It composes exactly: the lemma's
+`2⁻ᶠ` is the probability that *one* history key is accepted at a probed slot,
+and `|H|/s` is how many history keys reach that bucket. The `key_tag` test is
+statistically independent of everything the lemma models — it is a second
+xxh3 hash of the same address under a **distinct nonzero seed**
+(`KEY_TAG_SEED`, `risepir-proto/src/value.rs`), while the store's fingerprint
+comes from the seed-0 digest — so it multiplies the per-key acceptance
+probability by 2⁻³² without touching the occupancy factor:
+
+```
+|H|·2^−(f + tag)/s  =  2^27.58 · 2^−64 / 2^25  =  2^−61.42
+```
+
+ADR-0009's own "~2⁻⁶⁰" was therefore right to within 1.4 bits, but for a reason
+it could not state — it had no `|H|/s` term and implicitly used the occupancy
+`d·b·load ≈ 6`. The corrected lemma supplies it. **The independence of those
+two hashes is now a load-bearing correctness assumption and is documented as
+one**, not merely as an implementation detail.
+
+**Robust to history growth.** `|H|` is keys *ever inserted*, and mainnet churns.
+The margin absorbs orders of magnitude: at `|H|` = 10⁹ the filter term is
+2⁻⁵⁹·¹, at 10¹⁰ it is 2⁻⁵⁵·⁸, at 10¹¹ it is 2⁻⁵²·⁵ — still 12 bits past κ = 40
+at five hundred times today's set.
+
+**The failure-mode map — only two rows spend the κ budget.** Verified against
+the code, not against ADR-0009's prose. This repo's binding rule is *never
+return a wrong answer; erroring is fine*, so the paper's δ (any incorrect
+decode) is strictly more conservative than what actually matters here:
+
+| event | mechanism | outcome | wrong answer? |
+|---|---|---|---|
+| foreign slot collides on SCF fp only | client's fp ∧ `key_tag` mask is **joint per slot** (`risepir-client/src/client.rs`), so the colliding slot's mask is all-zero | real slot still found | no |
+| foreign slot collides on fp **and** `key_tag` | both 32-bit tests pass | foreign balance returned | **yes** — 2⁻⁶¹·⁴² |
+| noise corrupts a balance or checksum cell | `checksum` mismatch on a `key_tag`-matching slot | `DecodeFailed` | no |
+| noise corrupts an fp or `key_tag` cell of the real slot | scan misses | `NotFound` → `0x0` for a *complete* set | **yes** — ADR-0009's residual |
+| foreign fp-match shadows the key at *write* time | server's verified scan (ADR-0017) | loud `FingerprintAmbiguity`, block rejected | no |
+| stored slot fails its checksum at write time | verified scan | loud `CorruptStoredValue` | no |
+
+Only rows 2 and 4 are wrong answers, and row 4 is *complete-set-only* — partial
+mode never answers `0x0` for an untracked account (ADR-0015/0017), which is why
+this is a hazard for the deployed mode specifically. Row 4's real weight is
+narrower than the paper's δ_idx: of the 22 cells in a slot at pb = 8, only the
+**8** carrying fp ‖ `key_tag` produce a wrong answer when corrupted; the other
+14 (balance ‖ checksum) fail loudly. That makes this repo's wrong-answer index
+term `8·δ_cell` = 2⁻³⁴³·⁷¹, 4.5 bits tighter than the paper's — immaterial at
+these magnitudes, and recorded only so the next person does not have to
+re-derive why the two numbers differ.
+
+**Is there any κ at which `plaintext_bits` improves? No.** This was the
+motivating question ("is 2⁻⁴⁰ necessary here, or can we suffer 2⁻³⁰?") and the
+answer is that the trade does not exist at this operating point. At pb = 9 the
+SimplePIR bound fails in the linear Δ-form by **47.0%** — it demands 12,331,534
+against the Δ = 2²³ = 8,388,608 that pb = 9 actually leaves — which is 26.5 bits
+short in log space, not a hair. (At the shipping pb = 8 the same bound demands
+6,327,582 against Δ = 2²⁴ = 16,777,216: it passes with 2.65× headroom.)
+Solving for the κ that would let pb = 9 pass gives **κ ≤ 13.50**: a correctness
+error of 2⁻¹³·⁵, one wrong balance in ~11,600 queries. That is not a security
+parameter. Even discarding `key_tag` entirely (κ = 29.4) leaves pb = 9
+unreachable, so there is no version of "loosen the budget" that buys a
+`plaintext_bits` bit here. **Loosening κ is rejected because it purchases
+nothing, not because 2⁻⁴⁰ was argued for.**
+
+**The options, and why each was rejected.**
+
+1. **Keep `f = 32` + `key_tag`; adopt the new selector — CHOSEN.** κ ≈ 61,
+   21 bits past the target, at zero cost. The new selector picks the same
+   `plaintext_bits` as the old one at all four scales this repo builds
+   (100,000 → 10; 1,000,000 → 9; 9,437,184 → 9; 200,503,969 → 8), so no
+   geometry moves, `docs/numbers.md`'s §4a geometry rows are unchanged, and
+   **no re-bootstrap is needed**. The pin bump remains worth taking for the
+   primitive's maintained tip; it is a compile-time change here, not an
+   operational one.
+2. **Adopt `f = 64`, keep `key_tag` — rejected.** `f + ℓ` goes 176 → 208 bits,
+   so cells/slot 22 → 26 (**+18.2%**) at unchanged pb = 8: server DB
+   23.62 → **27.92 GB**, first-load hint 553.82 → **602.53 MB**, client
+   resident 1.11 → **1.21 GB**. It moves κ from 61.4 to 93.4 — buying 32 bits
+   nobody can spend, against a budget already cleared by 21 — and costs a
+   mandatory re-bootstrap plus ~9% on the browser's first load, which
+   `CLAUDE.md` names as the whole product constraint. Paying the product's
+   binding constraint for unspendable margin is the wrong trade.
+3. **Adopt `f = 64` and retire `key_tag` (ℓ 144 → 112) — rejected, and it is
+   the interesting one.** ADR-0009 predicted this would be size-neutral and it
+   is, exactly: `f + ℓ` = 176 either way, so pb = 8, cells/slot 22,
+   `row_width` 88, server DB 23.62 GB — every size identical to today. Its
+   filter term is **also identical**, 2⁻⁶¹·⁴², because 64 bits of agreement is
+   64 bits of agreement. So it is a strictly dominated option: same security,
+   same size, in exchange for a mandatory re-bootstrap, a rewrite of the scan
+   order that keeps `NotFound` distinct from `DecodeFailed`, and a
+   `docs/threat-model.md` edit. It also gives up a property worth keeping —
+   today's 64 bits come from **two independently seeded hash families**, so a
+   weakness in one seeding degrades to 32 bits rather than to nothing.
+   (xxh3 is not a cryptographic hash; the key is `keccak256(address)` per
+   ADR-0008, so its input is already a digest an adversary cannot steer — but
+   two seeds are strictly better than one at zero cost.) Rejected on
+   dominance, not on risk.
+4. **Loosen κ below 40 to buy a `plaintext_bits` bit — rejected.** See above:
+   it would take κ ≤ 13.5. No such trade exists.
+5. **Decline the upgrade and stay pinned at `3d60fa7` — rejected**, though it
+   is a real option and this ADR does not pretend otherwise. Declining keeps
+   the pin drifting from the primitive's maintained tip, so security and
+   performance fixes stop arriving, and the divergence only gets more
+   expensive to cross. Since the upgrade costs this repo *nothing*
+   operationally (option 1), there is no reason to accept that drift. The pin
+   bump is deferred only because the upstream work has not landed, not
+   because it was declined.
+
+**Consequences and what this ADR changes in the code.**
+
+- **`plaintext_bits` stays derived.** The new selector's signature gains
+  `arity`; `risepir-proto/src/geometry.rs` and its call sites adapt to it, and
+  nothing is hardcoded. If a future upstream retune *does* move pb here, the
+  guard below is what makes that loud instead of silent.
+- **A state file's `(fingerprint_bits, bucket_size, plaintext_bits)` is not
+  checked against the binary that loads it.** `parse_raw`
+  (`risepir-rpc/src/state.rs`) already refuses a mismatched **arity** by name
+  (`STORE_ARITY`, ADR-0034) and a mismatched **`ValueCodec`** by field, both
+  before the multi-GB cells section is read — but `fingerprint_bits`,
+  `bucket_size` and `plaintext_bits` come from the file's own setup bundle and
+  are only checked for *self*-consistency against `cells_len`. A file written
+  at one `(f, pb)` therefore loads into a binary compiled for another. This is
+  **not** a wrong-answer bug — the store, `/setup` and every client all take
+  the geometry from the file, so the deployment stays internally consistent —
+  but it is a *silent wrong operating point*, the same class as ADR-0034's
+  arity trap and the partial-state-file trap, and precisely the mode by which
+  this ADR's decision could be believed-deployed and not be. Closed the same
+  way: by name, immediately after the header, with an error naming the cause
+  and the fix. `plaintext_bits` is checked against what this binary's selector
+  would derive **from the file's own `num_buckets`**, never against a hardcoded
+  8 — `num_buckets` legitimately varies with `--partial-capacity`.
+- **`lineage_epoch` has a blind spot at exactly option 3's shape.** The epoch
+  (ADR-0033, `risepir-http/src/wire.rs`) folds in per-segment seeds plus
+  `n_rows`/`row_width`/`reshape_*`, so that "any future change that re-derives
+  geometry without re-seeding still changes the epoch". A size-neutral
+  geometry change — option 3 is the canonical one — moves *none* of those
+  fields. In practice the epoch still changes, because any geometry change
+  forces a re-bootstrap and a re-bootstrap samples fresh seeds, so a cached
+  553.82 MB browser hint (ADR-0038) can never be reused across one. But the
+  geometry fold-in's stated defence-in-depth does not hold for that shape, and
+  if option 3 were ever revisited, `fingerprint_bits` and `value_bits` must be
+  folded into the epoch material first. Recorded, not changed — adding fields
+  now would invalidate the live deployment's epoch for no benefit.
+- **Nothing in `docs/threat-model.md` moves.** No security boundary changed:
+  same effective agreement width, same trust assumptions, same adversary.
+- **The live deployment does not need to be touched.** The geometry is
+  unchanged, so the 24.18 GB state file remains loadable and a restart stays a
+  restart. This ADR deliberately does not spend the ~16 min re-bootstrap plus
+  hours of replay that options 2 and 3 would have required.

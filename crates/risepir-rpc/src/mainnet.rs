@@ -89,8 +89,16 @@ use crate::state;
 /// measured numbers table this used to match, `docs/numbers.md`, was arity
 /// 3 before that retune).
 const ARITY: u32 = 2;
-const BUCKET_SIZE: u32 = 4;
-const FINGERPRINT_BITS: u32 = 32;
+/// `pub(crate)` for `crate::state`'s load-time geometry guard (ADR-0042),
+/// which validates a state file's stored geometry against the one *this
+/// binary* would build — and this is that geometry. The guard shares these
+/// constants rather than keeping its own copy, because a guard checking
+/// against a private mirror would happily pass a state file the bootstrap
+/// path would never have written. (`ARITY` stays private: `state.rs` pins
+/// arity separately against the compiled store *type*, via `STORE_ARITY`.)
+pub(crate) const BUCKET_SIZE: u32 = 4;
+/// See [`BUCKET_SIZE`] for why this is `pub(crate)`.
+pub(crate) const FINGERPRINT_BITS: u32 = 32;
 
 /// Poll cadence for `finalized` (it advances in ~32-block bursts every
 /// ~6.4 min; polling faster than block time buys nothing).

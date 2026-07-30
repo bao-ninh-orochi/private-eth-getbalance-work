@@ -142,6 +142,12 @@ pub enum GeomError {
     InvalidFieldWidth,
     /// The account count needs a `num_buckets` that does not fit in `u32`.
     TooManyAccounts,
+    /// [`Geometry::for_num_buckets`] was given a `num_buckets` of 0, or one
+    /// that is not a multiple of `arity` — the `arity` segments must
+    /// partition the buckets evenly. [`Geometry::for_accounts`] cannot
+    /// produce either, so this only ever surfaces for a `num_buckets` that
+    /// came from somewhere else (a stored artifact, a caller's own choice).
+    InvalidNumBuckets(u32),
 }
 
 impl std::fmt::Display for GeomError {
@@ -152,6 +158,9 @@ impl std::fmt::Display for GeomError {
             Self::InvalidFieldWidth => write!(f, "fingerprint_bits and value_bits must both be >= 1"),
             Self::TooManyAccounts => {
                 write!(f, "account count requires a num_buckets that does not fit in u32")
+            }
+            Self::InvalidNumBuckets(n) => {
+                write!(f, "num_buckets must be >= 1 and a multiple of arity, got {n}")
             }
         }
     }
@@ -359,6 +368,52 @@ impl Geometry {
             other => return Err(GeomError::InvalidArity(other)),
         };
         let num_buckets = u32::try_from(num_buckets_u128).map_err(|_| GeomError::TooManyAccounts)?;
+        Self::for_num_buckets(num_buckets, arity, bucket_size, fingerprint_bits, value_codec, backend)
+    }
+
+    /// The same derivation as [`Self::for_accounts`], but from an
+    /// already-chosen `num_buckets` instead of an account count.
+    ///
+    /// `for_accounts` *is* this function plus the bucket-count search, so
+    /// `plaintext_bits` is selected here and only here. That matters for
+    /// the one caller that is not sizing anything: `risepir-rpc`'s
+    /// state-file guard (ADR-0042), which validates a **loaded** geometry
+    /// against the one this binary would have built. Deriving through this
+    /// constructor is what lets that guard compare against exactly the
+    /// selector `for_accounts` would have used, rather than against a
+    /// hardcoded `plaintext_bits` — which `CLAUDE.md` forbids, and which
+    /// would silently stop tracking the selector the moment the pinned
+    /// primitive retunes it.
+    ///
+    /// `num_buckets` is taken as given: it is a fact about the artifact
+    /// being validated, not something to re-size. It legitimately varies
+    /// with `--partial-capacity`, so a guard must never pin it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::for_accounts`], plus [`GeomError::InvalidNumBuckets`] if
+    /// `num_buckets` is 0 or is not a multiple of `arity`.
+    pub fn for_num_buckets(
+        num_buckets: u32,
+        arity: u32,
+        bucket_size: u32,
+        fingerprint_bits: u32,
+        value_codec: &ValueCodec,
+        backend: Backend,
+    ) -> Result<Self, GeomError> {
+        if !matches!(arity, 2..=4) {
+            return Err(GeomError::InvalidArity(arity));
+        }
+        if bucket_size == 0 {
+            return Err(GeomError::InvalidBucketSize);
+        }
+        let value_bits = value_codec.value_bits();
+        if fingerprint_bits == 0 || value_bits == 0 {
+            return Err(GeomError::InvalidFieldWidth);
+        }
+        if num_buckets == 0 || !num_buckets.is_multiple_of(arity) {
+            return Err(GeomError::InvalidNumBuckets(num_buckets));
+        }
         let segment_rows = num_buckets / arity;
 
         let plaintext_bits = match backend {

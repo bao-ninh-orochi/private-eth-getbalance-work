@@ -26,6 +26,7 @@
 //! snapshot/state/partial bootstrap, live `finalized` follow over public
 //! RPC, cross-provider reconciliation, default LWE parameters.
 
+use risepir_rpc::logln;
 use risepir_rpc::demo::{self, DemoConfig};
 use risepir_rpc::front::{self, FrontConfig};
 use risepir_rpc::mainnet::{self, MainnetConfig};
@@ -147,10 +148,15 @@ async fn run_mainnet(cfg: MainnetConfig) {
     // previous good file. `save_now` waits for any running save, then
     // always writes the current state.
     if let Some(saver) = &handle.saver {
-        eprintln!("risepir-rpc mainnet: shutdown signal — saving state ...");
+        // Timestamped (`logln!`, not `eprintln!`): these three are the
+        // lines an operator actually waits on during a stop, and "how long
+        // did the shutdown save take" is exactly the question a bare
+        // message cannot answer. The CLI's usage/argument errors below stay
+        // plain — those are interactive feedback, not log records.
+        logln!("risepir-rpc mainnet: shutdown signal — saving state ...");
         match saver.save_now(&handle.node, "shutdown").await {
-            Ok(_) => eprintln!("risepir-rpc mainnet: state saved; exiting"),
-            Err(e) => eprintln!("risepir-rpc mainnet: WARNING: state save failed: {e}"),
+            Ok(_) => logln!("risepir-rpc mainnet: state saved; exiting"),
+            Err(e) => logln!("risepir-rpc mainnet: WARNING: state save failed: {e}"),
         }
     }
     std::process::exit(0);

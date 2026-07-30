@@ -467,7 +467,7 @@ impl PrivateEth {
         let new_session = Session::from_bundle(bundle, self.value_codec, complete);
         let new_pinned = new_session.pending_head;
         *session = new_session;
-        eprintln!(
+        logln!(
             "risepir-rpc: re-bootstrapped after falling out of the server's retained delta window \
              (pinned block {old_pinned} -> {new_pinned}, mode {})",
             if complete { "complete" } else { "partial" }

@@ -574,13 +574,13 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
     let addresses = match parse_address_file(&path) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("risepir-rpc mainnet: fatal: --hard-refresh {}: {e}", path.display());
+            logln!("risepir-rpc mainnet: fatal: --hard-refresh {}: {e}", path.display());
             std::process::exit(1);
         }
     };
     let total = addresses.len();
     if total == 0 {
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: hard-refresh: {} contains no addresses; nothing to check",
             path.display()
         );
@@ -588,7 +588,7 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
     }
 
     let height = node.with_server(|s| s.block()).await;
-    eprintln!(
+    logln!(
         "risepir-rpc mainnet: hard-refresh: checking {total} address(es) from {} at block {height} against \
          {} provider(s) ({CONCURRENT_ADDRESS_CHECKS} at a time): {}",
         path.display(),
@@ -628,7 +628,7 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
         let current = match node.balance_of(&key).await {
             Ok(v) => v.unwrap_or(0),
             Err(e) => {
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: hard-refresh: CRITICAL: verified read for 0x{} failed ({e}) — stopping \
                      this hard-refresh run; this indicates store corruption independent of this feature (the \
                      same class `reconcile`'s own verified read guards against), not anything this mechanism can \
@@ -643,7 +643,7 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
             CheckOutcome::Skipped => skipped += 1,
             CheckOutcome::SkippedDisagreement => {
                 skipped += 1;
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: hard-refresh: WARNING: providers disagree for 0x{} at block {height}; \
                      skipping (never guessing)",
                     hex20(&addr)
@@ -661,7 +661,7 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
         }
 
         if checked.is_multiple_of(PROGRESS_LOG_INTERVAL) {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: hard-refresh: {checked}/{total} checked so far ({corrected} correction(s) \
                  queued, {} still pending in the block queue)",
                 queue.len()
@@ -669,7 +669,7 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
         }
     }
 
-    eprintln!(
+    logln!(
         "risepir-rpc mainnet: hard-refresh: done at block {height} — {checked} checked, {agreed} agreed, \
          {skipped} skipped (disagreement or fetch error), {already_correct} already correct, {corrected} \
          corrected, {total_wei_corrected} wei total absolute correction. Corrections drain into blocks \
@@ -721,7 +721,7 @@ async fn fetch_with_retry(client: &RpcClient, addr: &[u8; 20], height: u64) -> R
         };
         let unretryable = err.is_depth_refusal();
         if unretryable || attempt == MAX_FETCH_ATTEMPTS {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: hard-refresh: fetch for 0x{} at {height} from {} failed after {attempt} \
                  attempt(s){}: {err}",
                 hex20(addr),

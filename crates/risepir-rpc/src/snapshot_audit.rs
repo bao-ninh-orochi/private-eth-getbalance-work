@@ -375,7 +375,7 @@ pub fn read_sidecar(path: &Path) -> AuditSidecar {
     match parse_sidecar(&text) {
         Ok(record) => AuditSidecar::Known(record),
         Err(e) => {
-            eprintln!(
+            logln!(
                 "risepir-rpc: WARNING: snapshot audit sidecar {} is present but corrupt ({e}); reporting unknown",
                 path.display()
             );
@@ -465,7 +465,7 @@ pub async fn verify(
     if total_sampled == 0 {
         return;
     }
-    eprintln!(
+    logln!(
         "risepir-rpc mainnet: snapshot audit: verifying {total_sampled} sampled address(es) at block \
          {snapshot_block} against {} provider(s) (reservoir seed={seed})",
         refresh_urls.len()
@@ -503,9 +503,9 @@ pub async fn verify(
         block: snapshot_block,
         seed,
     };
-    eprintln!("risepir-rpc mainnet: {}", report_line(&record, total_ingested));
+    logln!("risepir-rpc mainnet: {}", report_line(&record, total_ingested));
     if is_alarming(&record) {
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: WARNING: the snapshot audit is 95% confident the true disagreement rate \
              exceeds {} — see the report line above; this deployment continues to serve regardless (a \
              sampled third-party dataset's imperfection must not become this deployment's outage, the same \
@@ -520,7 +520,7 @@ pub async fn verify(
     if let Some(path) = state_path {
         let sidecar = sidecar_path(&path);
         if let Err(e) = write_sidecar(&sidecar, &record) {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: WARNING: could not write snapshot audit sidecar {}: {e}",
                 sidecar.display()
             );
@@ -552,7 +552,7 @@ fn spawn_audit_check(
             match c.balance_at(&addr, height).await {
                 Ok(b) => results.push(Ok(b)),
                 Err(e) => {
-                    eprintln!(
+                    logln!(
                         "risepir-rpc mainnet: snapshot audit: fetch for 0x{} at {height} from {} failed ({e})",
                         hex20(&addr),
                         c.url()

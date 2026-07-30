@@ -159,6 +159,19 @@ journal's tail (well under a second per block) rather than the whole
 interval. Every save logs a `state saved: block …, … GB in …s` completion
 line.
 
+Every runtime log line is prefixed with an RFC 3339 UTC timestamp
+(`2026-07-30T04:12:33Z risepir-rpc mainnet: …`, `logln!` in
+`crates/risepir-rpc/src/logging.rs`); the message after it is unchanged, so
+existing greps match — but a **`^`-anchored** one must drop its anchor. CLI
+banner/usage/argument output stays untimestamped on stdout, deliberately.
+The log does **not** rotate on its own in the tmux shape (it hit 66.79 MB
+before this was addressed): install `ops/logrotate/risepir`, whose
+`copytruncate` is load-bearing — the server never reopens its log, so a
+rename-then-create rotation would leave it writing to the renamed inode
+while the live file stays 0 bytes (deploy.md §4 "Log timestamps and
+rotation"). Never `kill -HUP` it to force a reopen: there is no SIGHUP
+handler, so that terminates the server.
+
 Beside it sits `<state>.journal` (ADR-0026): one small per-block delta,
 appended and fsynced as each block applies, rotated to a fresh file at every
 save. Always written once a first save exists. Restoring from it is now the

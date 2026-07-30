@@ -42,6 +42,13 @@
 //! drive — Stage 0.4 is deliberately mock-backed throughout; wiring real
 //! mainnet data is Stage 1 (`docs/plan.md` §6).
 
+// MUST stay first: `macro_rules!` macros are textually scoped, so
+// `#[macro_use]` only makes `logln!` visible to modules declared *after*
+// this line. Moving it below any of them breaks their build with
+// "cannot find macro `logln` in this scope".
+#[macro_use]
+pub mod logging;
+
 mod error;
 mod private_eth;
 pub mod rpc;

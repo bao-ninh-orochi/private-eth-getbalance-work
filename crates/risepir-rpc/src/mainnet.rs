@@ -373,7 +373,7 @@ pub struct MainnetHandle {
 /// wraps happens before serving starts, so exiting is the honest move —
 /// there is no traffic to keep alive.
 fn die(msg: impl std::fmt::Display) -> ! {
-    eprintln!("risepir-rpc mainnet: fatal: {msg}");
+    logln!("risepir-rpc mainnet: fatal: {msg}");
     std::process::exit(1);
 }
 
@@ -396,7 +396,7 @@ fn report_journal_savings(state_path: &Path, journal_path: &Path, record_count: 
     let (Ok(state_meta), Ok(journal_meta)) = (std::fs::metadata(state_path), std::fs::metadata(journal_path)) else {
         return;
     };
-    eprintln!(
+    logln!(
         "risepir-rpc mainnet: journal: {record_count} record(s), {} bytes since the base save (base \
          state file is {} bytes) — restoring costs the replay, not the rewrite",
         journal_meta.len(),
@@ -476,7 +476,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         Ok(f) => f,
         Err(e) => die(format!("feed {}: {e}", cfg.feed_urls.join(", "))),
     };
-    eprintln!(
+    logln!(
         "risepir-rpc mainnet: feed endpoints (in order): {}",
         feed.urls().join(" -> ")
     );
@@ -504,7 +504,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // is only decided inside that arm).
     if cfg.hard_refresh.is_some() {
         if let Err(e) = hard_refresh::validate_refresh_urls(&cfg.refresh_urls) {
-            eprintln!("risepir-rpc mainnet: fatal: --hard-refresh requires valid --refresh-url config: {e}");
+            logln!("risepir-rpc mainnet: fatal: --hard-refresh requires valid --refresh-url config: {e}");
             std::process::exit(2);
         }
     }
@@ -512,7 +512,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // ── Bootstrap: state file > snapshot > partial ─────────────────────
     let bootstrap: Bootstrap = if let Some(path) = cfg.state.as_ref().filter(|p| p.exists()) {
         if !cfg.snapshot.is_empty() {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: note: state file {} exists; --snapshot is ignored \
                  (delete the state file to re-bootstrap from the snapshot)",
                 path.display()
@@ -525,7 +525,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             // onto raw parts before the store is built, so the fresh
             // server starts at the journal's height instead of the base
             // file's own. ──
-            eprintln!("risepir-rpc mainnet: loading state (--journal-restore) from {} ...", path.display());
+            logln!("risepir-rpc mainnet: loading state (--journal-restore) from {} ...", path.display());
             let started = std::time::Instant::now();
             let restored = state::load_with_journal_restore(path, backend_config.clone(), &codec, cfg.ring_capacity)
                 .unwrap_or_else(|e| die(format!("loading {} with journal restore: {e}", path.display())));
@@ -540,7 +540,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             } = restored;
             let plaintext_bits = server.params().plaintext_bits;
 
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: state loaded in {:.1}s — block {}, {} accounts, {}",
                 started.elapsed().as_secs_f64(),
                 server.block(),
@@ -548,7 +548,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 if complete { "complete set" } else { "PARTIAL set" },
             );
             if let Some(ScanStop::Invalid { offset, reason }) = &scan_stop {
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: WARNING: journal replay stopped at byte {offset} ({reason}) — \
                      the follow loop will fetch the remainder over the network"
                 );
@@ -559,22 +559,22 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 // which at the complete mainnet set is the dominant cost
                 // and one this feature does not shrink — conflating the
                 // two would inflate what "replay" appears to cost.
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: journal replayed: {replayed} block(s) in {:.3}s — resuming at block {} (base was {base_block})",
                     replay_elapsed.as_secs_f64(),
                     server.block(),
                 );
             } else if adopt_at.is_some() {
-                eprintln!("risepir-rpc mainnet: journal matched the base but had nothing new to replay");
+                logln!("risepir-rpc mainnet: journal matched the base but had nothing new to replay");
             } else {
-                eprintln!("risepir-rpc mainnet: no usable journal found; serving from the base state file alone");
+                logln!("risepir-rpc mainnet: no usable journal found; serving from the base state file alone");
             }
 
             let initial_journal = adopt_at.and_then(|(end_offset, end_height)| {
                 match JournalWriter::adopt(&journal_path, plaintext_bits, end_offset, end_height) {
                     Ok(w) => Some(w),
                     Err(e) => {
-                        eprintln!("risepir-rpc mainnet: WARNING: could not adopt the journal for continued appending: {e}");
+                        logln!("risepir-rpc mainnet: WARNING: could not adopt the journal for continued appending: {e}");
                         None
                     }
                 }
@@ -599,11 +599,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             // before, but scan the journal read-only and report what it
             // would have done — the original ADR-0026 soak signal, still
             // available for an operator who wants to opt back out. ──
-            eprintln!("risepir-rpc mainnet: loading state from {} ...", path.display());
+            logln!("risepir-rpc mainnet: loading state from {} ...", path.display());
             let started = std::time::Instant::now();
             let state::LoadedState { server, complete, digest } = state::load(path, backend_config.clone(), &codec)
                 .unwrap_or_else(|e| die(format!("loading {}: {e}", path.display())));
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: state loaded in {:.1}s — block {}, {} accounts, {}",
                 started.elapsed().as_secs_f64(),
                 server.block(),
@@ -617,7 +617,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             let initial_journal = match digest {
                 None => {
                     if journal_path.exists() {
-                        eprintln!(
+                        logln!(
                             "risepir-rpc mainnet: journal present but this is a legacy RPST1 state file \
                              (no digest to bind it to) — ignoring it until the next save upgrades the state file"
                         );
@@ -633,12 +633,12 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                         // "drop that flag", not "pass --journal-restore"
                         // (a no-op now that it is the default).
                         match &report.stop {
-                            ScanStop::Eof => eprintln!(
+                            ScanStop::Eof => logln!(
                                 "risepir-rpc mainnet: journal intact: {} records to block {} (drop \
                                  --no-journal-restore to use it)",
                                 report.count, report.end_height
                             ),
-                            ScanStop::Invalid { offset, reason } => eprintln!(
+                            ScanStop::Invalid { offset, reason } => logln!(
                                 "risepir-rpc mainnet: journal corrupt at byte {offset} ({reason}); usable prefix: \
                                  {} records to block {} (drop --no-journal-restore to use it)",
                                 report.count, report.end_height
@@ -661,12 +661,12 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                             match JournalWriter::adopt(&journal_path, plaintext_bits, report.end_offset, report.end_height) {
                                 Ok(w) => Some(w),
                                 Err(e) => {
-                                    eprintln!("risepir-rpc mainnet: WARNING: could not adopt journal: {e}");
+                                    logln!("risepir-rpc mainnet: WARNING: could not adopt journal: {e}");
                                     None
                                 }
                             }
                         } else {
-                            eprintln!(
+                            logln!(
                                 "risepir-rpc mainnet: journal is ahead of the loaded base (block {b}) — leaving it \
                                  untouched; journaling starts fresh at the next save"
                             );
@@ -681,7 +681,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                         // line: silently ignoring a file the operator may
                         // be counting on is how soak evidence gets lost.
                         if journal_path.exists() {
-                            eprintln!(
+                            logln!(
                                 "risepir-rpc mainnet: journal present but unusable for this base (corrupt \
                                  header, or bound to a different save) — ignoring it; the next save starts \
                                  a fresh one"
@@ -690,7 +690,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                         None
                     }
                     Err(e) => {
-                        eprintln!("risepir-rpc mainnet: WARNING: could not scan journal {}: {e}", journal_path.display());
+                        logln!("risepir-rpc mainnet: WARNING: could not scan journal {}: {e}", journal_path.display());
                         None
                     }
                 },
@@ -717,7 +717,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         // deployment-configuration mistake caught before serving starts.
         if cfg.snapshot_audit_samples > 0 {
             if let Err(e) = hard_refresh::validate_refresh_urls(&cfg.refresh_urls) {
-                eprintln!("risepir-rpc mainnet: fatal: --snapshot-audit-samples requires valid --refresh-url config: {e}");
+                logln!("risepir-rpc mainnet: fatal: --snapshot-audit-samples requires valid --refresh-url config: {e}");
                 std::process::exit(2);
             }
         }
@@ -729,7 +729,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let effective_genesis = snapshot_rewind::rewound_genesis(snapshot_block, cfg.snapshot_rewind)
             .unwrap_or_else(|e| die(e));
         if cfg.snapshot_rewind > 0 {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: --snapshot-rewind {}: treating the snapshot as exact at block {} \
                  instead of the declared {snapshot_block} — the catch-up replay will re-derive every \
                  account the extra {} block(s) touch from the chain's own absolute post-state before \
@@ -743,7 +743,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let accounts = match cfg.snapshot_accounts {
             Some(n) => n,
             None => {
-                eprintln!("risepir-rpc mainnet: counting snapshot rows (pass --snapshot-accounts to skip) ...");
+                logln!("risepir-rpc mainnet: counting snapshot rows (pass --snapshot-accounts to skip) ...");
                 match snapshot::count_rows(&cfg.snapshot) {
                     Ok(n) => n,
                     Err(e) => die(e),
@@ -753,7 +753,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let geom = Geometry::for_accounts(accounts.max(1_000), ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
             .unwrap_or_else(|e| die(format!("geometry for {accounts} accounts: {e}")));
         let sizes = geom.sizes(Backend::Simple, accounts);
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: geometry for {accounts} accounts: {} buckets, server DB {:.2} GB, load {:.3}",
             geom.num_buckets,
             sizes.server_db as f64 / 1e9,
@@ -777,14 +777,14 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let audit_seed = snapshot_audit::random_seed();
         let mut reservoir = ReservoirSampler::new(cfg.snapshot_audit_samples, audit_seed);
         if cfg.snapshot_audit_samples > 0 {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: snapshot audit: reservoir-sampling up to {} address(es) during ingest \
                  (seed={audit_seed})",
                 cfg.snapshot_audit_samples
             );
         }
 
-        eprintln!("risepir-rpc mainnet: ingesting snapshot ({} shard(s)) ...", cfg.snapshot.len());
+        logln!("risepir-rpc mainnet: ingesting snapshot ({} shard(s)) ...", cfg.snapshot.len());
         let started = std::time::Instant::now();
         let mut ingested = 0u64;
         let stats = snapshot::ingest(&cfg.snapshot, |addr20, key, balance| {
@@ -793,7 +793,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             reservoir.observe(addr20, balance);
             ingested += 1;
             if ingested.is_multiple_of(5_000_000) {
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet:   {ingested} accounts in {:.0}s ...",
                     started.elapsed().as_secs_f64()
                 );
@@ -801,7 +801,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             Ok(())
         })
         .unwrap_or_else(|e| die(e));
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: snapshot ingested in {:.0}s — {} rows, {} nonzero, {} zero skipped, max balance {} wei",
             started.elapsed().as_secs_f64(),
             stats.rows,
@@ -810,7 +810,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             stats.max_balance,
         );
 
-        eprintln!("risepir-rpc mainnet: running PIR setup (one-time preprocessing) ...");
+        logln!("risepir-rpc mainnet: running PIR setup (one-time preprocessing) ...");
         let started = std::time::Instant::now();
         // effective_genesis, not snapshot_block: with --snapshot-rewind
         // active the server's *actual* starting height is earlier than
@@ -819,7 +819,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         // nominal declaration (the audit, further down, is the one place
         // that deliberately keeps using the nominal `snapshot_block`).
         let server = RisePirServer::new(store, backend_config.clone(), codec, effective_genesis);
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: setup done in {:.1}s at block {}",
             started.elapsed().as_secs_f64(),
             server.block(),
@@ -828,11 +828,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let mut on_disk_height = None;
         let mut initial_journal = None;
         if let Some(path) = &cfg.state {
-            eprintln!("risepir-rpc mainnet: saving state to {} ...", path.display());
+            logln!("risepir-rpc mainnet: saving state to {} ...", path.display());
             let started = std::time::Instant::now();
             match state::save(&server, &codec, true, path) {
                 Ok(state::SaveReport { bytes, digest }) => {
-                    eprintln!(
+                    logln!(
                         "risepir-rpc mainnet: state saved: block {}, {:.2} GB in {:.1}s",
                         server.block(),
                         bytes as f64 / 1e9,
@@ -846,12 +846,12 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                     let journal_path = journal::journal_path_for(path);
                     match JournalWriter::create(&journal_path, digest, server.block(), server.params().plaintext_bits) {
                         Ok(w) => initial_journal = Some(w),
-                        Err(e) => eprintln!("risepir-rpc mainnet: WARNING: could not create the initial journal: {e}"),
+                        Err(e) => logln!("risepir-rpc mainnet: WARNING: could not create the initial journal: {e}"),
                     }
                 }
                 // Non-fatal: the server is correct in memory; only restart
                 // speed is lost. Say so and continue.
-                Err(e) => eprintln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"),
+                Err(e) => logln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"),
             }
         }
 
@@ -897,11 +897,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             geom.plaintext_bits,
         )
         .unwrap_or_else(|e| die(format!("store construction: {e:?}")));
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: PARTIAL bootstrap at finalized block {fin} — empty set, capacity {} accounts.",
             cfg.partial_capacity
         );
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: partial mode serves only accounts touched from here on; everything else ERRORS (never 0x0)."
         );
         Bootstrap {
@@ -957,7 +957,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         // Whatever a state-file-exists restart already reported above
         // (journal intact / corrupt / ahead / nothing to report) stands;
         // this is the one summary line every bootstrap path prints.
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: journal: writing to {} (--journal-restore {})",
             journal::journal_path_for(path).display(),
             if cfg.journal_restore { "ON" } else { "OFF" }
@@ -1002,7 +1002,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         // hard-refresh is not specific to a fresh snapshot ingest — it is
         // equally meaningful against a `--state`-restarted server, which
         // is why this lives here rather than inside any one bootstrap arm.
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: hard-refresh: {} configured; checking will run in the background \
              (never blocks serving or following)",
             path.display()
@@ -1027,13 +1027,13 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // that actually does reconcile.
     node.set_reconcile_configured(cfg.reconcile_every > 0);
     if cfg.reconcile_every > 0 {
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: reconcile: every {} block(s), {} sample(s) per checkpoint against {} — \
              GET /healthz reports this check's own health (reconcile_* fields, ADR-0027)",
             cfg.reconcile_every, cfg.reconcile_samples, cfg.confirm_url
         );
     } else {
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: reconcile: DISABLED (--reconcile-every 0) — no cross-provider integrity \
              check will run; GET /healthz reports reconcile_configured=0"
         );
@@ -1061,7 +1061,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             if let Err(e) = axum::serve(pir_listener, router).await {
                 // A dead listener with a live process is a silent outage;
                 // die loudly and let the supervisor restart the unit.
-                eprintln!("risepir-rpc mainnet: fatal: PIR listener crashed: {e}");
+                logln!("risepir-rpc mainnet: fatal: PIR listener crashed: {e}");
                 std::process::exit(1);
             }
         }
@@ -1107,7 +1107,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let router = crate::rpc::router(private_eth);
         async move {
             if let Err(e) = axum::serve(rpc_listener, router).await {
-                eprintln!("risepir-rpc mainnet: fatal: JSON-RPC listener crashed: {e}");
+                logln!("risepir-rpc mainnet: fatal: JSON-RPC listener crashed: {e}");
                 std::process::exit(1);
             }
         }
@@ -1190,11 +1190,11 @@ impl PatchStats {
     }
 }
 
-/// Logs one patch-time summary line, in this crate's `eprintln!` style —
+/// Logs one patch-time summary line, in this crate's `logln!` style —
 /// see [`PATCH_STATS_LOG_INTERVAL_BLOCKS`] for the cadence. The caller
 /// resets the accumulator immediately after.
 fn log_patch_stats(through_block: u64, stats: &PatchStats) {
-    eprintln!(
+    logln!(
         "risepir-rpc mainnet: patch stats over last {count} block(s) (through block {through_block}): \
          mean {mean:.4} ms, min {min:.4} ms, max {max:.4} ms, mean K {mean_k:.1} mutations/block",
         count = stats.count,
@@ -1264,7 +1264,7 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
         let finalized = match feed.finalized().await {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("risepir-rpc mainnet: follow: finalized poll failed ({e}); retrying");
+                logln!("risepir-rpc mainnet: follow: finalized poll failed ({e}); retrying");
                 tokio::time::sleep(RETRY_INTERVAL).await;
                 continue;
             }
@@ -1284,7 +1284,7 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             let fetched = match feed.block_update(n).await {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("risepir-rpc mainnet: follow: block {n} fetch failed ({e}); retrying");
+                    logln!("risepir-rpc mainnet: follow: block {n} fetch failed ({e}); retrying");
                     tokio::time::sleep(RETRY_INTERVAL).await;
                     continue; // same n, idempotent
                 }
@@ -1342,14 +1342,14 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                     }
                 };
                 if stale > 0 {
-                    eprintln!(
+                    logln!(
                         "risepir-rpc mainnet: hard-refresh: {stale} correction(s) dropped as stale in block {n} \
                          (the account changed since the check; the feed's own value wins)"
                     );
                 }
                 if !still_valid.is_empty() {
                     let still_queued = cfg.corrections.len();
-                    eprintln!(
+                    logln!(
                         "risepir-rpc mainnet: hard-refresh: applying {} correction(s) in block {n} \
                          ({still_queued} still queued)",
                         still_valid.len()
@@ -1712,7 +1712,7 @@ impl FailureLogger {
     /// otherwise.
     fn log(&mut self, addr: &Address, block: u64, err: &FeedError) {
         if self.logged < Self::VERBATIM_CAP {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: reconcile: fetch for 0x{} at {block} failed ({err}); skipping sample",
                 hex20(addr)
             );
@@ -1727,7 +1727,7 @@ impl FailureLogger {
     /// been logged.
     fn finish(&self) {
         if self.suppressed > 0 {
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: reconcile: ... and {} more fetch failure(s) this checkpoint",
                 self.suppressed
             );
@@ -1880,7 +1880,7 @@ async fn reconcile<C: ConfirmSource>(
 
         let health = node.record_reconcile_checkpoint(n, 0, true, true);
         let since_success = since_last_success(&health);
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: reconcile: block {n}: deferred — {lag} block(s) behind the finalized head, \
              deeper than the independent provider serves without a token (dark checkpoint #{} in a row); {since_success}",
             health.consecutive_dark
@@ -1922,14 +1922,14 @@ async fn reconcile<C: ConfirmSource>(
 
     match outcome {
         CheckpointOutcome::Empty => {
-            eprintln!("risepir-rpc mainnet: reconcile at block {n}: no candidate accounts to check (empty block)");
+            logln!("risepir-rpc mainnet: reconcile at block {n}: no candidate accounts to check (empty block)");
         }
         CheckpointOutcome::Success { checked } => {
-            eprintln!("risepir-rpc mainnet: reconcile at block {n}: {checked} account(s) exact vs independent provider");
+            logln!("risepir-rpc mainnet: reconcile at block {n}: {checked} account(s) exact vs independent provider");
         }
         CheckpointOutcome::Dark { attempted } => {
             let since_success = since_last_success(&health);
-            eprintln!(
+            logln!(
                 "risepir-rpc mainnet: reconcile: WARNING: block {n}: {attempted} fetch(es) attempted against the \
                  independent provider, {attempted} failed (dark checkpoint #{} in a row); {since_success}",
                 health.consecutive_dark
@@ -1946,7 +1946,7 @@ async fn reconcile<C: ConfirmSource>(
     for addr in reservoir.pop_front_up_to(RESERVOIR_DRAIN_PER_CHECKPOINT) {
         match confirm.balance_at(&addr, n).await {
             Err(e) => {
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: reconcile: deferred-reservoir fetch for 0x{} at {n} failed ({e}); requeued",
                     hex20(&addr)
                 );
@@ -1963,7 +1963,7 @@ async fn reconcile<C: ConfirmSource>(
     }
     node.set_reservoir_len(reservoir.len() as u64);
     if had_entries && reservoir.is_empty() {
-        eprintln!(
+        logln!(
             "risepir-rpc mainnet: reconcile: deferred reservoir drained to empty — every address queued during a \
              blind checkpoint has now been verified"
         );
@@ -1992,7 +1992,7 @@ fn unix_now() -> u64 {
 }
 
 fn critical(msg: &str) {
-    eprintln!("risepir-rpc mainnet: CRITICAL: {msg}");
+    logln!("risepir-rpc mainnet: CRITICAL: {msg}");
 }
 
 fn hex20(bytes: &[u8; 20]) -> String {
@@ -2214,7 +2214,7 @@ mod tests {
     /// The exact behavior ADR-0036 §1 exists for: a confirm provider that
     /// always fails must stop at the attempt **budget**, never walk the
     /// whole candidate list. Pre-ADR-0036, this would have produced 300
-    /// attempts (one `eprintln!` and one HTTP request each); afterward,
+    /// attempts (one `logln!` and one HTTP request each); afterward,
     /// exactly `budget` (16 at the real default `samples = 8`).
     #[tokio::test]
     async fn attempt_budget_bounds_requests_when_every_fetch_fails() {

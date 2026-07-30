@@ -221,7 +221,7 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         if let Err(e) = axum::serve(pir_listener, pir_router).await {
             // A dead listener with a live process is a silent outage; die
             // loudly instead and let the supervisor restart the whole unit.
-            eprintln!("risepir-rpc: fatal: PIR listener crashed: {e}");
+            logln!("risepir-rpc: fatal: PIR listener crashed: {e}");
             std::process::exit(1);
         }
     });
@@ -239,11 +239,11 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
                 match feed.next_block() {
                     Ok(Some(update)) => {
                         if let Err(e) = node_state.apply_block(&update).await {
-                            eprintln!("risepir-rpc: follow loop: apply_block failed: {e}");
+                            logln!("risepir-rpc: follow loop: apply_block failed: {e}");
                         }
                     }
                     Ok(None) => {} // MockFeed never returns None; kept for a future real feed
-                    Err(e) => eprintln!("risepir-rpc: follow loop: feed error: {e}"),
+                    Err(e) => logln!("risepir-rpc: follow loop: feed error: {e}"),
                 }
             }
         });
@@ -271,7 +271,7 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     let rpc_router = crate::rpc::router(private_eth);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(rpc_listener, rpc_router).await {
-            eprintln!("risepir-rpc: fatal: JSON-RPC listener crashed: {e}");
+            logln!("risepir-rpc: fatal: JSON-RPC listener crashed: {e}");
             std::process::exit(1);
         }
     });

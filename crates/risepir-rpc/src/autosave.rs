@@ -300,7 +300,7 @@ impl StateSaver {
                         return;
                     }
                 }
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: WARNING: journal append failed ({e}) — disabling journaling for \
                      the rest of this run; state saves continue on schedule (--save-interval), so durability \
                      degrades to that cadence, never to a wrong answer"
@@ -363,7 +363,7 @@ impl StateSaver {
                 if !force && last_saved == Some(block) {
                     return Ok((SaveOutcome::Unchanged { block }, None));
                 }
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: saving state ({reason}) at block {block} to {} ...",
                     self.path.display()
                 );
@@ -399,7 +399,7 @@ impl StateSaver {
                         }
                         Err(e) => {
                             guard.journal = None;
-                            eprintln!(
+                            logln!(
                                 "risepir-rpc mainnet: WARNING: journal rotation failed ({e}) — journaling \
                                  disabled until the next successful save"
                             );
@@ -408,7 +408,7 @@ impl StateSaver {
                 }
 
                 let secs = started.elapsed().as_secs_f64();
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: state saved ({reason}): block {block}, {:.2} GB in {:.1}s ({:.0} MB/s)",
                     *bytes as f64 / 1e9,
                     secs,
@@ -420,7 +420,7 @@ impl StateSaver {
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!(
+                logln!(
                     "risepir-rpc mainnet: WARNING: state save ({reason}) failed: {e} — \
                      serving is unaffected; the previous state file (if any) is intact"
                 );

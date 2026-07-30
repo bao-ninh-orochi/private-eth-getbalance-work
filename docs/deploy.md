@@ -962,6 +962,58 @@ threat model §4.2 and §8.
   re-bootstrap (fresh snapshot ingest) mints a new lineage — which is
   exactly when old clients *must* be refused.
 
+### Log timestamps and rotation
+
+**Every runtime log line carries an RFC 3339 UTC timestamp** (since
+2026-07-30). The message text after it is byte-identical to what the same
+line printed before, prefixes included, so existing greps still match:
+
+```text
+2026-07-30T04:12:33Z risepir-rpc mainnet: state saved (autosave): block 25637839, 24.18 GB in 175.6s (138 MB/s)
+```
+
+The one thing this breaks is a **`^`-anchored** pattern against a log line —
+`grep "^risepir-rpc mainnet: ..."` must drop its anchor. Timestamps come from
+`crates/risepir-rpc/src/logging.rs` (`logln!`), which is dependency-free for
+the same reason ADR-0039's metrics exposition is hand-rolled.
+
+Note the deliberate split: **log records are timestamped, CLI output is not.**
+The startup banner, the usage text and argument errors all still print plain
+on stdout — they are interactive feedback, not a record anyone greps later.
+
+Why this mattered enough to add: reading this deployment's log on 2026-07-29
+meant answering "when did the dark-reconcile window end" and "how long did
+that `--hard-refresh` take" by correlating block numbers against file mtimes.
+Block height is a fine clock *inside* the chain and useless for joining
+against anything outside it — a provider's status page, a `dmesg`, an
+autosave.
+
+**Rotation is not automatic in the tmux shape.** The log is a plain file the
+shell opened with `>> ~/server-complete.log 2>&1`; nothing truncates it. It
+reached **66.79 MB** before the first rotation setup, of which 67,791 lines
+were a single pre-ADR-0041 failure mode. Install the provided config:
+
+```bash
+sudo cp ops/logrotate/risepir /etc/logrotate.d/risepir
+sudo logrotate --debug /etc/logrotate.d/risepir   # dry run
+sudo logrotate --force /etc/logrotate.d/risepir   # rotate once, now
+```
+
+**`copytruncate` in that config is load-bearing, not a style choice.** The
+server never opens its own log — the shell opens it before `exec`ing the
+binary, so the process holds one descriptor for its whole run and never
+reopens. Under logrotate's default rename-then-create the process would keep
+writing to the *renamed* inode forever: `server-complete.log` would sit at
+0 bytes while `server-complete.log.1` grew, which reads exactly like "the
+server stopped logging". And do **not** reach for the usual
+`create` + `postrotate kill -HUP` remedy: this binary installs no SIGHUP
+handler, so the default disposition applies and the signal would *terminate*
+the server — an ungraceful stop, which at the complete set means a journal
+replay on the way back up.
+
+If you run the systemd unit (`ops/systemd/risepir.service`) instead, none of
+this applies: journald rotates on its own.
+
 ## 5. Recorded live evidence (2026-07-19, this repo at 64b8f9f)
 
 Partial-mode deployment on a laptop, keyless dRPC + publicnode, real LWE

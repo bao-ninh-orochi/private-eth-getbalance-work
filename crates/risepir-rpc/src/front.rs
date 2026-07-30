@@ -78,7 +78,7 @@ pub struct FrontHandle {
 }
 
 fn die(msg: impl std::fmt::Display) -> ! {
-    eprintln!("risepir-rpc client: fatal: {msg}");
+    logln!("risepir-rpc client: fatal: {msg}");
     std::process::exit(1);
 }
 
@@ -92,7 +92,7 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
     let codec = crate::mainnet::value_codec();
     let pir_client = PirHttpClient::new(cfg.pir_url.clone());
 
-    eprintln!(
+    logln!(
         "risepir-rpc client: downloading setup bundle from {} (A + hints; ~100 MB per 1M accounts) ...",
         cfg.pir_url
     );
@@ -114,7 +114,7 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
         },
     };
     let pinned_block = setup_bundle.block;
-    eprintln!(
+    logln!(
         "risepir-rpc client: setup downloaded in {:.1}s — hint pinned at block {pinned_block}",
         started.elapsed().as_secs_f64()
     );
@@ -139,7 +139,7 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
                 // A dead listener with a live process is a silent outage;
                 // die loudly so the wallet sees a refused connection, not
                 // an indefinite hang against a half-alive front end.
-                eprintln!("risepir-rpc client: fatal: JSON-RPC listener crashed: {e}");
+                logln!("risepir-rpc client: fatal: JSON-RPC listener crashed: {e}");
                 std::process::exit(1);
             }
         }

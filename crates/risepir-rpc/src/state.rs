@@ -385,7 +385,7 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
     let checksummed = match &magic {
         m if m == MAGIC => true,
         m if m == MAGIC_V1 => {
-            eprintln!(
+            logln!(
                 "risepir-rpc: WARNING: legacy RPST1 state file (no whole-file checksum) — \
                  loading with structural checks only; the next save upgrades it to RPST2"
             );
@@ -730,7 +730,7 @@ pub fn load_with_journal_restore(
         // ADR-0026 exists to contain. One comparison converts it to
         // "journal ignored, loudly".
         if header.base_block != base_block {
-            eprintln!(
+            logln!(
                 "risepir-rpc: WARNING: journal {} matches this base's digest but names base block {} \
                  while the state file is at block {base_block} — refusing to replay it (writer bug?); \
                  delete the journal to silence this",

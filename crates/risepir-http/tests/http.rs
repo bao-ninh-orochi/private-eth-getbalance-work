@@ -312,6 +312,55 @@ async fn healthz_reflects_a_deferred_checkpoint_like_a_dark_one() {
     assert_eq!(h2.deferred_total, 2);
 }
 
+/// `consecutive_deferred` records *what kind* of darkness the current streak
+/// is, so `risepir-rpc`'s escalation can name catch-up lag rather than blame
+/// a reference provider it never contacted. It moves alongside
+/// `consecutive_dark`, never instead of it: the streak and its escalation
+/// cadence belong to ADR-0036 and are deliberately unchanged.
+///
+/// `deferred_total` cannot answer this — being cumulative, it says a
+/// deferral happened at some point, not that the streak now being escalated
+/// on is made of them.
+#[tokio::test]
+async fn consecutive_deferred_distinguishes_catch_up_lag_from_a_dead_provider() {
+    let (state, _feed) = build_node();
+    state.set_reconcile_configured(true);
+
+    let d1 = state.record_reconcile_checkpoint(40, 0, true, true);
+    assert_eq!(d1.consecutive_dark, 1, "a deferral is still darkness");
+    assert_eq!(d1.consecutive_deferred, 1);
+
+    let d2 = state.record_reconcile_checkpoint(50, 0, true, true);
+    assert_eq!(d2.consecutive_dark, 2);
+    assert_eq!(
+        d2.consecutive_deferred, d2.consecutive_dark,
+        "an all-deferred streak is what tells the escalation this is catch-up lag"
+    );
+
+    // One attempted-and-failed checkpoint breaks the all-deferred run without
+    // breaking the dark one: the cause is now mixed, and the escalation must
+    // stop claiming pure lag.
+    let d3 = state.record_reconcile_checkpoint(60, 0, true, false);
+    assert_eq!(
+        d3.consecutive_dark, 3,
+        "a failed fetch extends the dark streak"
+    );
+    assert_eq!(
+        d3.consecutive_deferred, 0,
+        "a real attempt must clear the all-deferred claim, or the escalation would keep \
+         blaming lag while the provider is genuinely failing"
+    );
+
+    // A completed comparison clears both.
+    let d4 = state.record_reconcile_checkpoint(70, 2, false, false);
+    assert_eq!(d4.consecutive_dark, 0);
+    assert_eq!(d4.consecutive_deferred, 0);
+    assert_eq!(
+        d4.deferred_total, 2,
+        "the cumulative deferral count is unaffected by streak resets"
+    );
+}
+
 /// The reservoir gauge/counter setters are plain field writes surfaced on
 /// `/healthz` — exercised directly since `risepir-rpc`'s follow loop (the
 /// only real caller) is out of this crate's reach.

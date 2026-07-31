@@ -143,6 +143,20 @@ pub struct ReconcileHealth {
     /// checkpoint is distinguishable, in hindsight, from one that actually
     /// attempted and failed.
     pub deferred_total: u64,
+    /// How many of the *current* [`Self::consecutive_dark`] streak were
+    /// deferrals rather than failed fetches. Reset to `0` by any checkpoint
+    /// that actually attempted a comparison, exactly as `consecutive_dark`
+    /// is, so `consecutive_deferred == consecutive_dark` means "this entire
+    /// dark streak is catch-up lag, and no request has been sent to the
+    /// reference provider at all".
+    ///
+    /// [`Self::deferred_total`] cannot answer that: it is cumulative, so it
+    /// says a deferral happened *at some point*, not that the streak
+    /// currently being escalated on is made of them. The distinction is the
+    /// difference between "the provider is down" and "we are too far behind
+    /// to ask it yet" — same darkness, same escalation cadence (ADR-0036
+    /// wants both loud), opposite causes and opposite remedies.
+    pub consecutive_deferred: u64,
     /// Total deferred-reservoir addresses successfully verified (ADR-0036
     /// §4) — the same "completed comparison" convention `comparisons_total`
     /// uses, counted separately since these are backfilled candidates from
@@ -475,8 +489,20 @@ impl NodeState {
             h.last_success_block = block;
             h.last_success_unix = now;
             h.consecutive_dark = 0;
+            h.consecutive_deferred = 0;
         } else if dark || deferred {
             h.consecutive_dark += 1;
+            // Tracked alongside, not instead: the streak and its escalation
+            // cadence are unchanged (ADR-0036 wants a deferral to page on
+            // the same schedule a failed fetch does). This only records
+            // *what kind* of darkness the streak is made of, so the
+            // escalation can name the right cause. A failed fetch breaks
+            // the all-deferred run without breaking the dark one.
+            if deferred {
+                h.consecutive_deferred += 1;
+            } else {
+                h.consecutive_deferred = 0;
+            }
         }
         // else: an empty-block checkpoint — `consecutive_dark` is left
         // exactly as it was; see the field's docs.

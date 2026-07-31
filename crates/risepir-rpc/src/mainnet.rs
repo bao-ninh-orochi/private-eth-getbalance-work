@@ -120,6 +120,16 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// this repo actually hit on 2026-07-26 (`docs/deploy.md` §5.3), which is
 /// the incident this constant exists to make loud the *next* time it
 /// happens instead of the operator finding out afterward from the log.
+///
+/// That `~2 h` is **chain** time, and only equals wall-clock while the
+/// deployment is following the head. A catch-up replay applies blocks far
+/// faster than 12 s apart (~1 s/block, measured), so the same 20
+/// checkpoints arrive in roughly a tenth of the wall-clock time. That is
+/// intended — the 2026-07-26 incident this constant is calibrated against
+/// *was* a catch-up — but it means an operator watching a re-bootstrap sees
+/// the first escalation within minutes, not hours. [`maybe_escalate`] is
+/// what keeps that legible, by naming catch-up lag as the cause instead of
+/// blaming the reference provider.
 const DARK_ESCALATION_THRESHOLD: u64 = 20;
 
 /// How far behind `finalized` the block currently being applied may be
@@ -1924,16 +1934,38 @@ fn since_last_success(health: &ReconcileHealth) -> String {
 /// toward the same streak and must re-page the operator on exactly the
 /// same cadence a genuinely-dark one would.
 fn maybe_escalate(health: &ReconcileHealth, reconcile_every: u64) {
-    if should_escalate(health.consecutive_dark) {
-        let blocks_dark = health.consecutive_dark.saturating_mul(reconcile_every);
-        critical(&format!(
-            "the reconcile integrity backstop has been dark for {} checkpoint(s) (~{blocks_dark} blocks) — \
-             no cross-provider comparison has succeeded since block {} — the independent reconcile provider \
-             appears unavailable; following continues regardless (a third-party outage must not become \
-             this deployment's outage), but the ingest path is running unverified until this clears",
-            health.consecutive_dark, health.last_success_block
-        ));
+    if !should_escalate(health.consecutive_dark) {
+        return;
     }
+    let blocks_dark = health.consecutive_dark.saturating_mul(reconcile_every);
+    // Same streak, same cadence, different *cause*. A deferred checkpoint
+    // never sends a request (see the `Deferred` branch in `reconcile_at`),
+    // so blaming the reference provider for a run of them is simply false —
+    // and it is the likeliest escalation an operator will ever see, because
+    // every deep catch-up produces one. Saying "provider appears
+    // unavailable" through a routine re-bootstrap is how a CRITICAL gets
+    // trained into background noise, during the exact window when the
+    // ingest path really is unverified.
+    let cause = if health.consecutive_deferred >= health.consecutive_dark {
+        "every checkpoint in that streak was DEFERRED, not failed: this deployment is further behind \
+         the finalized head than the keyless reference provider serves, so no request has been sent \
+         to it at all. This is the expected shape of a deep catch-up (a re-bootstrap, or a long \
+         outage) and it clears by itself once the replay reaches the provider's window — no operator \
+         action, and no reason to suspect the provider"
+    } else if health.consecutive_deferred > 0 {
+        "that streak mixes deferred checkpoints (too far behind the reference provider to ask) with \
+         attempted-and-failed ones, so both catch-up lag and a provider problem are in play"
+    } else {
+        "every checkpoint in that streak attempted at least one comparison and every attempt failed \
+         — the independent reconcile provider appears unavailable"
+    };
+    critical(&format!(
+        "the reconcile integrity backstop has been dark for {} checkpoint(s) (~{blocks_dark} blocks) — \
+         no cross-provider comparison has succeeded since block {} — {cause}; following continues \
+         regardless (a third-party outage must not become this deployment's outage), but the ingest \
+         path is running unverified until this clears",
+        health.consecutive_dark, health.last_success_block
+    ));
 }
 
 /// Diff up to `samples` of block `n`'s own touched accounts against the

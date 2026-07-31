@@ -1767,6 +1767,125 @@ bracketed pattern does not stop the `gcloud … --command` *wrapper* from
 matching itself. `pgrep -af "^\./target/release/risepir-rpc"` is the probe that
 answers the question actually being asked.
 
+### 5.8 Re-bootstrapped onto the `xxh3_128` / `RPST3` lineage (2026-07-31)
+
+The migration §4 describes, executed. Cause: the IKPIR pin moved to `0f3b99b`
+(f = 64 / corrected Lemma 2), which changed the primitive's item hash
+`xxh3_64` → `xxh3_128`. ADR-0042 kept this repo at `fingerprint_bits = 32`, so
+**no geometry moved** — and that is exactly what made the state file dangerous
+rather than merely stale.
+
+**The refusal fired first, by name, on the production file.** Pointing the new
+binary at the existing 24,176,139,523 B state file, before touching anything:
+
+```
+risepir-rpc mainnet: loading state (--journal-restore) from /home/admin/risepir-state.bin ...
+risepir-rpc mainnet: fatal: loading …: state file rejected: state file is RPST2,
+written before the primitive's item hash changed from xxh3_64 to xxh3_128 — every
+key hashes to a different bucket now, so these cells no longer describe a filter
+this binary can read, and loading them would miss on every lookup (answering 0x0
+for accounts that exist). This is not disk corruption, and the geometry is
+unchanged, which is exactly why nothing cheaper catches it; move the --state file
+aside and re-bootstrap from a fresh snapshot (do not restore from backup, the
+file itself is fine)
+```
+
+`exit 1`, in under a second, before any of the 24 GB was read. Neither
+`STORE_ARITY` nor ADR-0042's `check_geometry_lineage` could have caught this —
+both compare geometry, and the geometry was correct.
+
+**A fresh snapshot was taken first**, because replaying from the 2026-07-26
+snapshot would have been 36,660 blocks (~10.2 h). New gate query:
+
+```
+nonzero_accounts   201059658        # was 200,503,969
+snapshot_block     25641938         # was 25,613,233
+dataset_head_time  2026-07-29 23:59:59
+```
+
+`dataset_head_time` was one daily ETL rebuild behind (not "today" as §2.1
+prefers). Proceeded because the `balances` and `blocks` tables agree internally
+— `MAX(number)` capped at 25,641,938 *is* the block at that head, so
+`snapshot_block` was not the "too high" case §2.1 warns is never safe. The
+account count grew by 555,689; `xtask geometry` confirmed the geometry is
+**unchanged** at it (67,108,864 buckets, pb 8, cells/slot 22, 23.62 GB), load
+0.7469 → 0.7490. Export: 322 shards / 5.86 GB, pulled same-region at
+**874.5 MiB/s in 10 s**; bucket and dataset deleted immediately after.
+
+**Measured, end to end** (`--snapshot-rewind` left at its default 2000, so the
+snapshot was treated as exact at 25,639,938):
+
+| step | measured |
+|---|---|
+| snapshot ingest | **451 s** — 201,059,658 rows, 201,059,658 nonzero, **0 zero skipped** (was 734 s in §5.4) |
+| PIR setup + first save | state saved at block 25,639,938, **24.18 GB in 115.2 s** |
+| bootstrap, start → saved | **12 min 46 s** (03:50:34Z → 04:03:20Z) |
+| catch-up replay | 10,816 blocks at a measured **1.72 blocks/s** — not the ~1 s/block the docs assumed |
+| replay wall clock | **~1 h 42 min** |
+| **total, start → caught up** | **~1 h 55 min** |
+| state file | 24,176,139,523 B — byte-identical in size to the `RPST2` file it replaced |
+| peak memory | 26 GB of 62; load average 0.12 once following |
+
+**Verified:**
+
+- `head -c 5 ~/risepir-state.bin` → **`RPST3`**.
+- Caught up to finalized exactly: deployment head == `finalized` == 25,650,754.
+- **`reconcile at block 25650750: 8 account(s) exact vs independent provider`** —
+  and `/healthz` `reconcile_consecutive_dark=0`, `reconcile_comparisons_total=8`,
+  `reconcile_reservoir_checks_total=2` (ADR-0036's backfill working).
+- **Zero** `MISMATCH` / `halted` / `CorruptStoredValue` / `FingerprintAmbiguity` /
+  `TableFull` / `panic` in the entire run.
+- Public origin: `GET /setup` returns `content-length: 553819345` (the documented
+  553.82 MB), `x-risepir-mode: 1`, `accept-ranges: bytes` + ETag.
+  `x-risepir-epoch` is **new** (`46226713616e89da`) — the re-bootstrap re-seeded,
+  so cached browser hints from the old deployment are correctly invalidated even
+  though the geometry did not move, which is precisely the case ADR-0042 noted the
+  epoch's *geometry* fold-in cannot see on its own.
+- Only 80/443 reachable from outside; `:8545`/`:8645` refused.
+
+**The complete-set patch time, finally measured.** `docs/numbers.md` §7 says
+plainly it "has never been measured at the complete set" and extrapolates
+~62 ms (55–75 ms). Directly logged here, at the deployment's own K:
+
+| regime | mean | min | max | mean K |
+|---|---|---|---|---|
+| during catch-up replay | 8.23 ms → 8.81 ms | 2.51 ms | 20.14 ms | 311–326 |
+| once following the head | **11.09 ms → 11.11 ms** | 0.66 ms | 29.20 ms | 303–323 |
+
+**~11.1 ms following**, at the same K≈300 the bench table uses — roughly **5–7×
+better than the extrapolation**, which means §6's rebuild÷patch ratio at
+deployment scale is correspondingly higher than the ~2 × 10⁴ that section
+derives. Two windows in each regime agree closely, so this is a stable figure,
+not a single lucky sample.
+
+**A third-party regression this round exposed.** The reconciler was dark for
+**360 consecutive checkpoints** before its first success. Two distinct causes,
+in sequence, and only the second is a problem:
+
+1. While replaying, every checkpoint was *deferred* — ADR-0036 skipping the
+   fetch because the applied block was deeper than the reference provider
+   serves. Correct behaviour, and it cleared on its own.
+2. Once close to the head, checkpoints *attempted* and every fetch returned
+   **`HTTP 403: "Archive requests require a personal token"`** from
+   `ethereum-rpc.publicnode.com`. Probed directly: its keyless window is now
+   **~64–127 blocks** (serves at −64, refuses at −128). Reconcile only began
+   succeeding once the deployment was inside that window.
+
+So the keyless reconcile path now depends on the deployment staying within
+~100 blocks of the head, which it is only when fully caught up. Any deep
+catch-up runs unverified until it converges — loudly, which is the design
+(ADR-0027), but the escalation used to blame the provider for the *deferred*
+phase; PR #49 fixes that wording. A keyed endpoint would remove the
+constraint entirely and is the obvious next step if this recurs.
+
+**Superseded artifacts.** `~/risepir-state.bin.rpst2-20260731` (24.18 GB) and
+`~/risepir-state.bin.pre0728` (24.18 GB) are both `RPST2` and therefore
+**unloadable by any binary built from this tree** — that is what the version
+check guarantees. They are evidence, not a rollback: reverting means reverting
+the pin *and* re-bootstrapping anyway. Delete them to reclaim ~48 GB once this
+round is trusted, on the same reasoning that reclaimed the 33.77 GB arity-3
+file in §5.4.
+
 ## 6. Who does what, explicitly
 
 | step | who | needs |

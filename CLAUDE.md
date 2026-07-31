@@ -130,13 +130,25 @@ server runs in tmux session `risepir` with `--state ~/risepir-state.bin`, logs
 at `~/server-complete.log`. The Mac's `gcloud` + `gh` are authenticated; the VM
 is drivable non-interactively.
 
-Since **2026-07-26 it serves the COMPLETE mainnet set** — all 200,503,969
-nonzero accounts, `GET /mode` = 1 — not the partial demo. That is what the
-64 GB machine is for. On **2026-07-27 it was re-bootstrapped onto ADR-0034's
-`(arity 2, bucket_size 4)`** (deploy.md §5.4): server DB **23.62 GB**, load
-0.747, state file **24,176,139,523 B (24.18 GB)**, whole bootstrap **16 min**
-— down from 35.43 GB / 36.26 GB / ~33 min on the `(arity 3, bucket_size 4)`
-lineage it ran before. It costs **~$8.60/day running**, so stop it when idle.
+Since **2026-07-26 it serves the COMPLETE mainnet set** — `GET /mode` = 1, not
+the partial demo. That is what the 64 GB machine is for. On **2026-07-27 it was
+re-bootstrapped onto ADR-0034's `(arity 2, bucket_size 4)`** (deploy.md §5.4),
+and on **2026-07-31 again onto the `xxh3_128`/`RPST3` lineage** after the
+`0f3b99b` pin bump (deploy.md §5.8), from a fresh snapshot: **201,059,658**
+nonzero accounts (was 200,503,969), server DB **23.62 GB**, load 0.749, state
+file **24,176,139,523 B (24.18 GB)**. The geometry has not moved across either
+of the last two rounds — same 67,108,864 buckets, `plaintext_bits` 8,
+cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged.
+
+Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s snapshot
+ingest, 12 min 46 s to the first saved state file, then 10,816 blocks of replay
+at **1.72 blocks/s** (not the ~1 s/block the runbook long assumed). It costs
+**~$8.60/day running**, so stop it when idle.
+
+The complete-set per-block patch time is no longer an extrapolation: **~11.1 ms
+at K ≈ 310** while following the head (8.2–8.8 ms during catch-up, when the
+cache is warmer). `docs/numbers.md` §7 carries the table and what it does to
+§6's ratio.
 
 It is **public** at <https://private-eth-getbalance.duckdns.org> (Caddy + Let's
 Encrypt in front of a loopback-only `:8645`; deploy.md §3.7). Only 80/443 are
@@ -238,12 +250,14 @@ cell is read (ADR-0042's outcome note). The general lesson: a guard that
 compares parameters cannot catch a change in the *function* those parameters
 configure — only the format version can.
 
-**The live VM's `~/risepir-state.bin` is an `RPST2` file, so it is now
-unloadable and the box needs a re-bootstrap, not a restart** — deploy.md §4
-"Migration: the `xxh3_128` pin bump" has the sequence, the projected ~16 min
-plus hours of replay, and why there is no rollback that is a restart. It has
-**not** been run; the VM is still `TERMINATED` and was left that way
-deliberately.
+**That migration has been RUN (2026-07-31, deploy.md §5.8).** The refusal fired
+for real on the production 24.18 GB file — `exit 1` in under a second, before a
+cell was read — and the box was re-bootstrapped past it from a fresh snapshot.
+The VM now holds an **`RPST3`** file and a plain restart works again; the trap
+is live for the *next* hash change, not for this one. The superseded
+`~/risepir-state.bin.rpst2-20260731` and `~/risepir-state.bin.pre0728`
+(24.18 GB each) are evidence only — no binary from this tree can load them —
+and can be deleted to reclaim ~48 GB.
 
 (The external IP changes across stop/start — hence `duckdns-update.sh`, whose
 empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel

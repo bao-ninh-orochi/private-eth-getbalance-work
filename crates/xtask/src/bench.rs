@@ -99,7 +99,7 @@ const MAX_PROJECTED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 //
 // `docs/numbers.md` §1–§6 (rendered from a fresh `run()` sweep, see
 // `BenchReport::to_markdown`) currently stop at 9,437,184 accounts on this
-// laptop. The live deployment serves 200,503,969 — far larger — and has
+// laptop. The live deployment serves `DEPLOYMENT_ACCOUNTS` — far larger — and has
 // itself measured exactly one of §1's quantities (full-rebuild time) at
 // that scale, on a different machine. §7 (`complete_set_markdown`, below)
 // states that plainly, alongside a separate, explicitly-dated laptop run
@@ -126,9 +126,13 @@ const MAX_PROJECTED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 // measurement against another on purpose.
 
 /// The complete mainnet nonzero-balance account count the live deployment
-/// serves (`GET /mode` = 1) — `docs/deploy.md` §5.3 ("gate query"),
-/// measured 2026-07-26.
-const DEPLOYMENT_ACCOUNTS: u64 = 200_503_969;
+/// serves (`GET /mode` = 1) — `docs/deploy.md` §5.8 ("gate query"),
+/// measured 2026-07-31 (was 200,503,969 from the 2026-07-26 gate, §5.3).
+///
+/// The geometry is unchanged by the growth: `Geometry::for_accounts` lands on
+/// the same 67,108,864 buckets and `plaintext_bits` 8, so every size in §4 is
+/// identical and only the load factor moves (0.7469 → 0.7490).
+const DEPLOYMENT_ACCOUNTS: u64 = 201_059_658;
 
 /// The complete mainnet set's one-time full PIR-setup rebuild time, in
 /// seconds — `docs/deploy.md` §5.3 ("PIR setup (one-time)"), measured
@@ -1453,12 +1457,32 @@ fn complete_set_markdown(report: &BenchReport) -> String {
 
     writeln!(
         out,
-        "**Instrumentation now exists.** `NodeState::apply_block` (`crates/risepir-http/src/node.rs`) \
-         now returns its own measured hint-patch duration, and the mainnet follow loop \
+        "**Instrumentation now exists, and it has now reported — the extrapolation above was \
+         pessimistic by 5-7x.** `NodeState::apply_block` (`crates/risepir-http/src/node.rs`) returns \
+         its own measured hint-patch duration, and the mainnet follow loop \
          (`crates/risepir-rpc/src/mainnet.rs`) aggregates and periodically logs it with the mean \
-         mutations/block (K) over the same window. The next restart of the live deployment will start \
-         producing the one number this section still lacks — a directly measured complete-set patch \
-         time — with no extrapolation involved."
+         mutations/block (K) over the same window. The 2026-07-31 re-bootstrap (`docs/deploy.md` \
+         §5.8) produced the number this section was written without, on the deployment host at the \
+         complete set:\n\n\
+         | regime | mean | min | max | mean K |\n\
+         |---|---:|---:|---:|---:|\n\
+         | during catch-up replay | 8.23 ms -> 8.81 ms | 2.51 ms | 20.14 ms | 311-326 |\n\
+         | **once following the head** | **11.09 ms -> 11.11 ms** | 0.66 ms | 29.20 ms | 303-323 |\n\n\
+         Two windows in each regime, agreeing closely — a stable figure, not one lucky sample — and \
+         at K ~ 300-326, the same mutation rate §2/§6 bench at, so it is directly comparable rather \
+         than a different workload. Against the ~62 ms (55-75 ms) extrapolated just above, the \
+         measured **~11.1 ms** is 5-7x better, which runs the other way through §6's arithmetic: \
+         dividing the deployment's own 1236.5 s rebuild by a *measured* 11.1 ms puts the rebuild ÷ \
+         patch ratio on the order of **10^5**, not the ~2 x 10^4 extrapolated. The honest summary \
+         above therefore **understates** the deployed case; it is kept as written because it was the \
+         defensible statement from the data then available, and because the two halves of that \
+         quotient still are not measured the same way — 1236.5 s is the pre-ADR-0034 `(3,4)` \
+         rebuild, 11.1 ms is today's `(2,4)` deployment. A same-geometry pair for both halves does \
+         not exist yet, so the 10^5 is an *improved estimate*, not a measured ratio.\n\n\
+         Named rather than buried: the catch-up figures are taken while the server applies blocks \
+         back to back, touching the hint far more densely in time than following the head does. \
+         That is the likeliest reason catch-up looks *faster* than steady state (a warmer cache), \
+         and it is why the following-head row is the one to quote."
     )
     .unwrap();
 
@@ -1954,7 +1978,7 @@ mod complete_set_section_tests {
             "must cite the docs/deploy.md §5.3 full-rebuild time verbatim"
         );
         assert!(
-            section.contains("200,503,969"),
+            section.contains(&fmt_num(DEPLOYMENT_ACCOUNTS)),
             "must cite the docs/deploy.md §5.3 account count, thousands-separated to match this \
              module's `fmt_num` convention"
         );
@@ -1989,7 +2013,7 @@ mod complete_set_section_tests {
         let report = run(&tiny_cfg());
         let markdown = report.to_markdown("test-machine", "2026-01-01");
         assert!(markdown.contains("## 7. The complete mainnet set"));
-        assert!(markdown.contains("200,503,969"));
+        assert!(markdown.contains(&fmt_num(DEPLOYMENT_ACCOUNTS)));
 
         let honest_summary_start = markdown
             .find("**Honest summary.**")
@@ -2026,7 +2050,11 @@ mod complete_set_section_tests {
         let report = run(&tiny_cfg());
         let markdown = report.to_markdown("test-machine", "2026-01-01");
 
-        let label = "200,503,969 (complete mainnet — computed, no server built at this scale)";
+        let label = format!(
+            "{} (complete mainnet — computed, no server built at this scale)",
+            fmt_num(DEPLOYMENT_ACCOUNTS)
+        );
+        let label = label.as_str();
         let occurrences = markdown.matches(label).count();
         assert_eq!(
             occurrences, 3,

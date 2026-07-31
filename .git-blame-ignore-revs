@@ -1,4 +1,4 @@
-# Commits that touched formatting only. `git blame` should look straight
+# Commits that are (almost) entirely formatting. `git blame` should look
 # through them to whoever actually wrote the line.
 #
 # Not applied automatically — git needs to be told once, per clone:
@@ -7,9 +7,27 @@
 #
 # (GitHub's blame view honours this file without any configuration.)
 #
-# Only add a rev here if it is a *pure* mechanical reformat, verified to
-# change no behaviour. A commit that reformats and edits at the same time
-# must not be listed: hiding it would hide the edit too.
+# ── How to add one, and the trap that caught the first entry ──────────────
+#
+# This repo squash-merges every PR (PGR-005), so **one PR becomes exactly one
+# commit on `main`**. Splitting a reformat into its own *commit* on a branch
+# therefore achieves nothing: the squash merges it back together, and the
+# branch SHA you were going to list here never lands on `main` at all.
+#
+# So a blame-ignorable reformat must be **its own PR**, containing nothing
+# else. Then list the squashed commit's SHA (from `main`, after merging) here.
+#
+# Do not list a commit that mixes a reformat with real edits — hiding it
+# hides the edits too. The one exception below is grandfathered and labelled.
 
-# style: apply cargo fmt across the workspace (58 files, +4769/-1217)
-4491d5831213698fa81230d5a7a2c2214b06dd33
+# style: apply cargo fmt across the workspace — 58 files, +4,769/-1,217.
+#
+# GRANDFATHERED, and an honest caveat: this squash (#47) also carried ~33
+# lines that are NOT formatting — the `cargo fmt --check` CI step in
+# ci.yml, plus CLAUDE.md's gate list and roadmap item 10. Listing it hides
+# their blame too. That is the mistake this file's guidance above now
+# exists to prevent: the reformat and the gate should have been two PRs,
+# not two commits in one PR. Kept anyway because ignoring ~33 lines of
+# CI/doc blame is much cheaper than losing blame on 4,769 reformatted
+# source lines, and `git log` still finds the CI change either way.
+eccfcae41738fe994e8ae5b16b4898ef9d9c49fc

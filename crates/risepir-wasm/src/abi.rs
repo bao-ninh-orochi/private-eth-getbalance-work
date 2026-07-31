@@ -78,7 +78,9 @@ fn with_input<R>(len: usize, f: impl FnOnce(&[u8]) -> R) -> R {
 }
 
 /// Run `f` over the live session.
-fn with_session<R>(f: impl FnOnce(&mut Session) -> Result<R, SessionError>) -> Result<R, SessionError> {
+fn with_session<R>(
+    f: impl FnOnce(&mut Session) -> Result<R, SessionError>,
+) -> Result<R, SessionError> {
     SESSION.with(|s| {
         let mut s = s.borrow_mut();
         let session = s.as_mut().ok_or(SessionError::NotInitialised)?;
@@ -235,7 +237,9 @@ pub extern "C" fn risepir_set_mode_byte(value: u32) -> i32 {
 pub extern "C" fn risepir_init(len: usize) -> i32 {
     clear_err();
     let Some(mode) = MODE.with(|m| m.borrow().clone()) else {
-        return set_err("GET /mode must be loaded before GET /setup (the completeness flag is never assumed)");
+        return set_err(
+            "GET /mode must be loaded before GET /setup (the completeness flag is never assumed)",
+        );
     };
     let complete = match crate::session::parse_mode(&mode) {
         Ok(c) => c,

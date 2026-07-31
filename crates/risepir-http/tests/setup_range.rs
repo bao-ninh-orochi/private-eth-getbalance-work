@@ -57,8 +57,15 @@ fn build_node(ring_capacity: usize) -> (Arc<NodeState>, MockFeed) {
     let feed = MockFeed::new(cfg.clone());
     let value_codec = codec();
 
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -80,7 +87,10 @@ fn build_node(ring_capacity: usize) -> (Arc<NodeState>, MockFeed) {
 
 async fn apply_blocks(state: &Arc<NodeState>, feed: &mut MockFeed, n: usize) {
     for _ in 0..n {
-        let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         state.apply_block(&upd).await.expect("apply_block");
     }
 }
@@ -93,7 +103,12 @@ struct RangeResp {
     etag: Option<String>,
 }
 
-async fn setup_request(app: &axum::Router, method: Method, range: Option<&str>, if_range: Option<&str>) -> RangeResp {
+async fn setup_request(
+    app: &axum::Router,
+    method: Method,
+    range: Option<&str>,
+    if_range: Option<&str>,
+) -> RangeResp {
     let mut req = Request::builder().method(method).uri("/setup");
     if let Some(r) = range {
         req = req.header(header::RANGE, r);
@@ -101,13 +116,29 @@ async fn setup_request(app: &axum::Router, method: Method, range: Option<&str>, 
     if let Some(ir) = if_range {
         req = req.header(header::IF_RANGE, ir);
     }
-    let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let h = resp.headers();
-    let content_range = h.get(header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let accept_ranges = h.get(header::ACCEPT_RANGES).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let etag = h.get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let content_range = h
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let accept_ranges = h
+        .get(header::ACCEPT_RANGES)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let etag = h
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     RangeResp {
         status,
         body,
@@ -130,7 +161,11 @@ async fn matching_if_range_yields_206_with_the_exact_slice() {
 
     let full = full_get(&app).await;
     assert_eq!(full.status, StatusCode::OK);
-    assert_eq!(full.accept_ranges.as_deref(), Some("bytes"), "Accept-Ranges must be on the 200 too");
+    assert_eq!(
+        full.accept_ranges.as_deref(),
+        Some("bytes"),
+        "Accept-Ranges must be on the 200 too"
+    );
     let etag = full.etag.clone().expect("ETag on the full response");
     let total = full.body.len();
     assert!(total > 1000, "sanity: the mock bundle is not tiny");
@@ -138,13 +173,26 @@ async fn matching_if_range_yields_206_with_the_exact_slice() {
     let mid = setup_request(&app, Method::GET, Some("bytes=10-99"), Some(&etag)).await;
     assert_eq!(mid.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(mid.body, full.body[10..=99]);
-    assert_eq!(mid.content_range.as_deref(), Some(format!("bytes 10-99/{total}").as_str()));
+    assert_eq!(
+        mid.content_range.as_deref(),
+        Some(format!("bytes 10-99/{total}").as_str())
+    );
     assert_eq!(mid.accept_ranges.as_deref(), Some("bytes"));
-    assert_eq!(mid.etag.as_deref(), Some(etag.as_str()), "a 206 must carry the same ETag as the 200 it slices");
+    assert_eq!(
+        mid.etag.as_deref(),
+        Some(etag.as_str()),
+        "a 206 must carry the same ETag as the 200 it slices"
+    );
 
     // Open-ended, reaching the true end.
     let tail_from = total - 50;
-    let tail = setup_request(&app, Method::GET, Some(&format!("bytes={tail_from}-")), Some(&etag)).await;
+    let tail = setup_request(
+        &app,
+        Method::GET,
+        Some(&format!("bytes={tail_from}-")),
+        Some(&etag),
+    )
+    .await;
     assert_eq!(tail.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(tail.body, full.body[tail_from..]);
     assert_eq!(
@@ -153,10 +201,19 @@ async fn matching_if_range_yields_206_with_the_exact_slice() {
     );
 
     // An over-long last-byte-pos clamps to the true end rather than erroring.
-    let clamped = setup_request(&app, Method::GET, Some(&format!("bytes=0-{}", total * 10)), Some(&etag)).await;
+    let clamped = setup_request(
+        &app,
+        Method::GET,
+        Some(&format!("bytes=0-{}", total * 10)),
+        Some(&etag),
+    )
+    .await;
     assert_eq!(clamped.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(clamped.body, full.body);
-    assert_eq!(clamped.content_range.as_deref(), Some(format!("bytes 0-{}/{total}", total - 1).as_str()));
+    assert_eq!(
+        clamped.content_range.as_deref(),
+        Some(format!("bytes 0-{}/{total}", total - 1).as_str())
+    );
 }
 
 // ── (b) two adjacent ranges reassemble the full body exactly ───────────
@@ -171,8 +228,20 @@ async fn concatenating_two_ranges_reproduces_the_full_body_byte_for_byte() {
     let total = full.body.len();
     let mid = total / 2;
 
-    let first_half = setup_request(&app, Method::GET, Some(&format!("bytes=0-{}", mid - 1)), Some(&etag)).await;
-    let second_half = setup_request(&app, Method::GET, Some(&format!("bytes={mid}-")), Some(&etag)).await;
+    let first_half = setup_request(
+        &app,
+        Method::GET,
+        Some(&format!("bytes=0-{}", mid - 1)),
+        Some(&etag),
+    )
+    .await;
+    let second_half = setup_request(
+        &app,
+        Method::GET,
+        Some(&format!("bytes={mid}-")),
+        Some(&etag),
+    )
+    .await;
     assert_eq!(first_half.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(second_half.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(first_half.body.len(), mid);
@@ -180,7 +249,10 @@ async fn concatenating_two_ranges_reproduces_the_full_body_byte_for_byte() {
 
     let mut reassembled = first_half.body;
     reassembled.extend_from_slice(&second_half.body);
-    assert_eq!(reassembled, full.body, "two adjacent ranges must reassemble byte-for-byte into the full body");
+    assert_eq!(
+        reassembled, full.body,
+        "two adjacent ranges must reassemble byte-for-byte into the full body"
+    );
 
     // Three overlapping pieces (as a resumed download's own retries might
     // produce, if a stall lands mid-chunk) must reassemble just as
@@ -216,7 +288,13 @@ async fn missing_or_mismatched_if_range_serves_the_full_200() {
     assert_eq!(wrong_if_range.body, full.body);
 
     // Junk If-Range that fails even to decode meaningfully.
-    let junk_if_range = setup_request(&app, Method::GET, Some("bytes=0-9"), Some("not an etag at all")).await;
+    let junk_if_range = setup_request(
+        &app,
+        Method::GET,
+        Some("bytes=0-9"),
+        Some("not an etag at all"),
+    )
+    .await;
     assert_eq!(junk_if_range.status, StatusCode::OK);
     assert_eq!(junk_if_range.body, full.body);
 }
@@ -240,7 +318,10 @@ async fn a_stale_if_range_from_before_a_regeneration_never_unlocks_a_206() {
     apply_blocks(&state, &mut feed, 15).await;
 
     let fresh = full_get(&app).await;
-    assert_ne!(fresh.etag, first.etag, "sanity: the bundle really did regenerate under the same epoch");
+    assert_ne!(
+        fresh.etag, first.etag,
+        "sanity: the bundle really did regenerate under the same epoch"
+    );
 
     let resumed = setup_request(&app, Method::GET, Some("bytes=0-9"), Some(&stale_etag)).await;
     assert_eq!(
@@ -248,7 +329,10 @@ async fn a_stale_if_range_from_before_a_regeneration_never_unlocks_a_206() {
         StatusCode::OK,
         "a stale If-Range must never unlock a 206 against a regenerated (and therefore different) bundle"
     );
-    assert_eq!(resumed.body, fresh.body, "the fallback must be the CURRENT full body, not the stale one");
+    assert_eq!(
+        resumed.body, fresh.body,
+        "the fallback must be the CURRENT full body, not the stale one"
+    );
 }
 
 // ── (d) an out-of-bounds range is 416 ────────────────────────────────────
@@ -262,14 +346,32 @@ async fn unsatisfiable_range_is_416_with_content_range_star() {
     let etag = full.etag.clone().unwrap();
     let total = full.body.len();
 
-    let at_total = setup_request(&app, Method::GET, Some(&format!("bytes={total}-")), Some(&etag)).await;
+    let at_total = setup_request(
+        &app,
+        Method::GET,
+        Some(&format!("bytes={total}-")),
+        Some(&etag),
+    )
+    .await;
     assert_eq!(at_total.status, StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(at_total.content_range.as_deref(), Some(format!("bytes */{total}").as_str()));
+    assert_eq!(
+        at_total.content_range.as_deref(),
+        Some(format!("bytes */{total}").as_str())
+    );
     assert!(at_total.body.is_empty());
 
-    let past_total = setup_request(&app, Method::GET, Some(&format!("bytes={}-", total + 1_000_000)), Some(&etag)).await;
+    let past_total = setup_request(
+        &app,
+        Method::GET,
+        Some(&format!("bytes={}-", total + 1_000_000)),
+        Some(&etag),
+    )
+    .await;
     assert_eq!(past_total.status, StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(past_total.content_range.as_deref(), Some(format!("bytes */{total}").as_str()));
+    assert_eq!(
+        past_total.content_range.as_deref(),
+        Some(format!("bytes */{total}").as_str())
+    );
 }
 
 // ── (e) multi-range and suffix-range fall back to the full 200 ─────────
@@ -308,20 +410,38 @@ async fn head_with_range_behaves_like_get_minus_the_body() {
 
     let head_partial = setup_request(&app, Method::HEAD, Some("bytes=10-99"), Some(&etag)).await;
     assert_eq!(head_partial.status, StatusCode::PARTIAL_CONTENT);
-    assert!(head_partial.body.is_empty(), "axum strips the body for HEAD");
-    assert_eq!(head_partial.content_range.as_deref(), Some(format!("bytes 10-99/{total}").as_str()));
+    assert!(
+        head_partial.body.is_empty(),
+        "axum strips the body for HEAD"
+    );
+    assert_eq!(
+        head_partial.content_range.as_deref(),
+        Some(format!("bytes 10-99/{total}").as_str())
+    );
     assert_eq!(head_partial.accept_ranges.as_deref(), Some("bytes"));
 
     let head_full = setup_request(&app, Method::HEAD, None, None).await;
     assert_eq!(head_full.status, StatusCode::OK);
     assert!(head_full.body.is_empty());
     assert_eq!(head_full.accept_ranges.as_deref(), Some("bytes"));
-    assert_eq!(head_full.content_range, None, "no Content-Range on a full response");
+    assert_eq!(
+        head_full.content_range, None,
+        "no Content-Range on a full response"
+    );
 
-    let head_416 = setup_request(&app, Method::HEAD, Some(&format!("bytes={total}-")), Some(&etag)).await;
+    let head_416 = setup_request(
+        &app,
+        Method::HEAD,
+        Some(&format!("bytes={total}-")),
+        Some(&etag),
+    )
+    .await;
     assert_eq!(head_416.status, StatusCode::RANGE_NOT_SATISFIABLE);
     assert!(head_416.body.is_empty());
-    assert_eq!(head_416.content_range.as_deref(), Some(format!("bytes */{total}").as_str()));
+    assert_eq!(
+        head_416.content_range.as_deref(),
+        Some(format!("bytes */{total}").as_str())
+    );
 }
 
 // ── /head carries x-risepir-mode too (ADR-0038) ─────────────────────────
@@ -337,7 +457,10 @@ async fn head_endpoint_carries_epoch_and_mode() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.headers().get("x-risepir-epoch").unwrap(), state.epoch());
+    assert_eq!(
+        resp.headers().get("x-risepir-epoch").unwrap(),
+        state.epoch()
+    );
     assert_eq!(
         resp.headers().get("x-risepir-mode").unwrap(),
         "1",

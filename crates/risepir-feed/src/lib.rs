@@ -145,7 +145,9 @@ impl std::fmt::Display for FeedError {
             Self::DepthRefused { method, detail } => {
                 write!(f, "rpc {method} refused (archive depth?): {detail}")
             }
-            Self::Parse { context, detail } => write!(f, "rpc {context}: malformed result: {detail}"),
+            Self::Parse { context, detail } => {
+                write!(f, "rpc {context}: malformed result: {detail}")
+            }
             Self::ChainIdMismatch { expected, got } => {
                 write!(f, "endpoint serves chain id {got}, expected {expected}")
             }
@@ -372,7 +374,8 @@ impl MockFeed {
 impl Feed for MockFeed {
     fn next_block(&mut self) -> Result<Option<BlockUpdate>, FeedError> {
         self.block += 1;
-        let mut changes: Vec<(AddressHash, Balance)> = Vec::with_capacity(self.cfg.changes_per_block);
+        let mut changes: Vec<(AddressHash, Balance)> =
+            Vec::with_capacity(self.cfg.changes_per_block);
 
         // Deletes first: swap-remove random live keys (a deleted key leaves
         // `live`, so nothing later this block can re-touch it). Emit
@@ -472,7 +475,11 @@ mod tests {
         }
 
         let c = MockFeed::new(small_cfg(43));
-        assert_ne!(a.snapshot(), c.snapshot(), "different seed ⇒ different genesis");
+        assert_ne!(
+            a.snapshot(),
+            c.snapshot(),
+            "different seed ⇒ different genesis"
+        );
     }
 
     /// Balances are genuinely wei-scale and span a wide magnitude range, and
@@ -493,8 +500,14 @@ mod tests {
         let genesis = feed.snapshot();
         let min = genesis.iter().map(|(_, b)| *b).min().unwrap();
         let max = genesis.iter().map(|(_, b)| *b).max().unwrap();
-        assert!(min >= (1u128 << 37), "balances must be wei-scale, got min {min}");
-        assert!(max / min >= (1u128 << 15), "balances must span a wide magnitude range");
+        assert!(
+            min >= (1u128 << 37),
+            "balances must be wei-scale, got min {min}"
+        );
+        assert!(
+            max / min >= (1u128 << 15),
+            "balances must span a wide magnitude range"
+        );
 
         // Snapshot truth BEFORE the block, then measure each update's byte
         // delta on the encoded value.
@@ -557,7 +570,10 @@ mod tests {
             }
         }
 
-        assert!(inserts > 0 && updates > 0 && deletes > 0, "all three op kinds must occur: i={inserts} u={updates} d={deletes}");
+        assert!(
+            inserts > 0 && updates > 0 && deletes > 0,
+            "all three op kinds must occur: i={inserts} u={updates} d={deletes}"
+        );
         assert_eq!(
             feed.live_keys().len(),
             start_live,
@@ -567,13 +583,20 @@ mod tests {
         // A deleted key is gone: balance 0 and absent from the live set.
         let d = a_deleted.unwrap();
         assert_eq!(feed.balance_of(&d), 0, "a deleted key must read back as 0");
-        assert!(!feed.live_keys().contains(&d), "a deleted key must leave the live set");
+        assert!(
+            !feed.live_keys().contains(&d),
+            "a deleted key must leave the live set"
+        );
 
         // The exact-oracle invariant: the independently-replayed truth equals
         // `balance_of` for every key either side knows about.
         for addr in replica.keys().chain(genesis_keys.iter()) {
             let expected = replica.get(addr).copied().unwrap_or(0);
-            assert_eq!(feed.balance_of(addr), expected, "balance_of must exactly reflect the emitted stream");
+            assert_eq!(
+                feed.balance_of(addr),
+                expected,
+                "balance_of must exactly reflect the emitted stream"
+            );
         }
     }
 

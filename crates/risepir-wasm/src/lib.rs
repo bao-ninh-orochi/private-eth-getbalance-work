@@ -57,7 +57,4 @@ pub mod abi;
 pub mod entropy;
 pub mod session;
 
-pub use abi::{
-    STATUS_DECODE_FAILED, STATUS_ERROR, STATUS_FOUND, STATUS_UNTRACKED, STATUS_ZERO,
-};
-
+pub use abi::{STATUS_DECODE_FAILED, STATUS_ERROR, STATUS_FOUND, STATUS_UNTRACKED, STATUS_ZERO};

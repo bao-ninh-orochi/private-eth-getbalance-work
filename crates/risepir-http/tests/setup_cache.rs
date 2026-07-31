@@ -86,19 +86,30 @@ fn build_node(ring_capacity: usize) -> (Arc<NodeState>, MockFeed) {
 }
 
 /// `GET uri`, returning status, the `ETag` header (if any), and the body.
-async fn get_with(app: &axum::Router, uri: &str, if_none_match: Option<&str>) -> (StatusCode, Option<String>, Vec<u8>) {
+async fn get_with(
+    app: &axum::Router,
+    uri: &str,
+    if_none_match: Option<&str>,
+) -> (StatusCode, Option<String>, Vec<u8>) {
     let mut req = Request::builder().uri(uri);
     if let Some(inm) = if_none_match {
         req = req.header(header::IF_NONE_MATCH, inm);
     }
-    let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let etag = resp
         .headers()
         .get(header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     (status, etag, body)
 }
 
@@ -115,7 +126,10 @@ async fn head_block(app: &axum::Router) -> u64 {
 
 async fn apply_blocks(state: &Arc<NodeState>, feed: &mut MockFeed, n: usize) {
     for _ in 0..n {
-        let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         state.apply_block(&upd).await.expect("apply_block");
     }
 }
@@ -127,7 +141,11 @@ async fn setup_is_encoded_once_and_served_byte_identically() {
     let (state, _feed) = build_node(300);
     let app = NodeState::router(state.clone());
 
-    assert_eq!(state.setup_generation(), 0, "nothing encoded before the first request");
+    assert_eq!(
+        state.setup_generation(),
+        0,
+        "nothing encoded before the first request"
+    );
 
     let (s1, e1, b1) = get_with(&app, "/setup", None).await;
     let (s2, e2, b2) = get_with(&app, "/setup", None).await;
@@ -136,7 +154,10 @@ async fn setup_is_encoded_once_and_served_byte_identically() {
     assert_eq!(s1, StatusCode::OK);
     assert_eq!(s2, StatusCode::OK);
     assert_eq!(s3, StatusCode::OK);
-    assert_eq!(b1, b2, "two clients must receive byte-identical setup bundles");
+    assert_eq!(
+        b1, b2,
+        "two clients must receive byte-identical setup bundles"
+    );
     assert_eq!(b2, b3);
     assert_eq!(e1, e2);
     assert_eq!(e2, e3);
@@ -180,7 +201,10 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
     // always", the assertion below would fail here rather than later.)
     apply_blocks(&state, &mut feed, 2).await;
     let (_, _, still_cached) = get_with(&app, "/setup", None).await;
-    assert_eq!(still_cached, first, "a fresh-enough cache must be reused verbatim");
+    assert_eq!(
+        still_cached, first,
+        "a fresh-enough cache must be reused verbatim"
+    );
     assert_eq!(state.setup_generation(), 1);
 
     // Past the fresh window — and far enough that `first_block` will also
@@ -192,7 +216,10 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
     assert_ne!(second, first, "a stale cache must not be served");
     assert_eq!(state.setup_generation(), 2, "exactly one regeneration");
     let second_block = wire::decode_setup(&second).expect("decode_setup").block;
-    assert!(second_block > first_block, "the fresh bundle must be pinned later");
+    assert!(
+        second_block > first_block,
+        "the fresh bundle must be pinned later"
+    );
 
     // The property that actually matters: a client bootstrapping from what
     // was just served can still be bridged forward. Anything else strands
@@ -206,7 +233,14 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
     apply_blocks(&state, &mut feed, 1).await;
     let head = head_block(&app).await;
     assert!(head > second_block);
-    let (status, _) = get(&app, &format!("/sync?from={second_block}&to={head}&epoch={}", state.epoch())).await;
+    let (status, _) = get(
+        &app,
+        &format!(
+            "/sync?from={second_block}&to={head}&epoch={}",
+            state.epoch()
+        ),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -215,7 +249,11 @@ async fn a_stale_cache_regenerates_and_what_it_serves_is_still_bridgeable() {
 
     // And the stale one genuinely is not bridgeable any more — which is
     // exactly why it had to be regenerated.
-    let (status, _) = get(&app, &format!("/sync?from={first_block}&to={head}&epoch={}", state.epoch())).await;
+    let (status, _) = get(
+        &app,
+        &format!("/sync?from={first_block}&to={head}&epoch={}", state.epoch()),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::CONFLICT,
@@ -239,21 +277,37 @@ async fn a_client_bootstrapped_from_a_cached_bundle_still_answers_exactly() {
 
     let (status, _, body) = get_with(&app, "/setup", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(state.setup_generation(), 1, "still the block-0 bundle, served from cache");
+    assert_eq!(
+        state.setup_generation(),
+        1,
+        "still the block-0 bundle, served from cache"
+    );
     let bundle = wire::decode_setup(&body).expect("decode_setup");
-    assert_eq!(bundle.block, 0, "deliberately bootstrapping from a stale-but-bridgeable bundle");
+    assert_eq!(
+        bundle.block, 0,
+        "deliberately bootstrapping from a stale-but-bridgeable bundle"
+    );
 
     let params = bundle.params;
     let arity = params.arity();
-    let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let reshape_row_width_per_seg: Vec<u32> = bundle
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_row_width)
+        .collect();
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
 
     // Sync the client from the cached bundle's block up to the head.
     let head = head_block(&app).await;
-    let (status, body) = get(&app, &format!("/sync?from=0&to={head}&epoch={}", state.epoch())).await;
+    let (status, body) = get(
+        &app,
+        &format!("/sync?from=0&to={head}&epoch={}", state.epoch()),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let delta =
-        risepir_proto::codec::decode_block_delta(&body, params.plaintext_bits, arity as u32).expect("decode_block_delta");
+        risepir_proto::codec::decode_block_delta(&body, params.plaintext_bits, arity as u32)
+            .expect("decode_block_delta");
     client.ingest_delta(&delta).expect("ingest_delta");
 
     // Every live account must come back byte-exact against the mock's own
@@ -276,13 +330,26 @@ async fn a_client_bootstrapped_from_a_cached_bundle_still_answers_exactly() {
                 .await
                 .unwrap();
             let s = resp.status();
-            (s, to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec())
+            (
+                s,
+                to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
         };
         assert_eq!(status, StatusCode::OK);
         let (responses, at_block) =
-            wire::decode_response_bundle(&body, &reshape_row_width_per_seg, arity).expect("decode_response_bundle");
-        match client.finish(&addr, &ctx, responses, at_block).expect("finish") {
-            Lookup::Found(balance) => assert_eq!(balance, expected, "balance for {addr:?} through a cached bundle"),
+            wire::decode_response_bundle(&body, &reshape_row_width_per_seg, arity)
+                .expect("decode_response_bundle");
+        match client
+            .finish(&addr, &ctx, responses, at_block)
+            .expect("finish")
+        {
+            Lookup::Found(balance) => assert_eq!(
+                balance, expected,
+                "balance for {addr:?} through a cached bundle"
+            ),
             other => panic!("expected Found({expected}) for a live account, got {other:?}"),
         }
     }
@@ -311,16 +378,16 @@ async fn if_none_match_revalidates_and_junk_never_panics() {
     // a spurious 304 would leave a client with no hint at all. Every one
     // of these is attacker-controlled request input.
     for junk in [
-        "\"setup-999999\"",         // a validator for a bundle we are not serving
-        "\"\"",                     // empty quoted
-        "",                         // empty
-        "*",                        // the wildcard: matches "any current representation"
-        "setup-0",                  // unquoted
-        "W/\"setup-0\"",            // weak validator
-        "\"setup-0",                // unterminated quote
-        "garbage, \"setup-0\"",     // list form, one entry matching
-        "\u{feff}\"setup-0\"",      // leading BOM
-        &"\"".repeat(4096),         // long, degenerate
+        "\"setup-999999\"",     // a validator for a bundle we are not serving
+        "\"\"",                 // empty quoted
+        "",                     // empty
+        "*",                    // the wildcard: matches "any current representation"
+        "setup-0",              // unquoted
+        "W/\"setup-0\"",        // weak validator
+        "\"setup-0",            // unterminated quote
+        "garbage, \"setup-0\"", // list form, one entry matching
+        "\u{feff}\"setup-0\"",  // leading BOM
+        &"\"".repeat(4096),     // long, degenerate
     ] {
         let (status, _, body) = get_with(&app, "/setup", Some(junk)).await;
         assert!(
@@ -328,7 +395,10 @@ async fn if_none_match_revalidates_and_junk_never_panics() {
             "If-None-Match {junk:?} must be handled cleanly, got {status}"
         );
         if status == StatusCode::OK {
-            assert_eq!(body, full, "a non-matching validator must serve the current bundle verbatim");
+            assert_eq!(
+                body, full,
+                "a non-matching validator must serve the current bundle verbatim"
+            );
         } else {
             assert!(body.is_empty());
         }

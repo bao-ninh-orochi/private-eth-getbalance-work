@@ -82,7 +82,8 @@ pub(crate) fn fold_mutations_into_row_deltas(
     let bucket_size = params.bucket_size;
     let cps = params.cells_per_slot() as usize;
 
-    let mut acc: Vec<BTreeMap<u32, BTreeMap<u16, i64>>> = (0..arity).map(|_| BTreeMap::new()).collect();
+    let mut acc: Vec<BTreeMap<u32, BTreeMap<u16, i64>>> =
+        (0..arity).map(|_| BTreeMap::new()).collect();
 
     let mut old_buf = vec![0u32; cps];
     let mut new_buf = vec![0u32; cps];
@@ -91,7 +92,11 @@ pub(crate) fn fold_mutations_into_row_deltas(
         let seg_idx = (m.bucket / segment_size) as usize;
         let bucket_in_seg = m.bucket % segment_size;
         let slot = m.slot as usize;
-        debug_assert!(seg_idx < arity, "bucket {} out of range for arity {arity}", m.bucket);
+        debug_assert!(
+            seg_idx < arity,
+            "bucket {} out of range for arity {arity}",
+            m.bucket
+        );
         debug_assert!(
             (slot as u32) < bucket_size,
             "slot {} out of range for bucket_size {bucket_size}",
@@ -146,7 +151,9 @@ mod tests {
     /// `fingerprint_bits = 12`, `value_bits = 8`, `plaintext_bits = 8` ⇒
     /// `cells_per_slot = ⌈20/8⌉ = 3`, `value_size_in_cells = 1`.
     fn params_2ary() -> CuckooParams {
-        Segmented2aryCuckooKVStore::new(64, 4, 12, 8, 8).unwrap().params()
+        Segmented2aryCuckooKVStore::new(64, 4, 12, 8, 8)
+            .unwrap()
+            .params()
     }
 
     fn zero_value_cells(params: &CuckooParams) -> Box<[u32]> {
@@ -244,7 +251,10 @@ mod tests {
         };
         let chained = fold_mutations_into_row_deltas(&[insert_m, update_m], &p);
         let expected = fold_mutations_into_row_deltas(&[net_expected], &p);
-        assert_eq!(chained, expected, "chained insert+update must equal single-step net delta");
+        assert_eq!(
+            chained, expected,
+            "chained insert+update must equal single-step net delta"
+        );
     }
 
     /// A no-op mutation (old == new, as would come from re-writing the
@@ -262,7 +272,10 @@ mod tests {
             new_value_cells: nonzero_value_cells(&p, 99),
         };
         let out = fold_mutations_into_row_deltas(&[m], &p);
-        assert!(out.iter().all(|seg| seg.is_empty()), "no-op mutation must produce empty output");
+        assert!(
+            out.iter().all(|seg| seg.is_empty()),
+            "no-op mutation must produce empty output"
+        );
     }
 
     /// Mutations on different buckets within the same segment land in

@@ -100,11 +100,18 @@ impl Session {
     /// [`PrivateEth::rebootstrap`] (after a stall) — the latter is
     /// exactly the former, run again, which is what makes a re-bootstrap
     /// introduce no new trust or correctness surface.
-    fn from_bundle(bundle: SetupBundle<SimplePirBackend>, value_codec: ValueCodec, complete: bool) -> Self {
+    fn from_bundle(
+        bundle: SetupBundle<SimplePirBackend>,
+        value_codec: ValueCodec,
+        complete: bool,
+    ) -> Self {
         let arity = bundle.params.arity();
         let plaintext_bits = bundle.params.plaintext_bits;
-        let reshape_row_width_per_seg: Vec<u32> =
-            bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+        let reshape_row_width_per_seg: Vec<u32> = bundle
+            .backend_params
+            .iter()
+            .map(|sp| sp.reshape_row_width)
+            .collect();
         let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
         let pending_head = bundle.block;
         let client = RisePirClient::from_setup(bundle, value_codec);
@@ -359,14 +366,23 @@ impl PrivateEth {
     /// run it again from scratch after a [`Self::rebootstrap`]; see that
     /// method's docs for why a retry must restart here rather than reuse
     /// any part of a failed attempt.
-    async fn try_get_balance(&self, key: &AddressHash, session: &mut Session) -> Result<u128, RpcError> {
+    async fn try_get_balance(
+        &self,
+        key: &AddressHash,
+        session: &mut Session,
+    ) -> Result<u128, RpcError> {
         let server_head = self.pir.head().await?;
         self.sync_to(session, server_head).await?;
 
         let (queries, ctx) = session.client.build_query(key);
         let (responses, at_block) = match self
             .pir
-            .answer(&queries, &session.epoch, &session.reshape_row_width_per_seg, session.arity)
+            .answer(
+                &queries,
+                &session.epoch,
+                &session.reshape_row_width_per_seg,
+                session.arity,
+            )
             .await
         {
             Ok(ok) => ok,
@@ -378,7 +394,9 @@ impl PrivateEth {
             // it to the same variant so `get_balance`'s single
             // rebootstrap-and-retry covers it; any other status stays a
             // plain transport error.
-            Err(risepir_http::ClientError::Status { status: 409, .. }) => return Err(RpcError::Stalled),
+            Err(risepir_http::ClientError::Status { status: 409, .. }) => {
+                return Err(RpcError::Stalled)
+            }
             Err(e) => return Err(e.into()),
         };
 
@@ -393,16 +411,19 @@ impl PrivateEth {
         // genuine `Stalled` (handled one level up, in `get_balance`).
         self.sync_to(session, at_block).await?;
 
-        let lookup = session.client.finish(key, &ctx, responses, at_block).map_err(|e| match e {
-            // `finish` cannot actually observe a mismatch here (the sync
-            // immediately above guarantees `pending_head == at_block`
-            // before this call), but the mapping is kept rather than
-            // `unreachable!()`-ing: `docs/plan.md`'s invariant is "never
-            // guess, never panic on live input" even for a branch this
-            // method's own logic should have already foreclosed.
-            risepir_client::ClientError::ResponseBlockMismatch { .. } => RpcError::Stalled,
-            other => RpcError::from(other),
-        })?;
+        let lookup = session
+            .client
+            .finish(key, &ctx, responses, at_block)
+            .map_err(|e| match e {
+                // `finish` cannot actually observe a mismatch here (the sync
+                // immediately above guarantees `pending_head == at_block`
+                // before this call), but the mapping is kept rather than
+                // `unreachable!()`-ing: `docs/plan.md`'s invariant is "never
+                // guess, never panic on live input" even for a branch this
+                // method's own logic should have already foreclosed.
+                risepir_client::ClientError::ResponseBlockMismatch { .. } => RpcError::Stalled,
+                other => RpcError::from(other),
+            })?;
 
         match lookup {
             Lookup::Found(balance) => Ok(balance),
@@ -495,7 +516,13 @@ impl PrivateEth {
         }
         match self
             .pir
-            .sync(session.pending_head, target, &session.epoch, session.plaintext_bits, session.arity as u32)
+            .sync(
+                session.pending_head,
+                target,
+                &session.epoch,
+                session.plaintext_bits,
+                session.arity as u32,
+            )
             .await?
         {
             Some(delta) => {

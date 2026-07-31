@@ -45,7 +45,9 @@
 //! a hint). So every one of those three checks compares with `==`, not
 //! `<=`, after bounding the read with `read_u32s`'s own upper bound.
 
-use ikpir_common::backend::simple::{SimpleHint, SimpleParams, SimpleQuery, SimpleResponse, SimpleServerParams};
+use ikpir_common::backend::simple::{
+    SimpleHint, SimpleParams, SimpleQuery, SimpleResponse, SimpleServerParams,
+};
 use ikpir_common::SimplePirBackend;
 use risepir_proto::codec::{self, CodecError};
 use risepir_server::SetupBundle;
@@ -117,9 +119,16 @@ impl std::fmt::Display for WireError {
             Self::UnexpectedEof => write!(f, "unexpected end of input"),
             Self::BadScheme(b) => write!(f, "bad scheme byte: {b} (expected 2, 3, or 4)"),
             Self::ArityMismatch { expected, found } => {
-                write!(f, "arity mismatch: expected {expected} segments, found {found}")
+                write!(
+                    f,
+                    "arity mismatch: expected {expected} segments, found {found}"
+                )
             }
-            Self::SegmentLengthMismatch { segment, expected, found } => write!(
+            Self::SegmentLengthMismatch {
+                segment,
+                expected,
+                found,
+            } => write!(
                 f,
                 "segment {segment}: expected exactly {expected} u32 cells, found {found}"
             ),
@@ -197,28 +206,44 @@ fn read_u8(bytes: &[u8], pos: &mut usize) -> Result<u8, WireError> {
 
 fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, WireError> {
     let end = pos.checked_add(4).ok_or(WireError::UnexpectedEof)?;
-    let chunk: [u8; 4] = bytes.get(*pos..end).ok_or(WireError::UnexpectedEof)?.try_into().expect("slice of length 4");
+    let chunk: [u8; 4] = bytes
+        .get(*pos..end)
+        .ok_or(WireError::UnexpectedEof)?
+        .try_into()
+        .expect("slice of length 4");
     *pos = end;
     Ok(u32::from_le_bytes(chunk))
 }
 
 fn read_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, WireError> {
     let end = pos.checked_add(8).ok_or(WireError::UnexpectedEof)?;
-    let chunk: [u8; 8] = bytes.get(*pos..end).ok_or(WireError::UnexpectedEof)?.try_into().expect("slice of length 8");
+    let chunk: [u8; 8] = bytes
+        .get(*pos..end)
+        .ok_or(WireError::UnexpectedEof)?
+        .try_into()
+        .expect("slice of length 8");
     *pos = end;
     Ok(u64::from_le_bytes(chunk))
 }
 
 fn read_f64(bytes: &[u8], pos: &mut usize) -> Result<f64, WireError> {
     let end = pos.checked_add(8).ok_or(WireError::UnexpectedEof)?;
-    let chunk: [u8; 8] = bytes.get(*pos..end).ok_or(WireError::UnexpectedEof)?.try_into().expect("slice of length 8");
+    let chunk: [u8; 8] = bytes
+        .get(*pos..end)
+        .ok_or(WireError::UnexpectedEof)?
+        .try_into()
+        .expect("slice of length 8");
     *pos = end;
     Ok(f64::from_le_bytes(chunk))
 }
 
 fn read_seed(bytes: &[u8], pos: &mut usize) -> Result<[u8; 16], WireError> {
     let end = pos.checked_add(16).ok_or(WireError::UnexpectedEof)?;
-    let chunk: [u8; 16] = bytes.get(*pos..end).ok_or(WireError::UnexpectedEof)?.try_into().expect("slice of length 16");
+    let chunk: [u8; 16] = bytes
+        .get(*pos..end)
+        .ok_or(WireError::UnexpectedEof)?
+        .try_into()
+        .expect("slice of length 16");
     *pos = end;
     Ok(chunk)
 }
@@ -302,8 +327,16 @@ pub fn lineage_epoch(params: &[SimpleServerParams]) -> String {
 /// hint as a [`codec::encode_u32s`]-framed `Vec<u32>`.
 pub fn encode_setup(bundle: &SetupBundle<SimplePirBackend>) -> Vec<u8> {
     let arity = bundle.params.arity();
-    debug_assert_eq!(bundle.backend_params.len(), arity, "encode_setup: backend_params.len() != params.arity()");
-    debug_assert_eq!(bundle.hints.len(), arity, "encode_setup: hints.len() != params.arity()");
+    debug_assert_eq!(
+        bundle.backend_params.len(),
+        arity,
+        "encode_setup: backend_params.len() != params.arity()"
+    );
+    debug_assert_eq!(
+        bundle.hints.len(),
+        arity,
+        "encode_setup: hints.len() != params.arity()"
+    );
     assert!(
         arity <= u8::MAX as usize,
         "encode_setup: arity {arity} does not fit the u8 scheme byte"
@@ -460,7 +493,10 @@ pub fn decode_setup(bytes: &[u8]) -> Result<SetupBundle<SimplePirBackend>, WireE
         // preconditions and panics if they fail — unacceptable for a
         // decoder fed attacker-controlled bytes, so they are checked here
         // first and turned into a clean `Err` (see `WireError::InvalidSimpleParams`).
-        if lwe_dim == 0 || !(1..=31).contains(&seg_plaintext_bits) || !(sigma > 0.0 && sigma.is_finite()) {
+        if lwe_dim == 0
+            || !(1..=31).contains(&seg_plaintext_bits)
+            || !(sigma > 0.0 && sigma.is_finite())
+        {
             return Err(WireError::InvalidSimpleParams { segment });
         }
 
@@ -574,7 +610,10 @@ pub fn decode_query_bundle(
     let arity = arity_byte as usize;
     let expected_arity = params.arity();
     if arity != expected_arity {
-        return Err(WireError::ArityMismatch { expected: expected_arity, found: arity });
+        return Err(WireError::ArityMismatch {
+            expected: expected_arity,
+            found: arity,
+        });
     }
     if expected_len_per_seg.len() != expected_arity {
         return Err(WireError::ArityMismatch {
@@ -667,10 +706,16 @@ pub fn decode_response_bundle(
     let arity_byte = read_u8(bytes, &mut pos)?;
     let found_arity = arity_byte as usize;
     if found_arity != arity {
-        return Err(WireError::ArityMismatch { expected: arity, found: found_arity });
+        return Err(WireError::ArityMismatch {
+            expected: arity,
+            found: found_arity,
+        });
     }
     if expected_len_per_seg.len() != arity {
-        return Err(WireError::ArityMismatch { expected: arity, found: expected_len_per_seg.len() });
+        return Err(WireError::ArityMismatch {
+            expected: arity,
+            found: expected_len_per_seg.len(),
+        });
     }
 
     let head = read_u64(bytes, &mut pos)?;
@@ -743,7 +788,9 @@ mod tests {
             .collect();
         let hints: Vec<SimpleHint> = (0..arity)
             .map(|i| SimpleHint {
-                data: (0..lwe_dim * reshape_row_width).map(|j| (i as u32) * 1_000 + j).collect(),
+                data: (0..lwe_dim * reshape_row_width)
+                    .map(|j| (i as u32) * 1_000 + j)
+                    .collect(),
             })
             .collect();
         SetupBundle {
@@ -756,17 +803,29 @@ mod tests {
 
     fn sample_queries() -> Vec<SimpleQuery> {
         vec![
-            SimpleQuery { b: vec![1, 2, 3, 4, 5] },
-            SimpleQuery { b: vec![6, 7, 8, 9, 10] },
-            SimpleQuery { b: vec![11, 12, 13, 14, 15] },
+            SimpleQuery {
+                b: vec![1, 2, 3, 4, 5],
+            },
+            SimpleQuery {
+                b: vec![6, 7, 8, 9, 10],
+            },
+            SimpleQuery {
+                b: vec![11, 12, 13, 14, 15],
+            },
         ]
     }
 
     fn sample_responses() -> Vec<SimpleResponse> {
         vec![
-            SimpleResponse { a: vec![100, 200, 300] },
-            SimpleResponse { a: vec![400, 500, 600] },
-            SimpleResponse { a: vec![700, 800, 900] },
+            SimpleResponse {
+                a: vec![100, 200, 300],
+            },
+            SimpleResponse {
+                a: vec![400, 500, 600],
+            },
+            SimpleResponse {
+                a: vec![700, 800, 900],
+            },
         ]
     }
 
@@ -817,7 +876,8 @@ mod tests {
         let head = 12_345u64;
 
         let bytes = encode_response_bundle(&responses, head);
-        let (decoded, decoded_head) = decode_response_bundle(&bytes, &expected_len_per_seg, responses.len()).unwrap();
+        let (decoded, decoded_head) =
+            decode_response_bundle(&bytes, &expected_len_per_seg, responses.len()).unwrap();
 
         assert_eq!(decoded_head, head);
         assert_eq!(decoded.len(), responses.len());
@@ -870,7 +930,10 @@ mod tests {
     fn decode_setup_rejects_truncated() {
         let bytes = encode_setup(&sample_setup_bundle());
         for cut in [0, 1, 4, 5, 10, bytes.len() - 1] {
-            assert!(decode_setup(&bytes[..cut]).is_err(), "cut={cut} must be rejected");
+            assert!(
+                decode_setup(&bytes[..cut]).is_err(),
+                "cut={cut} must be rejected"
+            );
         }
     }
 
@@ -882,7 +945,10 @@ mod tests {
         let mut bytes = encode_setup(&sample_setup_bundle());
         let lwe_dim_offset = 4 + 1 + 5 * 4 + 8; // magic + scheme + 5 u32s + block u64
         bytes[lwe_dim_offset..lwe_dim_offset + 4].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(expect_setup_err(&bytes), WireError::InvalidSimpleParams { segment: 0 });
+        assert_eq!(
+            expect_setup_err(&bytes),
+            WireError::InvalidSimpleParams { segment: 0 }
+        );
     }
 
     #[test]
@@ -910,7 +976,11 @@ mod tests {
         let bytes = encode_setup(&bundle);
         assert_eq!(
             expect_setup_err(&bytes),
-            WireError::SegmentLengthMismatch { segment: 0, expected: 24, found: 2 }
+            WireError::SegmentLengthMismatch {
+                segment: 0,
+                expected: 24,
+                found: 2
+            }
         );
     }
 
@@ -925,7 +995,10 @@ mod tests {
         let expected_len_per_seg = vec![5u32; 4];
         assert_eq!(
             decode_query_bundle(&bytes, &params, &expected_len_per_seg).unwrap_err(),
-            WireError::ArityMismatch { expected: 4, found: 3 }
+            WireError::ArityMismatch {
+                expected: 4,
+                found: 3
+            }
         );
     }
 
@@ -938,15 +1011,23 @@ mod tests {
     fn decode_query_bundle_rejects_too_short_segment() {
         let short_queries = vec![
             SimpleQuery { b: vec![1, 2] }, // only 2, geometry below expects 5
-            SimpleQuery { b: vec![6, 7, 8, 9, 10] },
-            SimpleQuery { b: vec![11, 12, 13, 14, 15] },
+            SimpleQuery {
+                b: vec![6, 7, 8, 9, 10],
+            },
+            SimpleQuery {
+                b: vec![11, 12, 13, 14, 15],
+            },
         ];
         let bytes = encode_query_bundle(&short_queries);
         let params = sample_cuckoo_params();
         let expected_len_per_seg = vec![5u32, 5, 5];
         assert_eq!(
             decode_query_bundle(&bytes, &params, &expected_len_per_seg).unwrap_err(),
-            WireError::SegmentLengthMismatch { segment: 0, expected: 5, found: 2 }
+            WireError::SegmentLengthMismatch {
+                segment: 0,
+                expected: 5,
+                found: 2
+            }
         );
     }
 
@@ -969,7 +1050,10 @@ mod tests {
         let expected_len_per_seg = vec![3u32; 4];
         assert_eq!(
             decode_response_bundle(&bytes, &expected_len_per_seg, 4).unwrap_err(),
-            WireError::ArityMismatch { expected: 4, found: 3 }
+            WireError::ArityMismatch {
+                expected: 4,
+                found: 3
+            }
         );
     }
 
@@ -980,14 +1064,22 @@ mod tests {
     fn decode_response_bundle_rejects_too_short_segment() {
         let short_responses = vec![
             SimpleResponse { a: vec![100] }, // only 1, geometry below expects 3
-            SimpleResponse { a: vec![400, 500, 600] },
-            SimpleResponse { a: vec![700, 800, 900] },
+            SimpleResponse {
+                a: vec![400, 500, 600],
+            },
+            SimpleResponse {
+                a: vec![700, 800, 900],
+            },
         ];
         let bytes = encode_response_bundle(&short_responses, 99);
         let expected_len_per_seg = vec![3u32, 3, 3];
         assert_eq!(
             decode_response_bundle(&bytes, &expected_len_per_seg, 3).unwrap_err(),
-            WireError::SegmentLengthMismatch { segment: 0, expected: 3, found: 1 }
+            WireError::SegmentLengthMismatch {
+                segment: 0,
+                expected: 3,
+                found: 1
+            }
         );
     }
 
@@ -1030,7 +1122,10 @@ mod tests {
                 let mut corrupted = valid.clone();
                 corrupted[byte_idx] ^= 1 << bit;
                 let result = panic::catch_unwind(|| decode_setup(&corrupted));
-                assert!(result.is_ok(), "panicked corrupting byte {byte_idx} bit {bit}");
+                assert!(
+                    result.is_ok(),
+                    "panicked corrupting byte {byte_idx} bit {bit}"
+                );
             }
         }
     }
@@ -1044,22 +1139,30 @@ mod tests {
         let mut state: u64 = 0x0BAD_F00D_CAFE_BABE;
         for len in 0..300usize {
             let bytes = random_bytes(&mut state, len);
-            let result = panic::catch_unwind(|| decode_query_bundle(&bytes, &params, &expected_len_per_seg));
+            let result =
+                panic::catch_unwind(|| decode_query_bundle(&bytes, &params, &expected_len_per_seg));
             assert!(result.is_ok(), "panicked on random input of length {len}");
         }
 
         let valid = encode_query_bundle(&sample_queries());
         for cut in 0..=valid.len() {
             let prefix = valid[..cut].to_vec();
-            let result = panic::catch_unwind(|| decode_query_bundle(&prefix, &params, &expected_len_per_seg));
+            let result = panic::catch_unwind(|| {
+                decode_query_bundle(&prefix, &params, &expected_len_per_seg)
+            });
             assert!(result.is_ok(), "panicked truncating to length {cut}");
         }
         for byte_idx in 0..valid.len() {
             for bit in 0..8u8 {
                 let mut corrupted = valid.clone();
                 corrupted[byte_idx] ^= 1 << bit;
-                let result = panic::catch_unwind(|| decode_query_bundle(&corrupted, &params, &expected_len_per_seg));
-                assert!(result.is_ok(), "panicked corrupting byte {byte_idx} bit {bit}");
+                let result = panic::catch_unwind(|| {
+                    decode_query_bundle(&corrupted, &params, &expected_len_per_seg)
+                });
+                assert!(
+                    result.is_ok(),
+                    "panicked corrupting byte {byte_idx} bit {bit}"
+                );
             }
         }
     }
@@ -1072,22 +1175,29 @@ mod tests {
         let mut state: u64 = 0x5EED_F00D_1234_5678;
         for len in 0..300usize {
             let bytes = random_bytes(&mut state, len);
-            let result = panic::catch_unwind(|| decode_response_bundle(&bytes, &expected_len_per_seg, 3));
+            let result =
+                panic::catch_unwind(|| decode_response_bundle(&bytes, &expected_len_per_seg, 3));
             assert!(result.is_ok(), "panicked on random input of length {len}");
         }
 
         let valid = encode_response_bundle(&sample_responses(), 555);
         for cut in 0..=valid.len() {
             let prefix = valid[..cut].to_vec();
-            let result = panic::catch_unwind(|| decode_response_bundle(&prefix, &expected_len_per_seg, 3));
+            let result =
+                panic::catch_unwind(|| decode_response_bundle(&prefix, &expected_len_per_seg, 3));
             assert!(result.is_ok(), "panicked truncating to length {cut}");
         }
         for byte_idx in 0..valid.len() {
             for bit in 0..8u8 {
                 let mut corrupted = valid.clone();
                 corrupted[byte_idx] ^= 1 << bit;
-                let result = panic::catch_unwind(|| decode_response_bundle(&corrupted, &expected_len_per_seg, 3));
-                assert!(result.is_ok(), "panicked corrupting byte {byte_idx} bit {bit}");
+                let result = panic::catch_unwind(|| {
+                    decode_response_bundle(&corrupted, &expected_len_per_seg, 3)
+                });
+                assert!(
+                    result.is_ok(),
+                    "panicked corrupting byte {byte_idx} bit {bit}"
+                );
             }
         }
     }

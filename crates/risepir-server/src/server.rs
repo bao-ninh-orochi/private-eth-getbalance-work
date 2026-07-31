@@ -121,7 +121,12 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// arising from any input this crate later accepts, so a loud panic
     /// at construction is preferable to a confusing store-rejected-write
     /// error deep inside the first [`Self::apply_block`] call.
-    pub fn new(mut store: CuckooKVStore<S>, config: B::Config, value_codec: ValueCodec, genesis_block: u64) -> Self {
+    pub fn new(
+        mut store: CuckooKVStore<S>,
+        config: B::Config,
+        value_codec: ValueCodec,
+        genesis_block: u64,
+    ) -> Self {
         let expected_value_bytes = (value_codec.value_bits() as usize).div_ceil(8);
         let store_value_bytes = store.value_size_in_bytes();
         assert_eq!(
@@ -146,8 +151,13 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
             let cells = store.as_cells();
             for j in 0..arity {
                 let start = j * seg_cells;
-                let (sp, mat, h) =
-                    B::server_setup(&config, &cells[start..start + seg_cells], segment_size, row_width, pb);
+                let (sp, mat, h) = B::server_setup(
+                    &config,
+                    &cells[start..start + seg_cells],
+                    segment_size,
+                    row_width,
+                    pb,
+                );
                 backend_params.push(sp);
                 material.push(mat);
                 hints.push(h);
@@ -217,7 +227,8 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
             hints.len()
         );
 
-        let material: Vec<B::HintMaterial> = backend_params.iter().map(B::expand_hint_material).collect();
+        let material: Vec<B::HintMaterial> =
+            backend_params.iter().map(B::expand_hint_material).collect();
 
         store.enable_mutation_log();
         let _ = store.drain_mutations();
@@ -315,7 +326,10 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
             };
         }
 
-        let encoded = self.value_codec.encode(addr, balance).map_err(ServerError::Encode)?;
+        let encoded = self
+            .value_codec
+            .encode(addr, balance)
+            .map_err(ServerError::Encode)?;
 
         match located {
             Located::Own(_) => match self.store.update(addr, &encoded) {
@@ -477,13 +491,19 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
             let prior = match verified::get(&self.store, &self.value_codec, addr) {
                 Ok(Some(b)) => b,
                 Ok(None) => 0,
-                Err(Located::Corrupt) => return Err(self.reject_block(ServerError::CorruptStoredValue)),
+                Err(Located::Corrupt) => {
+                    return Err(self.reject_block(ServerError::CorruptStoredValue))
+                }
                 Err(_) => {
-                    return Err(self.reject_block(ServerError::FingerprintAmbiguity { shadowed: false }));
+                    return Err(
+                        self.reject_block(ServerError::FingerprintAmbiguity { shadowed: false })
+                    );
                 }
             };
             let Some(credited) = prior.checked_add(*amount) else {
-                return Err(self.reject_block(ServerError::Encode(risepir_proto::ValueError::BalanceOverflow)));
+                return Err(self.reject_block(ServerError::Encode(
+                    risepir_proto::ValueError::BalanceOverflow,
+                )));
             };
             if let Err(e) = self.apply_change(addr, credited) {
                 return Err(self.reject_block(e));
@@ -855,9 +875,20 @@ mod tests {
 
         for block in 1u64..=3 {
             let changes: Vec<(AddressHash, Balance)> = (0..100u64)
-                .map(|i| (addr(block * 1_000 + i), 1_000_000_000_000_000_000u128 + u128::from(block * 1_000 + i)))
+                .map(|i| {
+                    (
+                        addr(block * 1_000 + i),
+                        1_000_000_000_000_000_000u128 + u128::from(block * 1_000 + i),
+                    )
+                })
                 .collect();
-            let delta = s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let delta = s
+                .apply_block(&BlockUpdate {
+                    block,
+                    changes,
+                    credits: vec![],
+                })
+                .unwrap();
             assert_eq!(delta.block, block);
             assert!(
                 delta.per_segment.iter().any(|seg| !seg.is_empty()),
@@ -866,7 +897,11 @@ mod tests {
             deltas.push(delta);
         }
 
-        assert_eq!(deltas.len(), 3, "exactly 3 BlockDeltas for 3 apply_block calls");
+        assert_eq!(
+            deltas.len(),
+            3,
+            "exactly 3 BlockDeltas for 3 apply_block calls"
+        );
         assert_eq!(s.block(), 3);
     }
 
@@ -939,7 +974,9 @@ mod tests {
         const N: u64 = 100;
         let mut genesis_store = empty_store(&geom);
         for i in 0..N {
-            let v = codec.encode(&addr(i), 1_000_000_000_000_000_000u128 + u128::from(i)).unwrap();
+            let v = codec
+                .encode(&addr(i), 1_000_000_000_000_000_000u128 + u128::from(i))
+                .unwrap();
             genesis_store.insert(addr(i), &v).unwrap();
         }
         let cells0 = genesis_store.snapshot_cells();
@@ -951,14 +988,17 @@ mod tests {
             .collect();
 
         // ── Claim 1: delta content, against a real IkpirServer oracle. ──
-        let ikpir_store = Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
+        let ikpir_store =
+            Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
         let mut ikpir: ikpir_server::IkpirServer<Segmented2aryScheme, SimplePirBackend> =
             ikpir_server::IkpirServer::new(ikpir_store, cfg.clone());
 
         let mut per_mutation_deltas = Vec::with_capacity(changes.len());
         for (a, bal) in &changes {
             let v = codec.encode(a, *bal).unwrap();
-            let bundle = ikpir.update(a, &v).expect("every address was pre-inserted into genesis");
+            let bundle = ikpir
+                .update(a, &v)
+                .expect("every address was pre-inserted into genesis");
             per_mutation_deltas.push(BlockDelta {
                 block: bundle.epoch,
                 per_segment: bundle.per_segment_row_deltas,
@@ -966,13 +1006,20 @@ mod tests {
         }
         let ikpir_coalesced = BlockDelta::coalesce(&per_mutation_deltas).unwrap();
 
-        let risepir_store = Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
+        let risepir_store =
+            Segmented2aryCuckooKVStore::from_cells(cells0.clone(), params0, n0).unwrap();
         let mut risepir: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             RisePirServer::new(risepir_store, cfg.clone(), codec, 0);
         let genesis_bundle = risepir.setup();
 
         let n = changes.len() as u64;
-        let risepir_delta = risepir.apply_block(&BlockUpdate { block: n, changes: changes.clone(), credits: vec![] }).unwrap();
+        let risepir_delta = risepir
+            .apply_block(&BlockUpdate {
+                block: n,
+                changes: changes.clone(),
+                credits: vec![],
+            })
+            .unwrap();
 
         assert!(
             risepir_delta.per_segment.iter().any(|seg| !seg.is_empty()),
@@ -1027,7 +1074,8 @@ mod tests {
             "sanity: at least one segment's hint must actually change from genesis, or the \
              bit-identity check below is vacuous"
         );
-        for (j, (replayed, final_hint)) in replay_hints.iter().zip(&final_bundle.hints).enumerate() {
+        for (j, (replayed, final_hint)) in replay_hints.iter().zip(&final_bundle.hints).enumerate()
+        {
             assert_eq!(
                 replayed.data, final_hint.data,
                 "segment {j}: one batched patch must be bit-identical to N sequential patches \
@@ -1056,8 +1104,12 @@ mod tests {
         let cfg = config();
 
         let mut genesis_store = empty_store(&geom);
-        genesis_store.insert(addr(0), &codec.encode(&addr(0), 1_000u128).unwrap()).unwrap();
-        genesis_store.insert(addr(1), &codec.encode(&addr(1), 2_000u128).unwrap()).unwrap();
+        genesis_store
+            .insert(addr(0), &codec.encode(&addr(0), 1_000u128).unwrap())
+            .unwrap();
+        genesis_store
+            .insert(addr(1), &codec.encode(&addr(1), 2_000u128).unwrap())
+            .unwrap();
         let cells0 = genesis_store.snapshot_cells();
         let params0 = genesis_store.params();
         let n0 = genesis_store.num_items();
@@ -1081,7 +1133,11 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err, ServerError::Encode(ValueError::BalanceOverflow));
-        assert_eq!(s.block(), 0, "failed block 1 must not advance the block counter");
+        assert_eq!(
+            s.block(),
+            0,
+            "failed block 1 must not advance the block counter"
+        );
 
         // Block 2: only addr(1) changes.
         let delta2 = s
@@ -1135,7 +1191,11 @@ mod tests {
 
         let err = s.apply_block(&update).unwrap_err();
         assert_eq!(err, ServerError::Encode(ValueError::BalanceOverflow));
-        assert_eq!(s.block(), 0, "a rejected block must not advance the server's block");
+        assert_eq!(
+            s.block(),
+            0,
+            "a rejected block must not advance the server's block"
+        );
 
         // The boundary value itself must still succeed, proving this
         // isn't an off-by-one rejecting valid balances too.
@@ -1168,7 +1228,11 @@ mod tests {
             delta.per_segment.iter().all(|seg| seg.is_empty()),
             "a no-op delete must produce an empty delta"
         );
-        assert_eq!(s.block(), 1, "even a no-op block advances the block counter");
+        assert_eq!(
+            s.block(),
+            1,
+            "even a no-op block advances the block counter"
+        );
     }
 
     /// `balance == 0` deletes a present key. Insert K, delete it, then
@@ -1231,8 +1295,17 @@ mod tests {
         let mut deltas = Vec::new();
 
         for block in 1u64..=8 {
-            let changes = vec![(addr(block), 42_000_000_000_000_000_000u128 + u128::from(block))];
-            let d = s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let changes = vec![(
+                addr(block),
+                42_000_000_000_000_000_000u128 + u128::from(block),
+            )];
+            let d = s
+                .apply_block(&BlockUpdate {
+                    block,
+                    changes,
+                    credits: vec![],
+                })
+                .unwrap();
             ring.push(d.clone());
             deltas.push(d);
         }
@@ -1272,7 +1345,13 @@ mod tests {
                     (pool[idx], balance)
                 })
                 .collect();
-            let d = s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let d = s
+                .apply_block(&BlockUpdate {
+                    block,
+                    changes,
+                    credits: vec![],
+                })
+                .unwrap();
             deltas.push(d);
         }
 
@@ -1318,18 +1397,32 @@ mod tests {
             .zip(&bundle.hints)
             .map(|(p, h)| SimplePirBackend::client_setup(p, h))
             .collect();
-        let queries: Vec<SimpleQuery> = states.iter_mut().map(|st| SimplePirBackend::client_query(st, 0)).collect();
+        let queries: Vec<SimpleQuery> = states
+            .iter_mut()
+            .map(|st| SimplePirBackend::client_query(st, 0))
+            .collect();
 
         for block in 1u64..=50 {
-            let changes = vec![(addr(block), 7_000_000_000_000_000_000u128 + u128::from(block))];
-            s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let changes = vec![(
+                addr(block),
+                7_000_000_000_000_000_000u128 + u128::from(block),
+            )];
+            s.apply_block(&BlockUpdate {
+                block,
+                changes,
+                credits: vec![],
+            })
+            .unwrap();
         }
 
         let (responses, answered_at) = s
             .answer(&queries)
             .expect("answer must succeed regardless of how stale the query's construction is");
         assert_eq!(responses.len(), geom.arity as usize);
-        assert_eq!(answered_at, 50, "the response must name the server's actual head");
+        assert_eq!(
+            answered_at, 50,
+            "the response must name the server's actual head"
+        );
     }
 
     // ── 7. malformed_query_rejected ─────────────────────────────────────
@@ -1359,8 +1452,10 @@ mod tests {
             .zip(&bundle.hints)
             .map(|(p, h)| SimplePirBackend::client_setup(p, h))
             .collect();
-        let mut too_many: Vec<SimpleQuery> =
-            states.iter_mut().map(|st| SimplePirBackend::client_query(st, 0)).collect();
+        let mut too_many: Vec<SimpleQuery> = states
+            .iter_mut()
+            .map(|st| SimplePirBackend::client_query(st, 0))
+            .collect();
         too_many.push(too_many[0].clone());
         assert_eq!(
             s.answer(&too_many).unwrap_err(),
@@ -1415,8 +1510,22 @@ mod verified_apply_tests {
 
     fn tiny_server() -> RisePirServer<Segmented2aryScheme, SimplePirBackend> {
         let codec = codec();
-        let pb = simple_max_plaintext_bits(2, NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, codec.value_bits(), pb).unwrap();
+        let pb = simple_max_plaintext_bits(
+            2,
+            NUM_BUCKETS / 2,
+            BUCKET_SIZE,
+            FP_BITS,
+            codec.value_bits(),
+            SimpleParams::DEFAULT_SIGMA,
+        );
+        let store = Segmented2aryCuckooKVStore::new(
+            NUM_BUCKETS,
+            BUCKET_SIZE,
+            FP_BITS,
+            codec.value_bits(),
+            pb,
+        )
+        .unwrap();
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
     }
 
@@ -1441,7 +1550,11 @@ mod verified_apply_tests {
     }
 
     fn block(n: u64, changes: Vec<(AddressHash, Balance)>) -> BlockUpdate {
-        BlockUpdate { block: n, changes, credits: vec![] }
+        BlockUpdate {
+            block: n,
+            changes,
+            credits: vec![],
+        }
     }
 
     /// The regression ADR-0017 exists for: a `(A, 0)` change for an
@@ -1495,8 +1608,16 @@ mod verified_apply_tests {
         let err = s.apply_block(&block(3, vec![(a, 0)])).unwrap_err();
         assert_eq!(err, ServerError::FingerprintAmbiguity { shadowed: true });
         assert_eq!(s.block(), 2, "rejected blocks must not advance the head");
-        assert_eq!(s.balance_of(&a).unwrap(), Some(a_balance), "A untouched after rejects");
-        assert_eq!(s.balance_of(&b).unwrap(), Some(b_balance), "B untouched after rejects");
+        assert_eq!(
+            s.balance_of(&a).unwrap(),
+            Some(a_balance),
+            "A untouched after rejects"
+        );
+        assert_eq!(
+            s.balance_of(&b).unwrap(),
+            Some(b_balance),
+            "B untouched after rejects"
+        );
 
         // B is Own (first match) — deleting it is safe, and un-shadows A.
         s.apply_block(&block(3, vec![(b, 0)])).unwrap();
@@ -1564,6 +1685,10 @@ mod verified_apply_tests {
         assert_eq!(err, ServerError::Encode(ValueError::BalanceOverflow));
 
         assert_eq!(s.block(), 1);
-        assert_eq!(s.balance_of(&k).unwrap(), Some(205), "prior state survives the rejects");
+        assert_eq!(
+            s.balance_of(&k).unwrap(),
+            Some(205),
+            "prior state survives the rejects"
+        );
     }
 }

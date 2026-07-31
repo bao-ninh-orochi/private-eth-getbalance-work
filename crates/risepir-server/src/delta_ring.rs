@@ -199,7 +199,10 @@ mod tests {
         // now-evicted blocks 2 and 3's worth of history.
         assert_eq!(ring.range(1, 5), None);
         // But a range fully inside the retained window works.
-        assert_eq!(ring.range(3, 5), BlockDelta::coalesce(&[delta(4), delta(5)]).ok());
+        assert_eq!(
+            ring.range(3, 5),
+            BlockDelta::coalesce(&[delta(4), delta(5)]).ok()
+        );
     }
 
     #[test]
@@ -207,7 +210,11 @@ mod tests {
         let mut ring = DeltaRing::new(10);
         ring.push(delta(1));
         ring.push(delta(2));
-        assert_eq!(ring.range(0, 5), None, "to_block beyond head must not fabricate a result");
+        assert_eq!(
+            ring.range(0, 5),
+            None,
+            "to_block beyond head must not fabricate a result"
+        );
     }
 
     #[test]

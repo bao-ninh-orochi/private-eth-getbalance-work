@@ -1,0 +1,15 @@
+# Commits that touched formatting only. `git blame` should look straight
+# through them to whoever actually wrote the line.
+#
+# Not applied automatically — git needs to be told once, per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (GitHub's blame view honours this file without any configuration.)
+#
+# Only add a rev here if it is a *pure* mechanical reformat, verified to
+# change no behaviour. A commit that reformats and edits at the same time
+# must not be listed: hiding it would hide the edit too.
+
+# style: apply cargo fmt across the workspace (58 files, +4769/-1217)
+4491d5831213698fa81230d5a7a2c2214b06dd33

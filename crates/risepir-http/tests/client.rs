@@ -42,8 +42,15 @@ async fn spawn_node() -> (String, MockFeed) {
     let feed = MockFeed::new(cfg.clone());
     let value_codec = codec();
 
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -62,7 +69,9 @@ async fn spawn_node() -> (String, MockFeed) {
     let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     let router = NodeState::router(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
         axum::serve(listener, router).await.expect("axum::serve");
@@ -83,19 +92,32 @@ async fn setup_head_and_answer_round_trip_over_real_http() {
     let bundle = pir.setup().await.expect("GET /setup");
     assert_eq!(bundle.params.arity(), ARITY as usize);
     assert_eq!(bundle.block, 0);
-    let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let reshape_row_width_per_seg: Vec<u32> = bundle
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_row_width)
+        .collect();
     let arity = bundle.params.arity();
     let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
 
-    assert_eq!(pir.head().await.expect("GET /head"), 0, "no blocks applied yet");
+    assert_eq!(
+        pir.head().await.expect("GET /head"),
+        0,
+        "no blocks applied yet"
+    );
 
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
     let addr = MockFeed::address_for(0); // a real genesis address
     let (queries, ctx) = client.build_query(&addr);
 
-    let (responses, at_block) = pir.answer(&queries, &epoch, &reshape_row_width_per_seg, arity).await.expect("POST /answer");
+    let (responses, at_block) = pir
+        .answer(&queries, &epoch, &reshape_row_width_per_seg, arity)
+        .await
+        .expect("POST /answer");
     assert_eq!(at_block, 0);
-    let result = client.finish(&addr, &ctx, responses, at_block).expect("finish");
+    let result = client
+        .finish(&addr, &ctx, responses, at_block)
+        .expect("finish");
     assert_eq!(result, Lookup::Found(feed.balance_of(&addr)));
 }
 
@@ -124,8 +146,15 @@ async fn sync_pulls_a_real_delta_over_http() {
     };
     let mut feed = MockFeed::new(cfg.clone());
     let value_codec = codec();
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -142,7 +171,9 @@ async fn sync_pulls_a_real_delta_over_http() {
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(300), true));
     let router = NodeState::router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
         axum::serve(listener, router).await.expect("axum::serve");
@@ -153,12 +184,19 @@ async fn sync_pulls_a_real_delta_over_http() {
     let bundle = pir.setup().await.expect("GET /setup");
     let plaintext_bits = bundle.params.plaintext_bits;
     let arity = bundle.params.arity();
-    let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let reshape_row_width_per_seg: Vec<u32> = bundle
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_row_width)
+        .collect();
     let epoch = risepir_http::wire::lineage_epoch(&bundle.backend_params);
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
 
     for _ in 0..10 {
-        let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         state.apply_block(&upd).await.expect("apply_block");
     }
     let head = pir.head().await.expect("GET /head");
@@ -179,7 +217,9 @@ async fn sync_pulls_a_real_delta_over_http() {
         .answer(&queries, &epoch, &reshape_row_width_per_seg, arity)
         .await
         .expect("POST /answer");
-    let result = client.finish(&live_addr, &ctx, responses, at_block).expect("finish");
+    let result = client
+        .finish(&live_addr, &ctx, responses, at_block)
+        .expect("finish");
     assert_eq!(result, Lookup::Found(feed.balance_of(&live_addr)));
 
     // Out-of-window sync (from a block older than genesis's own history
@@ -192,7 +232,10 @@ async fn sync_pulls_a_real_delta_over_http() {
         .sync(0, 200, &epoch, plaintext_bits, arity as u32)
         .await
         .expect("GET /sync (out of window)");
-    assert_eq!(out_of_window, None, "409 must map to Ok(None), never Err or a fabricated delta");
+    assert_eq!(
+        out_of_window, None,
+        "409 must map to Ok(None), never Err or a fabricated delta"
+    );
 
     // A wrong lineage token is the *other* 409 (ADR-0033): same
     // `Ok(None)` mapping — the caller's recovery (a fresh /setup) is
@@ -202,7 +245,10 @@ async fn sync_pulls_a_real_delta_over_http() {
         .sync(0, head, "0000000000000000", plaintext_bits, arity as u32)
         .await
         .expect("GET /sync (wrong epoch)");
-    assert_eq!(wrong_epoch, None, "an epoch mismatch must map to Ok(None), never a delta");
+    assert_eq!(
+        wrong_epoch, None,
+        "an epoch mismatch must map to Ok(None), never a delta"
+    );
 }
 
 /// `PirHttpClient::head`/`setup`/`answer` against a server that returns a

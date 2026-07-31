@@ -51,8 +51,15 @@ fn bootstrap_node() -> (Arc<NodeState>, MockFeed) {
     };
     let feed = MockFeed::new(cfg.clone());
     let value_codec = codec();
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -78,7 +85,10 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
         .await
         .unwrap();
     let status = resp.status();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     (status, body)
 }
 
@@ -94,8 +104,15 @@ async fn same_universe_twice_is_two_epochs_and_clients_derive_them() {
     let (b, _) = bootstrap_node();
 
     assert_eq!(a.epoch().len(), 16, "epoch is 16 lowercase-hex chars");
-    assert!(a.epoch().chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-    assert_ne!(a.epoch(), b.epoch(), "independently sampled seeds ⇒ distinct lineage tokens");
+    assert!(a
+        .epoch()
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert_ne!(
+        a.epoch(),
+        b.epoch(),
+        "independently sampled seeds ⇒ distinct lineage tokens"
+    );
 
     for state in [&a, &b] {
         let app = NodeState::router(state.clone());
@@ -122,28 +139,45 @@ async fn ring_covered_sync_with_other_lineages_epoch_is_refused() {
     // bootstrap-1 client pinned at 0 would, pre-ADR-0033, have been fed
     // bootstrap-2 deltas.
     for _ in 0..10 {
-        let upd = feed_b.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed_b
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         b.apply_block(&upd).await.expect("apply_block");
     }
     let app_b = NodeState::router(b.clone());
 
     // Sanity: with B's own epoch the range is served.
     let (status, _) = get(&app_b, &format!("/sync?from=0&to=10&epoch={}", b.epoch())).await;
-    assert_eq!(status, StatusCode::OK, "sanity: the range itself is inside B's ring");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "sanity: the range itself is inside B's ring"
+    );
 
     // The cross-lineage request: A's epoch against B's ring. 409, never a
     // delta.
     let (status, body) = get(&app_b, &format!("/sync?from=0&to=10&epoch={}", a.epoch())).await;
-    assert_eq!(status, StatusCode::CONFLICT, "a ring-covered range must still be refused across lineages");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a ring-covered range must still be refused across lineages"
+    );
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("epoch mismatch"), "the refusal must say why: {text}");
+    assert!(
+        text.contains("epoch mismatch"),
+        "the refusal must say why: {text}"
+    );
 
     // And with no epoch at all — a pre-ADR-0033 client — the same refusal
     // (with its own message), not a silent grandfathering-in.
     let (status, body) = get(&app_b, "/sync?from=0&to=10").await;
     assert_eq!(status, StatusCode::CONFLICT);
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("missing epoch"), "absence is refused with its own message: {text}");
+    assert!(
+        text.contains("missing epoch"),
+        "absence is refused with its own message: {text}"
+    );
 }
 
 /// `/delta/{block}` is `Cache-Control: immutable`, so its refusal is a
@@ -154,7 +188,10 @@ async fn ring_covered_sync_with_other_lineages_epoch_is_refused() {
 async fn delta_by_block_is_keyed_by_epoch() {
     let (a, mut feed) = bootstrap_node();
     for _ in 0..3 {
-        let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         a.apply_block(&upd).await.expect("apply_block");
     }
     let app = NodeState::router(a.clone());
@@ -163,9 +200,17 @@ async fn delta_by_block_is_keyed_by_epoch() {
     assert_eq!(status, StatusCode::OK);
 
     let (status, _) = get(&app, "/delta/2?epoch=0000000000000000").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "another lineage's URL is permanently absent");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another lineage's URL is permanently absent"
+    );
     let (status, _) = get(&app, "/delta/2").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "an epoch-less URL is permanently absent");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an epoch-less URL is permanently absent"
+    );
 }
 
 /// `GET /setup` serves the epoch and mode as headers (the atomic
@@ -178,14 +223,33 @@ async fn setup_and_head_carry_epoch_and_mode_headers() {
 
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/setup").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/setup")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let etag = resp.headers().get(header::ETAG).unwrap().to_str().unwrap().to_string();
-    assert_eq!(etag, format!("\"setup-{}-0\"", a.epoch()), "the validator names the lineage");
+    let etag = resp
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        etag,
+        format!("\"setup-{}-0\"", a.epoch()),
+        "the validator names the lineage"
+    );
     assert_eq!(resp.headers().get("x-risepir-epoch").unwrap(), a.epoch());
-    assert_eq!(resp.headers().get("x-risepir-mode").unwrap(), "1", "this mock deployment is complete");
+    assert_eq!(
+        resp.headers().get("x-risepir-mode").unwrap(),
+        "1",
+        "this mock deployment is complete"
+    );
 
     let resp = app
         .clone()
@@ -199,7 +263,11 @@ async fn setup_and_head_carry_epoch_and_mode_headers() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
-    assert_eq!(resp.headers().get("x-risepir-epoch").unwrap(), a.epoch(), "the 304 repeats the headers");
+    assert_eq!(
+        resp.headers().get("x-risepir-epoch").unwrap(),
+        a.epoch(),
+        "the 304 repeats the headers"
+    );
     assert_eq!(resp.headers().get("x-risepir-mode").unwrap(), "1");
 
     let resp = app

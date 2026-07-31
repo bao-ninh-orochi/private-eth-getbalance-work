@@ -110,7 +110,13 @@ const CAT_ZERO_BALANCE: &str = "zero-balance";
 /// The five required account categories (see the module docs), in report
 /// order. Every one must be non-empty in the final sample for
 /// [`ConformanceReport::passed`] to be `true`.
-pub const CATEGORIES: [&str; 5] = [CAT_NEVER_EXISTED, CAT_CONTRACT, CAT_HIGH_ACTIVITY, CAT_CREATED, CAT_ZERO_BALANCE];
+pub const CATEGORIES: [&str; 5] = [
+    CAT_NEVER_EXISTED,
+    CAT_CONTRACT,
+    CAT_HIGH_ACTIVITY,
+    CAT_CREATED,
+    CAT_ZERO_BALANCE,
+];
 
 /// Configuration for one conformance run.
 ///
@@ -193,7 +199,11 @@ impl fmt::Display for ConformanceReport {
         writeln!(f, "Conformance report")?;
         writeln!(f, "  blocks:           {}", self.blocks)?;
         writeln!(f, "  checkpoints run:  {}", self.checkpoints_run)?;
-        writeln!(f, "  sample size:      {} (target >= {})", self.sample_size, self.min_addresses)?;
+        writeln!(
+            f,
+            "  sample size:      {} (target >= {})",
+            self.sample_size, self.min_addresses
+        )?;
         writeln!(f, "  total checks:     {}", self.total_checks)?;
         writeln!(f, "  mismatches:       {}", self.mismatches.len())?;
         writeln!(f, "  category counts (final sample):")?;
@@ -239,8 +249,15 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
         inserts_per_block,
         deletes_per_block,
     });
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-        .expect("geometry: harness-configured account count/codec must be a valid geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &codec,
+        Backend::Simple,
+    )
+    .expect("geometry: harness-configured account count/codec must be a valid geometry");
 
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
@@ -260,7 +277,8 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
     let mut server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(cfg.lwe_dim), codec, 0);
     let mut ring = DeltaRing::new(cfg.blocks as usize + 8); // retain the whole run: /sync-equivalent never ages out
-    let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(server.setup(), codec);
+    let mut client: RisePirClient<SimplePirBackend> =
+        RisePirClient::from_setup(server.setup(), codec);
 
     // ── Pre-selected category pools ─────────────────────────────────────
     let genesis_set: HashSet<AddressHash> = genesis_snapshot.iter().map(|(a, _)| *a).collect();
@@ -275,7 +293,9 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
 
     // CONTRACT: a nominal label over genesis ids 0..contract_count — see
     // the module docs (MockFeed has no EOA/contract distinction).
-    let contract: Vec<AddressHash> = (0..contract_count as u64).map(MockFeed::address_for).collect();
+    let contract: Vec<AddressHash> = (0..contract_count as u64)
+        .map(MockFeed::address_for)
+        .collect();
     let contract_set: HashSet<AddressHash> = contract.iter().copied().collect();
     debug_assert!(
         contract.iter().all(|a| genesis_set.contains(a)),
@@ -289,8 +309,9 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
     // probability.
     let max_minted_id = cfg.num_genesis_keys + inserts_per_block as u64 * cfg.blocks;
     let never_existed_base = max_minted_id + 1_000_000;
-    let never_existed: Vec<AddressHash> =
-        (0..never_existed_count as u64).map(|i| MockFeed::address_for(never_existed_base + i)).collect();
+    let never_existed: Vec<AddressHash> = (0..never_existed_count as u64)
+        .map(|i| MockFeed::address_for(never_existed_base + i))
+        .collect();
     for a in &never_existed {
         assert_eq!(
             feed.balance_of(a),
@@ -313,7 +334,9 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
     let mut deleted: Vec<AddressHash> = Vec::new();
     let mut known: HashSet<AddressHash> = genesis_set.clone();
 
-    let checkpoint_set: HashSet<u64> = checkpoint_blocks(cfg.blocks, cfg.checkpoints).into_iter().collect();
+    let checkpoint_set: HashSet<u64> = checkpoint_blocks(cfg.blocks, cfg.checkpoints)
+        .into_iter()
+        .collect();
 
     let mut total_checks: u64 = 0;
     let mut mismatches: Vec<String> = Vec::new();
@@ -334,26 +357,68 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
             }
         }
 
-        let delta = server.apply_block(&upd).expect("apply_block: harness geometry must never hit TableFull");
-        client.ingest_delta(&delta).expect("ingest_delta: contiguous by construction (single producer)");
+        let delta = server
+            .apply_block(&upd)
+            .expect("apply_block: harness geometry must never hit TableFull");
+        client
+            .ingest_delta(&delta)
+            .expect("ingest_delta: contiguous by construction (single producer)");
         ring.push(delta);
 
         if checkpoint_set.contains(&block_num) {
-            let full = full_candidates(&feed, &genesis_set, &contract_set, &activity, &created, &deleted);
+            let full = full_candidates(
+                &feed,
+                &genesis_set,
+                &contract_set,
+                &activity,
+                &created,
+                &deleted,
+            );
             let sample = build_sample(&never_existed, &contract, &full, per_bucket, None);
-            total_checks += diff_sample(&mut client, &server, &feed, &sample, block_num, &mut mismatches);
+            total_checks += diff_sample(
+                &mut client,
+                &server,
+                &feed,
+                &sample,
+                block_num,
+                &mut mismatches,
+            );
             checkpoints_run += 1;
         }
     }
 
     assert_eq!(server.block(), cfg.blocks);
-    assert_eq!(client.pinned_block(), 0, "harness never GCs; hint stays pinned at genesis throughout");
+    assert_eq!(
+        client.pinned_block(),
+        0,
+        "harness never GCs; hint stays pinned at genesis throughout"
+    );
     assert_eq!(ring.head(), Some(cfg.blocks));
 
     // ── Final full-sample diff: pad to >= min_addresses ─────────────────
-    let full = full_candidates(&feed, &genesis_set, &contract_set, &activity, &created, &deleted);
-    let final_sample = build_sample(&never_existed, &contract, &full, per_bucket, Some(cfg.min_addresses));
-    total_checks += diff_sample(&mut client, &server, &feed, &final_sample, cfg.blocks, &mut mismatches);
+    let full = full_candidates(
+        &feed,
+        &genesis_set,
+        &contract_set,
+        &activity,
+        &created,
+        &deleted,
+    );
+    let final_sample = build_sample(
+        &never_existed,
+        &contract,
+        &full,
+        per_bucket,
+        Some(cfg.min_addresses),
+    );
+    total_checks += diff_sample(
+        &mut client,
+        &server,
+        &feed,
+        &final_sample,
+        cfg.blocks,
+        &mut mismatches,
+    );
     checkpoints_run += 1;
 
     let category_counts = tally(&final_sample);
@@ -378,7 +443,9 @@ pub fn run(cfg: &ConformanceConfig) -> ConformanceReport {
 
     let passed = mismatches.is_empty()
         && sample_size >= cfg.min_addresses
-        && CATEGORIES.iter().all(|c| category_counts.get(*c).copied().unwrap_or(0) > 0);
+        && CATEGORIES
+            .iter()
+            .all(|c| category_counts.get(*c).copied().unwrap_or(0) > 0);
 
     ConformanceReport {
         passed,
@@ -448,10 +515,18 @@ fn full_candidates(
 ) -> FullCandidates {
     // ZERO-BALANCE: every observed delete, excluding contract-labelled ids
     // (kept exclusive of the `contract` category — see the module docs).
-    let zero_balance: Vec<AddressHash> = deleted.iter().copied().filter(|a| !contract_set.contains(a)).collect();
+    let zero_balance: Vec<AddressHash> = deleted
+        .iter()
+        .copied()
+        .filter(|a| !contract_set.contains(a))
+        .collect();
 
     // CREATED-DURING-RUN: first-appearance keys still live right now.
-    let created_live: Vec<AddressHash> = created.iter().copied().filter(|a| feed.balance_of(a) != 0).collect();
+    let created_live: Vec<AddressHash> = created
+        .iter()
+        .copied()
+        .filter(|a| feed.balance_of(a) != 0)
+        .collect();
 
     // HIGH-ACTIVITY: genesis keys (excluding `contract`), still live,
     // ranked by touch count descending (ties broken by address bytes for
@@ -459,12 +534,18 @@ fn full_candidates(
     let mut ranked: Vec<(AddressHash, u64)> = activity
         .iter()
         .map(|(a, c)| (*a, *c))
-        .filter(|(a, _)| genesis_set.contains(a) && !contract_set.contains(a) && feed.balance_of(a) != 0)
+        .filter(|(a, _)| {
+            genesis_set.contains(a) && !contract_set.contains(a) && feed.balance_of(a) != 0
+        })
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let high_activity: Vec<AddressHash> = ranked.into_iter().map(|(a, _)| a).collect();
 
-    FullCandidates { zero_balance, created: created_live, high_activity }
+    FullCandidates {
+        zero_balance,
+        created: created_live,
+        high_activity,
+    }
 }
 
 /// Assembles a sample from the fixed pools (`never_existed`, `contract`)
@@ -488,12 +569,21 @@ fn build_sample(
     per_bucket: usize,
     min_total: Option<usize>,
 ) -> Vec<(AddressHash, &'static str)> {
-    let lens = [full.zero_balance.len(), full.created.len(), full.high_activity.len()];
+    let lens = [
+        full.zero_balance.len(),
+        full.created.len(),
+        full.high_activity.len(),
+    ];
     let mut caps = [per_bucket, per_bucket, per_bucket]; // [zero_balance, created, high_activity]
 
     if let Some(target) = min_total {
         let fixed = never_existed.len() + contract.len();
-        let capped_total: usize = fixed + caps.iter().zip(&lens).map(|(c, l)| (*c).min(*l)).sum::<usize>();
+        let capped_total: usize = fixed
+            + caps
+                .iter()
+                .zip(&lens)
+                .map(|(c, l)| (*c).min(*l))
+                .sum::<usize>();
         let mut deficit = target.saturating_sub(capped_total);
         for idx in [2usize, 1, 0] {
             // priority: high-activity, created, zero-balance
@@ -508,13 +598,29 @@ fn build_sample(
     }
 
     let mut sample: Vec<(AddressHash, &'static str)> = Vec::with_capacity(
-        never_existed.len() + contract.len() + caps.iter().zip(&lens).map(|(c, l)| (*c).min(*l)).sum::<usize>(),
+        never_existed.len()
+            + contract.len()
+            + caps
+                .iter()
+                .zip(&lens)
+                .map(|(c, l)| (*c).min(*l))
+                .sum::<usize>(),
     );
     sample.extend(never_existed.iter().map(|a| (*a, CAT_NEVER_EXISTED)));
     sample.extend(contract.iter().map(|a| (*a, CAT_CONTRACT)));
-    sample.extend(full.zero_balance.iter().take(caps[0]).map(|a| (*a, CAT_ZERO_BALANCE)));
+    sample.extend(
+        full.zero_balance
+            .iter()
+            .take(caps[0])
+            .map(|a| (*a, CAT_ZERO_BALANCE)),
+    );
     sample.extend(full.created.iter().take(caps[1]).map(|a| (*a, CAT_CREATED)));
-    sample.extend(full.high_activity.iter().take(caps[2]).map(|a| (*a, CAT_HIGH_ACTIVITY)));
+    sample.extend(
+        full.high_activity
+            .iter()
+            .take(caps[2])
+            .map(|a| (*a, CAT_HIGH_ACTIVITY)),
+    );
     sample
 }
 
@@ -523,7 +629,8 @@ fn build_sample(
 /// members, so callers can detect "empty category" via a plain lookup
 /// rather than an absent key.
 fn tally(sample: &[(AddressHash, &'static str)]) -> BTreeMap<String, usize> {
-    let mut counts: BTreeMap<String, usize> = CATEGORIES.iter().map(|c| ((*c).to_string(), 0)).collect();
+    let mut counts: BTreeMap<String, usize> =
+        CATEGORIES.iter().map(|c| ((*c).to_string(), 0)).collect();
     for (_, cat) in sample {
         *counts.entry((*cat).to_string()).or_insert(0) += 1;
     }
@@ -543,10 +650,12 @@ fn diff_sample(
 ) -> u64 {
     for &(addr, category) in sample {
         let (queries, ctx) = client.build_query(&addr);
-        let (resp, at_block) = server.answer(&queries).expect("answer: malformed query is a harness bug");
-        let lookup = client
-            .finish(&addr, &ctx, resp, at_block)
-            .expect("finish: block/context mismatch is a harness wiring bug, not a conformance failure");
+        let (resp, at_block) = server
+            .answer(&queries)
+            .expect("answer: malformed query is a harness bug");
+        let lookup = client.finish(&addr, &ctx, resp, at_block).expect(
+            "finish: block/context mismatch is a harness wiring bug, not a conformance failure",
+        );
 
         let expected: Balance = feed.balance_of(&addr);
         let ok = match lookup {
@@ -556,7 +665,9 @@ fn diff_sample(
         };
         if !ok {
             let addr_hex = hex_addr(&addr);
-            mismatches.push(format!("block {block}: [{category}] {addr_hex} expected={expected} got={lookup:?}"));
+            mismatches.push(format!(
+                "block {block}: [{category}] {addr_hex} expected={expected} got={lookup:?}"
+            ));
         }
     }
     sample.len() as u64

@@ -323,7 +323,12 @@ impl ValueCodec {
         let num_bytes = (value_bits as usize).div_ceil(8);
         let mut buf = vec![0u8; num_bytes];
         let mut pos = 0usize;
-        write_bits(&mut buf, &mut pos, u128::from(self.key_tag(addr)), self.key_tag_bits);
+        write_bits(
+            &mut buf,
+            &mut pos,
+            u128::from(self.key_tag(addr)),
+            self.key_tag_bits,
+        );
         write_bits(&mut buf, &mut pos, balance, self.balance_bits);
         let checksum = self.checksum(balance);
         write_bits(&mut buf, &mut pos, u128::from(checksum), self.checksum_bits);
@@ -507,7 +512,10 @@ mod tests {
         };
         let addr = test_addr(9);
         assert_eq!(codec.encode(&addr, 256), Err(ValueError::BalanceOverflow));
-        assert_eq!(codec.encode(&addr, Balance::MAX), Err(ValueError::BalanceOverflow));
+        assert_eq!(
+            codec.encode(&addr, Balance::MAX),
+            Err(ValueError::BalanceOverflow)
+        );
         // The boundary itself must still succeed, proving this isn't an
         // off-by-one rejecting valid balances too.
         assert!(codec.encode(&addr, 255).is_ok());

@@ -55,8 +55,9 @@ use crate::node::ReconcileHealth;
 /// docs state. Retuning this list is a code change, not a config knob —
 /// deliberately: a wrong bucket boundary only makes the histogram coarser
 /// in one region, never wrong, so it is not worth a flag.
-const ANSWER_DURATION_BUCKETS_SECONDS: &[f64] =
-    &[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+const ANSWER_DURATION_BUCKETS_SECONDS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
 /// A cumulative histogram over [`ANSWER_DURATION_BUCKETS_SECONDS`] plus an
 /// implicit `+Inf` bucket — the standard Prometheus histogram shape: each
@@ -289,7 +290,14 @@ fn format_labels(pairs: &[(&str, &str)]) -> String {
 /// one `name{labels} value` line. `ty` is `"gauge"` or `"counter"` (a
 /// plain `&str`, not an enum — this module has exactly two call sites'
 /// worth of variance and a two-arm enum would not earn its keep).
-fn write_metric(out: &mut String, name: &str, help: &str, ty: &str, labels: &[(&str, &str)], value: impl std::fmt::Display) {
+fn write_metric(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    ty: &str,
+    labels: &[(&str, &str)],
+    value: impl std::fmt::Display,
+) {
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} {ty}");
     let _ = writeln!(out, "{name}{} {value}", format_labels(labels));
@@ -323,7 +331,14 @@ pub(crate) fn render(s: &Snapshot) -> String {
     );
 
     // ── block height / lag ──────────────────────────────────────────────
-    write_metric(&mut out, "risepir_head_block", "The PIR server's current applied head block.", "gauge", &[], s.head_block);
+    write_metric(
+        &mut out,
+        "risepir_head_block",
+        "The PIR server's current applied head block.",
+        "gauge",
+        &[],
+        s.head_block,
+    );
     write_metric(
         &mut out,
         "risepir_finalized_block",
@@ -342,7 +357,14 @@ pub(crate) fn render(s: &Snapshot) -> String {
     );
 
     // ── store occupancy ──────────────────────────────────────────────────
-    write_metric(&mut out, "risepir_store_items", "Accounts currently held in the store.", "gauge", &[], s.store_items);
+    write_metric(
+        &mut out,
+        "risepir_store_items",
+        "Accounts currently held in the store.",
+        "gauge",
+        &[],
+        s.store_items,
+    );
     write_metric(
         &mut out,
         "risepir_store_capacity",
@@ -351,8 +373,19 @@ pub(crate) fn render(s: &Snapshot) -> String {
         &[],
         s.store_capacity,
     );
-    let load_factor = if s.store_capacity == 0 { 0.0 } else { s.store_items as f64 / s.store_capacity as f64 };
-    write_metric(&mut out, "risepir_store_load_factor", "risepir_store_items / risepir_store_capacity.", "gauge", &[], load_factor);
+    let load_factor = if s.store_capacity == 0 {
+        0.0
+    } else {
+        s.store_items as f64 / s.store_capacity as f64
+    };
+    write_metric(
+        &mut out,
+        "risepir_store_load_factor",
+        "risepir_store_items / risepir_store_capacity.",
+        "gauge",
+        &[],
+        load_factor,
+    );
 
     // ── setup cache ───────────────────────────────────────────────────────
     write_metric(
@@ -382,18 +415,32 @@ pub(crate) fn render(s: &Snapshot) -> String {
         "# HELP {name} Wall-clock time inside RisePirServer::answer(&queries) only — excludes lock wait and wire decode/encode."
     );
     let _ = writeln!(out, "# TYPE {name} histogram");
-    for (le, count) in ANSWER_DURATION_BUCKETS_SECONDS.iter().zip(s.answer_duration.bucket_counts.iter()) {
+    for (le, count) in ANSWER_DURATION_BUCKETS_SECONDS
+        .iter()
+        .zip(s.answer_duration.bucket_counts.iter())
+    {
         let _ = writeln!(out, "{name}_bucket{{le=\"{le}\"}} {count}");
     }
-    let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {}", s.answer_duration.count());
+    let _ = writeln!(
+        out,
+        "{name}_bucket{{le=\"+Inf\"}} {}",
+        s.answer_duration.count()
+    );
     let _ = writeln!(out, "{name}_sum {}", s.answer_duration.sum_seconds);
     let _ = writeln!(out, "{name}_count {}", s.answer_duration.count());
 
     // ── requests / errors ─────────────────────────────────────────────────
-    let _ = writeln!(out, "# HELP risepir_requests_total Total requests served, by route and outcome.");
+    let _ = writeln!(
+        out,
+        "# HELP risepir_requests_total Total requests served, by route and outcome."
+    );
     let _ = writeln!(out, "# TYPE risepir_requests_total counter");
     for ((route, outcome), count) in &s.requests {
-        let _ = writeln!(out, "risepir_requests_total{} {count}", format_labels(&[("route", route), ("outcome", outcome)]));
+        let _ = writeln!(
+            out,
+            "risepir_requests_total{} {count}",
+            format_labels(&[("route", route), ("outcome", outcome)])
+        );
     }
     let _ = writeln!(
         out,
@@ -401,11 +448,22 @@ pub(crate) fn render(s: &Snapshot) -> String {
     );
     let _ = writeln!(out, "# TYPE risepir_request_errors_total counter");
     for ((route, class), count) in &s.request_errors {
-        let _ = writeln!(out, "risepir_request_errors_total{} {count}", format_labels(&[("route", route), ("class", class)]));
+        let _ = writeln!(
+            out,
+            "risepir_request_errors_total{} {count}",
+            format_labels(&[("route", route), ("class", class)])
+        );
     }
 
     // ── state save / journal ────────────────────────────────────────────
-    write_metric(&mut out, "risepir_state_save_configured", "Whether this deployment persists state (--state was given).", "gauge", &[], u8::from(s.save.configured));
+    write_metric(
+        &mut out,
+        "risepir_state_save_configured",
+        "Whether this deployment persists state (--state was given).",
+        "gauge",
+        &[],
+        u8::from(s.save.configured),
+    );
     write_metric(
         &mut out,
         "risepir_state_save_last_success_timestamp_seconds",
@@ -414,9 +472,30 @@ pub(crate) fn render(s: &Snapshot) -> String {
         &[],
         s.save.last_save_unix,
     );
-    write_metric(&mut out, "risepir_state_save_last_duration_seconds", "Wall-clock duration of that save.", "gauge", &[], s.save.last_save_duration_secs);
-    write_metric(&mut out, "risepir_state_save_last_bytes", "That save's file size, in bytes.", "gauge", &[], s.save.last_save_bytes);
-    write_metric(&mut out, "risepir_state_save_failures_total", "Save attempts that returned an error.", "counter", &[], s.save.save_failures_total);
+    write_metric(
+        &mut out,
+        "risepir_state_save_last_duration_seconds",
+        "Wall-clock duration of that save.",
+        "gauge",
+        &[],
+        s.save.last_save_duration_secs,
+    );
+    write_metric(
+        &mut out,
+        "risepir_state_save_last_bytes",
+        "That save's file size, in bytes.",
+        "gauge",
+        &[],
+        s.save.last_save_bytes,
+    );
+    write_metric(
+        &mut out,
+        "risepir_state_save_failures_total",
+        "Save attempts that returned an error.",
+        "counter",
+        &[],
+        s.save.save_failures_total,
+    );
     write_metric(
         &mut out,
         "risepir_journal_records_since_save",
@@ -428,8 +507,22 @@ pub(crate) fn render(s: &Snapshot) -> String {
     write_metric(&mut out, "risepir_journal_broken", "Whether journaling has been permanently disabled this run (a continuity gap or I/O failure).", "gauge", &[], u8::from(s.save.journal_broken));
 
     // ── reconcile (same fields as GET /healthz, ADR-0027) ────────────────
-    write_metric(&mut out, "risepir_reconcile_configured", "Whether cross-provider reconciliation runs at all.", "gauge", &[], u8::from(s.reconcile.configured));
-    write_metric(&mut out, "risepir_reconcile_last_checkpoint_block", "Block of the most recent reconcile checkpoint attempted.", "gauge", &[], s.reconcile.last_checkpoint_block);
+    write_metric(
+        &mut out,
+        "risepir_reconcile_configured",
+        "Whether cross-provider reconciliation runs at all.",
+        "gauge",
+        &[],
+        u8::from(s.reconcile.configured),
+    );
+    write_metric(
+        &mut out,
+        "risepir_reconcile_last_checkpoint_block",
+        "Block of the most recent reconcile checkpoint attempted.",
+        "gauge",
+        &[],
+        s.reconcile.last_checkpoint_block,
+    );
     write_metric(
         &mut out,
         "risepir_reconcile_last_checkpoint_timestamp_seconds",
@@ -438,7 +531,14 @@ pub(crate) fn render(s: &Snapshot) -> String {
         &[],
         s.reconcile.last_checkpoint_unix,
     );
-    write_metric(&mut out, "risepir_reconcile_last_success_block", "Block of the most recent checkpoint with >=1 completed comparison.", "gauge", &[], s.reconcile.last_success_block);
+    write_metric(
+        &mut out,
+        "risepir_reconcile_last_success_block",
+        "Block of the most recent checkpoint with >=1 completed comparison.",
+        "gauge",
+        &[],
+        s.reconcile.last_success_block,
+    );
     write_metric(
         &mut out,
         "risepir_reconcile_last_success_timestamp_seconds",
@@ -447,10 +547,38 @@ pub(crate) fn render(s: &Snapshot) -> String {
         &[],
         s.reconcile.last_success_unix,
     );
-    write_metric(&mut out, "risepir_reconcile_comparisons_total", "Total individual account comparisons completed.", "counter", &[], s.reconcile.comparisons_total);
-    write_metric(&mut out, "risepir_reconcile_checkpoints_total", "Total checkpoints attempted (empty, successful, or dark).", "counter", &[], s.reconcile.checkpoints_total);
-    write_metric(&mut out, "risepir_reconcile_consecutive_dark", "Consecutive checkpoints that attempted >=1 comparison and had every attempt fail.", "gauge", &[], s.reconcile.consecutive_dark);
-    write_metric(&mut out, "risepir_reconcile_halted", "Whether a value mismatch has permanently halted the follow loop.", "gauge", &[], u8::from(s.reconcile.halted));
+    write_metric(
+        &mut out,
+        "risepir_reconcile_comparisons_total",
+        "Total individual account comparisons completed.",
+        "counter",
+        &[],
+        s.reconcile.comparisons_total,
+    );
+    write_metric(
+        &mut out,
+        "risepir_reconcile_checkpoints_total",
+        "Total checkpoints attempted (empty, successful, or dark).",
+        "counter",
+        &[],
+        s.reconcile.checkpoints_total,
+    );
+    write_metric(
+        &mut out,
+        "risepir_reconcile_consecutive_dark",
+        "Consecutive checkpoints that attempted >=1 comparison and had every attempt fail.",
+        "gauge",
+        &[],
+        s.reconcile.consecutive_dark,
+    );
+    write_metric(
+        &mut out,
+        "risepir_reconcile_halted",
+        "Whether a value mismatch has permanently halted the follow loop.",
+        "gauge",
+        &[],
+        u8::from(s.reconcile.halted),
+    );
 
     out
 }
@@ -531,17 +659,30 @@ mod tests {
 
         // Monotonically non-decreasing.
         for w in h.bucket_counts.windows(2) {
-            assert!(w[0] <= w[1], "buckets must be cumulative: {:?}", h.bucket_counts);
+            assert!(
+                w[0] <= w[1],
+                "buckets must be cumulative: {:?}",
+                h.bucket_counts
+            );
         }
         // The 0.001s bucket sees neither observation (both > 1ms).
         assert_eq!(h.bucket_counts[0], 0);
         // The 0.005s..2.5s buckets see exactly the two 2ms observations.
-        let idx_5ms = ANSWER_DURATION_BUCKETS_SECONDS.iter().position(|&b| b == 0.005).unwrap();
-        let idx_1s = ANSWER_DURATION_BUCKETS_SECONDS.iter().position(|&b| b == 1.0).unwrap();
+        let idx_5ms = ANSWER_DURATION_BUCKETS_SECONDS
+            .iter()
+            .position(|&b| b == 0.005)
+            .unwrap();
+        let idx_1s = ANSWER_DURATION_BUCKETS_SECONDS
+            .iter()
+            .position(|&b| b == 1.0)
+            .unwrap();
         assert_eq!(h.bucket_counts[idx_5ms], 2);
         assert_eq!(h.bucket_counts[idx_1s], 2);
         // The 5s bucket picks up the 3s observation too.
-        let idx_5s = ANSWER_DURATION_BUCKETS_SECONDS.iter().position(|&b| b == 5.0).unwrap();
+        let idx_5s = ANSWER_DURATION_BUCKETS_SECONDS
+            .iter()
+            .position(|&b| b == 5.0)
+            .unwrap();
         assert_eq!(h.bucket_counts[idx_5s], 3);
         // The last finite bucket must equal the total count (+Inf's count).
         assert_eq!(*h.bucket_counts.last().unwrap(), h.count());
@@ -560,9 +701,20 @@ mod tests {
         assert!(text.contains("# HELP risepir_answer_duration_seconds"));
         assert!(text.contains("# TYPE risepir_answer_duration_seconds histogram"));
         // Every finite bucket line present, in ascending `le` order, plus `+Inf`.
-        let bucket_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("risepir_answer_duration_seconds_bucket{")).collect();
-        assert_eq!(bucket_lines.len(), ANSWER_DURATION_BUCKETS_SECONDS.len() + 1, "every finite bucket plus +Inf");
-        assert!(bucket_lines.last().unwrap().contains("le=\"+Inf\""), "the last bucket line must be +Inf: {:?}", bucket_lines.last());
+        let bucket_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("risepir_answer_duration_seconds_bucket{"))
+            .collect();
+        assert_eq!(
+            bucket_lines.len(),
+            ANSWER_DURATION_BUCKETS_SECONDS.len() + 1,
+            "every finite bucket plus +Inf"
+        );
+        assert!(
+            bucket_lines.last().unwrap().contains("le=\"+Inf\""),
+            "the last bucket line must be +Inf: {:?}",
+            bucket_lines.last()
+        );
 
         // Bucket counts, read back off the rendered text, must be monotonic.
         let counts: Vec<u64> = bucket_lines
@@ -570,9 +722,16 @@ mod tests {
             .map(|line| line.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
             .collect();
         for w in counts.windows(2) {
-            assert!(w[0] <= w[1], "rendered bucket counts must be monotonic: {counts:?}");
+            assert!(
+                w[0] <= w[1],
+                "rendered bucket counts must be monotonic: {counts:?}"
+            );
         }
-        assert_eq!(*counts.last().unwrap(), 2, "the +Inf bucket must equal the total observation count");
+        assert_eq!(
+            *counts.last().unwrap(),
+            2,
+            "the +Inf bucket must equal the total observation count"
+        );
 
         assert!(text.contains("risepir_answer_duration_seconds_sum "));
         assert!(text.contains("risepir_answer_duration_seconds_count 2"));
@@ -583,18 +742,23 @@ mod tests {
         let mut snap = base_snapshot();
         snap.requests.insert(("answer", "ok"), 10);
         snap.requests.insert(("answer", "error"), 2);
-        snap.request_errors.insert(("answer", "SegmentLengthMismatch"), 2);
+        snap.request_errors
+            .insert(("answer", "SegmentLengthMismatch"), 2);
         let text = render(&snap);
 
         assert!(text.contains("risepir_requests_total{route=\"answer\",outcome=\"ok\"} 10"));
         assert!(text.contains("risepir_requests_total{route=\"answer\",outcome=\"error\"} 2"));
-        assert!(text.contains("risepir_request_errors_total{route=\"answer\",class=\"SegmentLengthMismatch\"} 2"));
+        assert!(text.contains(
+            "risepir_request_errors_total{route=\"answer\",class=\"SegmentLengthMismatch\"} 2"
+        ));
     }
 
     #[test]
     fn render_includes_build_info_and_gauges() {
         let text = render(&base_snapshot());
-        assert!(text.contains("risepir_build_info{version=\"0.1.0\",epoch=\"00ff00ff00ff00ff\",mode=\"complete\"} 1"));
+        assert!(text.contains(
+            "risepir_build_info{version=\"0.1.0\",epoch=\"00ff00ff00ff00ff\",mode=\"complete\"} 1"
+        ));
         assert!(text.contains("risepir_head_block 100"));
         assert!(text.contains("risepir_finalized_block 90"));
         // finalized (90) < head (100): lag saturates at 0, never underflows/goes negative.
@@ -611,7 +775,10 @@ mod tests {
 
         snap.finalized_block = 0; // never polled
         let text = render(&snap);
-        assert!(text.contains("risepir_block_lag 0"), "must saturate, never panic or print a negative number");
+        assert!(
+            text.contains("risepir_block_lag 0"),
+            "must saturate, never panic or print a negative number"
+        );
     }
 
     #[test]
@@ -646,9 +813,19 @@ mod tests {
                 let name = line.split(['{', ' ']).next().unwrap();
                 // Histogram sub-series (`_bucket`/`_sum`/`_count`) are
                 // declared once under the base name, not individually.
-                let base = name.strip_suffix("_bucket").or_else(|| name.strip_suffix("_sum")).or_else(|| name.strip_suffix("_count")).unwrap_or(name);
-                assert!(declared_help.contains(base), "{name} (base {base}) sampled with no # HELP");
-                assert!(declared_type.contains(base), "{name} (base {base}) sampled with no # TYPE");
+                let base = name
+                    .strip_suffix("_bucket")
+                    .or_else(|| name.strip_suffix("_sum"))
+                    .or_else(|| name.strip_suffix("_count"))
+                    .unwrap_or(name);
+                assert!(
+                    declared_help.contains(base),
+                    "{name} (base {base}) sampled with no # HELP"
+                );
+                assert!(
+                    declared_type.contains(base),
+                    "{name} (base {base}) sampled with no # TYPE"
+                );
             }
         }
     }
@@ -673,7 +850,10 @@ mod tests {
             // isn't a hex digit). The one legitimate 16-hex-char token this
             // module emits is the epoch, which is 16 chars — well short of
             // 40, so the length bound alone does not need to special-case it.
-            assert!(token.len() < 40, "found a 40+ hex-digit run, address-shaped: {token:?} in:\n{text}");
+            assert!(
+                token.len() < 40,
+                "found a 40+ hex-digit run, address-shaped: {token:?} in:\n{text}"
+            );
         }
     }
 }

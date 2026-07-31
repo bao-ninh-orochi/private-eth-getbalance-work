@@ -94,7 +94,10 @@ impl std::fmt::Display for JournalError {
             Self::Io(m) => write!(f, "journal I/O: {m}"),
             Self::Corrupt(m) => write!(f, "journal rejected: {m}"),
             Self::Gap { expected, found } => {
-                write!(f, "journal continuity violated: expected block {expected}, got {found}")
+                write!(
+                    f,
+                    "journal continuity violated: expected block {expected}, got {found}"
+                )
             }
         }
     }
@@ -226,7 +229,12 @@ impl<R: Read> JournalReader<R> {
     /// here — this reader has no notion of "the current base"; the
     /// caller compares the returned [`JournalHeader`] against its own
     /// loaded state before trusting anything else this reader produces.
-    pub fn open(mut reader: R, total_len: u64, plaintext_bits: u32, arity: u32) -> Result<(JournalHeader, Self), JournalError> {
+    pub fn open(
+        mut reader: R,
+        total_len: u64,
+        plaintext_bits: u32,
+        arity: u32,
+    ) -> Result<(JournalHeader, Self), JournalError> {
         if total_len < HEADER_LEN {
             return Err(JournalError::Corrupt(format!(
                 "file too short for a journal header ({total_len} bytes, need {HEADER_LEN})"
@@ -236,7 +244,9 @@ impl<R: Read> JournalReader<R> {
         let mut magic = [0u8; 5];
         reader.read_exact(&mut magic).map_err(io_err)?;
         if &magic != MAGIC {
-            return Err(JournalError::Corrupt("bad magic (not an RPJL1 journal)".to_string()));
+            return Err(JournalError::Corrupt(
+                "bad magic (not an RPJL1 journal)".to_string(),
+            ));
         }
         hasher.update(&magic);
         let mut bd_bytes = [0u8; 8];
@@ -251,10 +261,15 @@ impl<R: Read> JournalReader<R> {
         reader.read_exact(&mut stored_bytes).map_err(io_err)?;
         let stored = u64::from_le_bytes(stored_bytes);
         if hasher.digest() != stored {
-            return Err(JournalError::Corrupt("header checksum mismatch".to_string()));
+            return Err(JournalError::Corrupt(
+                "header checksum mismatch".to_string(),
+            ));
         }
 
-        let header = JournalHeader { base_digest, base_block };
+        let header = JournalHeader {
+            base_digest,
+            base_block,
+        };
         let this = Self {
             reader,
             plaintext_bits,
@@ -298,12 +313,18 @@ impl<R: Read> JournalReader<R> {
             return Ok(None);
         }
         if self.remaining < 4 {
-            return Err(("torn tail: fewer than 4 bytes left for a record length prefix".to_string(), self.consumed));
+            return Err((
+                "torn tail: fewer than 4 bytes left for a record length prefix".to_string(),
+                self.consumed,
+            ));
         }
         let mut len_bytes = [0u8; 4];
-        self.reader
-            .read_exact(&mut len_bytes)
-            .map_err(|e| (format!("I/O error reading record length: {e}"), self.consumed))?;
+        self.reader.read_exact(&mut len_bytes).map_err(|e| {
+            (
+                format!("I/O error reading record length: {e}"),
+                self.consumed,
+            )
+        })?;
         self.remaining -= 4;
         let len = u32::from_le_bytes(len_bytes);
         if len == 0 || u64::from(len) > MAX_RECORD_BYTES {
@@ -327,24 +348,33 @@ impl<R: Read> JournalReader<R> {
         }
 
         let mut n_bytes = [0u8; 8];
-        self.reader
-            .read_exact(&mut n_bytes)
-            .map_err(|e| (format!("I/O error reading num_items_after: {e}"), self.consumed))?;
+        self.reader.read_exact(&mut n_bytes).map_err(|e| {
+            (
+                format!("I/O error reading num_items_after: {e}"),
+                self.consumed,
+            )
+        })?;
         self.remaining -= 8;
         let num_items_after = u64::from_le_bytes(n_bytes);
 
         // Bounded above by both MAX_RECORD_BYTES and the input's own
         // remaining size (both checked above) before this allocation.
         let mut payload = vec![0u8; len as usize];
-        self.reader
-            .read_exact(&mut payload)
-            .map_err(|e| (format!("I/O error reading record payload: {e}"), self.consumed))?;
+        self.reader.read_exact(&mut payload).map_err(|e| {
+            (
+                format!("I/O error reading record payload: {e}"),
+                self.consumed,
+            )
+        })?;
         self.remaining -= u64::from(len);
 
         let mut xxh_bytes = [0u8; 8];
-        self.reader
-            .read_exact(&mut xxh_bytes)
-            .map_err(|e| (format!("I/O error reading record checksum: {e}"), self.consumed))?;
+        self.reader.read_exact(&mut xxh_bytes).map_err(|e| {
+            (
+                format!("I/O error reading record checksum: {e}"),
+                self.consumed,
+            )
+        })?;
         self.remaining -= 8;
         let stored = u64::from_le_bytes(xxh_bytes);
 
@@ -352,15 +382,22 @@ impl<R: Read> JournalReader<R> {
         hasher.update(&n_bytes);
         hasher.update(&payload);
         if hasher.digest() != stored {
-            return Err(("record checksum mismatch (corrupt or torn record)".to_string(), self.consumed));
+            return Err((
+                "record checksum mismatch (corrupt or torn record)".to_string(),
+                self.consumed,
+            ));
         }
 
-        let delta = risepir_proto::codec::decode_block_delta(&payload, self.plaintext_bits, self.arity)
-            .map_err(|e| (format!("record payload decode failed: {e}"), self.consumed))?;
+        let delta =
+            risepir_proto::codec::decode_block_delta(&payload, self.plaintext_bits, self.arity)
+                .map_err(|e| (format!("record payload decode failed: {e}"), self.consumed))?;
 
         if delta.block != self.expected_block {
             return Err((
-                format!("height gap: expected block {}, record carries block {}", self.expected_block, delta.block),
+                format!(
+                    "height gap: expected block {}, record carries block {}",
+                    self.expected_block, delta.block
+                ),
                 self.consumed,
             ));
         }
@@ -429,14 +466,24 @@ pub struct JournalReportOnly {
 /// Only a genuine I/O failure other than "file does not exist" — an
 /// unreadable-but-present file (permissions, a disk error) is distinct
 /// from "no journal was ever created here".
-pub fn scan_report_only(path: &Path, base_digest: u64, plaintext_bits: u32, arity: u32) -> std::io::Result<Option<JournalReportOnly>> {
+pub fn scan_report_only(
+    path: &Path,
+    base_digest: u64,
+    plaintext_bits: u32,
+    arity: u32,
+) -> std::io::Result<Option<JournalReportOnly>> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
     let total_len = file.metadata()?.len();
-    let (header, mut reader) = match JournalReader::open(std::io::BufReader::new(file), total_len, plaintext_bits, arity) {
+    let (header, mut reader) = match JournalReader::open(
+        std::io::BufReader::new(file),
+        total_len,
+        plaintext_bits,
+        arity,
+    ) {
         Ok(pair) => pair,
         Err(_) => return Ok(None),
     };
@@ -447,10 +494,9 @@ pub fn scan_report_only(path: &Path, base_digest: u64, plaintext_bits: u32, arit
     while reader.next().is_some() {
         count += 1;
     }
-    let stop = reader
-        .stop()
-        .cloned()
-        .expect("iterator exhausted above; stop() is always populated once next() has returned None");
+    let stop = reader.stop().cloned().expect(
+        "iterator exhausted above; stop() is always populated once next() has returned None",
+    );
     Ok(Some(JournalReportOnly {
         count,
         end_height: reader.last_valid_height(),
@@ -481,7 +527,12 @@ impl JournalWriter {
     /// # Errors
     ///
     /// [`JournalError::Io`] on any write/fsync/rename/reopen failure.
-    pub fn create(path: &Path, base_digest: u64, base_block: u64, plaintext_bits: u32) -> Result<Self, JournalError> {
+    pub fn create(
+        path: &Path,
+        base_digest: u64,
+        base_block: u64,
+        plaintext_bits: u32,
+    ) -> Result<Self, JournalError> {
         let tmp = tmp_sibling(path);
         {
             let file = File::create(&tmp).map_err(io_err)?;
@@ -493,7 +544,8 @@ impl JournalWriter {
             hasher.update(&base_digest.to_le_bytes());
             w.write_all(&base_block.to_le_bytes()).map_err(io_err)?;
             hasher.update(&base_block.to_le_bytes());
-            w.write_all(&hasher.digest().to_le_bytes()).map_err(io_err)?;
+            w.write_all(&hasher.digest().to_le_bytes())
+                .map_err(io_err)?;
             w.flush().map_err(io_err)?;
             w.get_ref().sync_all().map_err(io_err)?;
         }
@@ -519,7 +571,12 @@ impl JournalWriter {
     /// # Errors
     ///
     /// [`JournalError::Io`] on any open/truncate failure.
-    pub fn adopt(path: &Path, plaintext_bits: u32, valid_end_offset: u64, last_valid_height: u64) -> Result<Self, JournalError> {
+    pub fn adopt(
+        path: &Path,
+        plaintext_bits: u32,
+        valid_end_offset: u64,
+        last_valid_height: u64,
+    ) -> Result<Self, JournalError> {
         let file = OpenOptions::new().append(true).open(path).map_err(io_err)?;
         file.set_len(valid_end_offset).map_err(io_err)?;
         Ok(Self {
@@ -565,8 +622,12 @@ impl JournalWriter {
         }
 
         let payload = risepir_proto::codec::encode_block_delta(delta, self.plaintext_bits);
-        let len = u32::try_from(payload.len())
-            .map_err(|_| JournalError::Io(format!("record payload {} bytes exceeds u32::MAX", payload.len())))?;
+        let len = u32::try_from(payload.len()).map_err(|_| {
+            JournalError::Io(format!(
+                "record payload {} bytes exceeds u32::MAX",
+                payload.len()
+            ))
+        })?;
 
         let mut hasher = xxhash_rust::xxh3::Xxh3::new();
         let n_bytes = num_items_after.to_le_bytes();
@@ -726,7 +787,8 @@ mod tests {
         bytes.truncate(bytes.len() - 3); // cut into the last record
         std::fs::remove_file(&path).unwrap();
         let len = bytes.len() as u64;
-        let (_header, mut reader) = JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
+        let (_header, mut reader) =
+            JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
 
         let rec1 = reader.next().expect("first record must still parse");
         assert_eq!(rec1.delta.block, 1);
@@ -754,16 +816,24 @@ mod tests {
         let flip_at = bytes.len() - 20;
         bytes[flip_at] ^= 0x01;
         let len = bytes.len() as u64;
-        let (_header, mut reader) = JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
+        let (_header, mut reader) =
+            JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
 
         let mut got = Vec::new();
         for rec in reader.by_ref() {
             got.push(rec.delta.block);
         }
         assert!(matches!(reader.stop(), Some(ScanStop::Invalid { .. })));
-        assert!(got.len() < 4, "the flip must have stopped the scan before all 4 records");
+        assert!(
+            got.len() < 4,
+            "the flip must have stopped the scan before all 4 records"
+        );
         for (i, b) in got.iter().enumerate() {
-            assert_eq!(*b, i as u64 + 1, "records returned before the flip must be exactly the good prefix, in order");
+            assert_eq!(
+                *b,
+                i as u64 + 1,
+                "records returned before the flip must be exactly the good prefix, in order"
+            );
         }
     }
 
@@ -795,7 +865,8 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         let len = bytes.len() as u64;
-        let (_header, mut reader) = JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
+        let (_header, mut reader) =
+            JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
         let rec1 = reader.next().expect("block 1 must parse");
         assert_eq!(rec1.delta.block, 1);
         assert!(reader.next().is_none(), "the gapped record must not parse");
@@ -820,7 +891,8 @@ mod tests {
         // checking, it would OOM/abort long before this assertion.
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         let len = bytes.len() as u64;
-        let (_header, mut reader) = JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
+        let (_header, mut reader) =
+            JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
         assert!(reader.next().is_none());
         match reader.stop() {
             Some(ScanStop::Invalid { reason, .. }) => assert!(reason.contains("out of bounds")),
@@ -843,10 +915,13 @@ mod tests {
         bytes.extend_from_slice(&1000u32.to_le_bytes());
         bytes.extend_from_slice(&[0u8; 5]); // far short of num_items_after(8) + 1000 + xxh3(8)
         let len = bytes.len() as u64;
-        let (_header, mut reader) = JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
+        let (_header, mut reader) =
+            JournalReader::open(Cursor::new(bytes), len, PB, ARITY).unwrap();
         assert!(reader.next().is_none());
         match reader.stop() {
-            Some(ScanStop::Invalid { reason, .. }) => assert!(reason.contains("remaining file size")),
+            Some(ScanStop::Invalid { reason, .. }) => {
+                assert!(reason.contains("remaining file size"))
+            }
             other => panic!("expected an Invalid rejection, got {other:?}"),
         }
     }
@@ -859,10 +934,17 @@ mod tests {
         let mut w = JournalWriter::create(&path, 1, 0, PB).unwrap();
         w.append(&delta(1, 1), 1).unwrap();
         match w.append(&delta(3, 1), 2) {
-            Err(JournalError::Gap { expected: 2, found: 3 }) => {}
+            Err(JournalError::Gap {
+                expected: 2,
+                found: 3,
+            }) => {}
             other => panic!("expected Gap{{expected:2,found:3}}, got {other:?}"),
         }
-        assert_eq!(w.last(), 1, "the rejected append must not have moved `last` forward");
+        assert_eq!(
+            w.last(),
+            1,
+            "the rejected append must not have moved `last` forward"
+        );
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -888,12 +970,25 @@ mod tests {
         while reader.next().is_some() {
             n += 1;
         }
-        assert_eq!(n, 2, "both clean records must still parse before the garbage tail");
+        assert_eq!(
+            n, 2,
+            "both clean records must still parse before the garbage tail"
+        );
         assert!(matches!(reader.stop(), Some(ScanStop::Invalid { .. })));
         assert_eq!(reader.valid_end_offset(), good_len);
 
-        let mut w = JournalWriter::adopt(&path, PB, reader.valid_end_offset(), reader.last_valid_height()).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), good_len, "adopt must have truncated the garbage tail");
+        let mut w = JournalWriter::adopt(
+            &path,
+            PB,
+            reader.valid_end_offset(),
+            reader.last_valid_height(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            good_len,
+            "adopt must have truncated the garbage tail"
+        );
         w.append(&delta(3, 3), 3).unwrap();
 
         let (_header2, mut reader2) = open_scan(&path);
@@ -914,19 +1009,34 @@ mod tests {
     #[test]
     fn scan_report_only_folds_absent_corrupt_and_mismatched_into_none() {
         let missing = tmp("does-not-exist.journal");
-        assert_eq!(scan_report_only(&missing, 1, PB, ARITY).unwrap().map(|_| ()), None);
+        assert_eq!(
+            scan_report_only(&missing, 1, PB, ARITY)
+                .unwrap()
+                .map(|_| ()),
+            None
+        );
 
         let corrupt = tmp("corrupt-header.journal");
         JournalWriter::create(&corrupt, 1, 0, PB).unwrap();
         let mut bytes = std::fs::read(&corrupt).unwrap();
         bytes[0] ^= 0xFF;
         std::fs::write(&corrupt, &bytes).unwrap();
-        assert_eq!(scan_report_only(&corrupt, 1, PB, ARITY).unwrap().map(|_| ()), None);
+        assert_eq!(
+            scan_report_only(&corrupt, 1, PB, ARITY)
+                .unwrap()
+                .map(|_| ()),
+            None
+        );
         std::fs::remove_file(&corrupt).unwrap();
 
         let mismatched = tmp("mismatched-base.journal");
         JournalWriter::create(&mismatched, 0xAAA, 0, PB).unwrap();
-        assert_eq!(scan_report_only(&mismatched, 0xBBB, PB, ARITY).unwrap().map(|_| ()), None);
+        assert_eq!(
+            scan_report_only(&mismatched, 0xBBB, PB, ARITY)
+                .unwrap()
+                .map(|_| ()),
+            None
+        );
         std::fs::remove_file(&mismatched).unwrap();
     }
 
@@ -940,7 +1050,9 @@ mod tests {
         }
         drop(w);
 
-        let report = scan_report_only(&path, 0x777, PB, ARITY).unwrap().expect("must match");
+        let report = scan_report_only(&path, 0x777, PB, ARITY)
+            .unwrap()
+            .expect("must match");
         assert_eq!(report.count, 3);
         assert_eq!(report.end_height, 8);
         assert_eq!(report.stop, ScanStop::Eof);

@@ -81,7 +81,12 @@ fn record(size: usize) {
     }
     let mut observed = MAX_SINGLE_ALLOC.load(Ordering::Relaxed);
     while size > observed {
-        match MAX_SINGLE_ALLOC.compare_exchange_weak(observed, size, Ordering::SeqCst, Ordering::Relaxed) {
+        match MAX_SINGLE_ALLOC.compare_exchange_weak(
+            observed,
+            size,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => break,
             Err(current) => observed = current,
         }

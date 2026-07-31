@@ -155,7 +155,10 @@ pub struct ReconcileHealth {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Everything the lock guards: the PIR server, its sliding delta-ring
@@ -452,7 +455,13 @@ impl NodeState {
     /// and advances `last_success_block`/`last_success_unix`, regardless of
     /// `dark`/`deferred` (they are mutually exclusive with `checked > 0` in
     /// practice, but `checked > 0` wins if a caller ever passed both).
-    pub fn record_reconcile_checkpoint(&self, block: u64, checked: usize, dark: bool, deferred: bool) -> ReconcileHealth {
+    pub fn record_reconcile_checkpoint(
+        &self,
+        block: u64,
+        checked: usize,
+        dark: bool,
+        deferred: bool,
+    ) -> ReconcileHealth {
         let now = unix_now();
         let mut h = self.reconcile_lock();
         h.last_checkpoint_block = block;
@@ -603,7 +612,11 @@ impl NodeState {
     /// code (see `crate::metrics`' privacy docs), never derived from
     /// request content.
     fn bump_request(&self, route: &'static str, outcome: &'static str) {
-        *self.counters_lock().requests.entry((route, outcome)).or_insert(0) += 1;
+        *self
+            .counters_lock()
+            .requests
+            .entry((route, outcome))
+            .or_insert(0) += 1;
     }
 
     /// Bumps `risepir_request_errors_total{route,class}` — `class` is
@@ -611,7 +624,11 @@ impl NodeState {
     /// ([`ServerError::metric_class`]/[`crate::wire::WireError::metric_class`]/[`ErrorClass`]),
     /// never a formatted message.
     fn bump_error(&self, route: &'static str, class: &'static str) {
-        *self.counters_lock().request_errors.entry((route, class)).or_insert(0) += 1;
+        *self
+            .counters_lock()
+            .request_errors
+            .entry((route, class))
+            .or_insert(0) += 1;
     }
 
     /// Folds one `/answer` computation's duration into the
@@ -679,13 +696,19 @@ impl NodeState {
     /// same reasoning `reconcile_configured` already applies: an absent
     /// field reads as "healthy" to a monitor that does not know better.
     pub fn set_snapshot_audit_line(&self, line: String) {
-        *self.snapshot_audit.lock().unwrap_or_else(|e| e.into_inner()) = line;
+        *self
+            .snapshot_audit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = line;
     }
 
     /// The current one-line snapshot-audit summary (`"unknown"` until/
     /// unless [`Self::set_snapshot_audit_line`] has been called).
     pub fn snapshot_audit_line(&self) -> String {
-        self.snapshot_audit.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.snapshot_audit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Apply one block: the sole writer path. Applies to the server,
@@ -881,7 +904,10 @@ impl NodeState {
         let bytes = Bytes::from(wire::encode_setup(&bundle));
         let block = bundle.block;
         self.setup_generation.fetch_add(1, Ordering::SeqCst);
-        *cache = Some(CachedSetup { block, bytes: bytes.clone() });
+        *cache = Some(CachedSetup {
+            block,
+            bytes: bytes.clone(),
+        });
         (bytes, block)
     }
 
@@ -955,7 +981,10 @@ impl NodeState {
             // request timeout are about `/answer`'s attacker-controlled
             // blob, not about handing back a preloaded static file.
             .layer(DefaultBodyLimit::max(MAX_ANSWER_BODY_BYTES))
-            .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                REQUEST_TIMEOUT,
+            ))
             .with_state(state.clone());
 
         // The web assets are attached *before* the metrics layer goes on,
@@ -1002,13 +1031,21 @@ impl NodeState {
 /// client's pipeline forces the `/sync` that would catch the mismatch —
 /// the garbage decodes straight to a fingerprint miss, which complete
 /// mode maps to `0x0`.
-async fn answer(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery, body: Bytes) -> Response {
+async fn answer(
+    State(state): State<Arc<NodeState>>,
+    RawQuery(raw): RawQuery,
+    body: Bytes,
+) -> Response {
     if let Some(refusal) = epoch_gate(&state, raw.as_deref()) {
         return refusal;
     }
     let inner = state.inner.read().await;
     let params = inner.server.params();
-    let expected_len_per_seg: Vec<u32> = state.backend_params.iter().map(|sp| sp.reshape_rows).collect();
+    let expected_len_per_seg: Vec<u32> = state
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_rows)
+        .collect();
 
     let queries = match wire::decode_query_bundle(&body, &params, &expected_len_per_seg) {
         Ok(q) => q,
@@ -1036,7 +1073,10 @@ async fn answer(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery, bo
     };
     drop(inner);
 
-    octet_response(StatusCode::OK, wire::encode_response_bundle(&responses, head))
+    octet_response(
+        StatusCode::OK,
+        wire::encode_response_bundle(&responses, head),
+    )
 }
 
 /// `GET /delta/{block}?epoch=<lineage>`: the immutable per-block delta,
@@ -1067,14 +1107,20 @@ async fn delta_by_block(
     let plaintext_bits = inner.server.params().plaintext_bits;
     let Some(delta) = inner.per_block.get(&block).cloned() else {
         drop(inner);
-        return classed(StatusCode::NOT_FOUND, "no delta retained for that block", "NotRetained");
+        return classed(
+            StatusCode::NOT_FOUND,
+            "no delta retained for that block",
+            "NotRetained",
+        );
     };
     drop(inner);
 
     let bytes = codec::encode_block_delta(&delta, plaintext_bits);
     let mut resp = octet_response(StatusCode::OK, bytes);
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
     resp
 }
 
@@ -1092,7 +1138,11 @@ async fn sync(State(state): State<Arc<NodeState>>, RawQuery(raw): RawQuery) -> R
         return refusal;
     }
     let Some((from, to)) = raw.as_deref().and_then(parse_sync_query) else {
-        return classed(StatusCode::BAD_REQUEST, "expected query params ?from=<u64>&to=<u64>", "BadQuery");
+        return classed(
+            StatusCode::BAD_REQUEST,
+            "expected query params ?from=<u64>&to=<u64>",
+            "BadQuery",
+        );
     };
 
     let inner = state.inner.read().await;
@@ -1191,9 +1241,10 @@ async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Respo
     let etag = format!("\"setup-{}-{block}\"", state.epoch);
     // Epoch is 16 lowercase-hex chars and `block` plain ASCII decimal
     // digits, so this can never contain a byte a `HeaderValue` rejects.
-    let etag_header = HeaderValue::from_str(&etag).expect("etag: ascii hex, digits and hyphens only, always a valid header value");
-    let epoch_header =
-        HeaderValue::from_str(&state.epoch).expect("epoch: ascii hex only, always a valid header value");
+    let etag_header = HeaderValue::from_str(&etag)
+        .expect("etag: ascii hex, digits and hyphens only, always a valid header value");
+    let epoch_header = HeaderValue::from_str(&state.epoch)
+        .expect("epoch: ascii hex only, always a valid header value");
     let mode_header = HeaderValue::from_static(if state.complete { "1" } else { "0" });
 
     if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
@@ -1243,8 +1294,9 @@ async fn setup(State(state): State<Arc<NodeState>>, headers: HeaderMap) -> Respo
                         let h = resp.headers_mut();
                         h.insert(
                             header::CONTENT_RANGE,
-                            HeaderValue::from_str(&format!("bytes */{total}"))
-                                .expect("total: plain ASCII decimal digits, always a valid header value"),
+                            HeaderValue::from_str(&format!("bytes */{total}")).expect(
+                                "total: plain ASCII decimal digits, always a valid header value",
+                            ),
                         );
                         h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
                         return resp;
@@ -1296,9 +1348,13 @@ async fn head(State(state): State<Arc<NodeState>>) -> Response {
     let hdrs = resp.headers_mut();
     hdrs.insert(
         HEADER_EPOCH,
-        HeaderValue::from_str(state.epoch()).expect("epoch: ascii hex only, always a valid header value"),
+        HeaderValue::from_str(state.epoch())
+            .expect("epoch: ascii hex only, always a valid header value"),
     );
-    hdrs.insert(HEADER_MODE, HeaderValue::from_static(if state.complete { "1" } else { "0" }));
+    hdrs.insert(
+        HEADER_MODE,
+        HeaderValue::from_static(if state.complete { "1" } else { "0" }),
+    );
     resp
 }
 
@@ -1442,7 +1498,10 @@ async fn metrics(State(state): State<Arc<NodeState>>) -> Response {
     let body = state.render_metrics().await;
     let mut resp = (StatusCode::OK, body).into_response();
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
 }
@@ -1478,7 +1537,15 @@ fn route_label(path: &str) -> &'static str {
         "/status" => "status",
         "/" => "index",
         _ if path.starts_with("/delta/") => "delta",
-        _ if path == "/status.js" || path == "/status.css" || path == "/app.js" || path == "/pir.js" || path == "/style.css" || path == "/client.wasm" => "asset",
+        _ if path == "/status.js"
+            || path == "/status.css"
+            || path == "/app.js"
+            || path == "/pir.js"
+            || path == "/style.css"
+            || path == "/client.wasm" =>
+        {
+            "asset"
+        }
         _ => "unmatched",
     }
 }
@@ -1520,7 +1587,11 @@ async fn track_metrics(State(state): State<Arc<NodeState>>, req: Request, next: 
     };
     state.bump_request(route, outcome);
     if outcome == "error" {
-        let class = resp.extensions().get::<ErrorClass>().map(|c| c.0).unwrap_or("Unclassified");
+        let class = resp
+            .extensions()
+            .get::<ErrorClass>()
+            .map(|c| c.0)
+            .unwrap_or("Unclassified");
         state.bump_error(route, class);
     }
     resp
@@ -1536,8 +1607,10 @@ async fn track_metrics(State(state): State<Arc<NodeState>>, req: Request, next: 
 /// bytes reach the client without an extra copy back into an owned `Vec`.
 fn octet_response(status: StatusCode, body: impl IntoResponse) -> Response {
     let mut resp = (status, body).into_response();
-    resp.headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     resp
 }
 
@@ -1755,7 +1828,10 @@ mod tests {
 
     #[test]
     fn parse_sync_query_ignores_unknown_params() {
-        assert_eq!(parse_sync_query("foo=bar&from=1&to=5&baz=qux"), Some((1, 5)));
+        assert_eq!(
+            parse_sync_query("foo=bar&from=1&to=5&baz=qux"),
+            Some((1, 5))
+        );
     }
 
     #[test]
@@ -1770,14 +1846,36 @@ mod tests {
 
     #[test]
     fn parse_range_open_ended_reaches_the_true_end() {
-        assert_eq!(parse_range("bytes=0-", 1000), RangeOutcome::Satisfiable { first: 0, last: 999 });
-        assert_eq!(parse_range("bytes=500-", 1000), RangeOutcome::Satisfiable { first: 500, last: 999 });
+        assert_eq!(
+            parse_range("bytes=0-", 1000),
+            RangeOutcome::Satisfiable {
+                first: 0,
+                last: 999
+            }
+        );
+        assert_eq!(
+            parse_range("bytes=500-", 1000),
+            RangeOutcome::Satisfiable {
+                first: 500,
+                last: 999
+            }
+        );
     }
 
     #[test]
     fn parse_range_explicit_bounds() {
-        assert_eq!(parse_range("bytes=100-199", 1000), RangeOutcome::Satisfiable { first: 100, last: 199 });
-        assert_eq!(parse_range("bytes=0-0", 1000), RangeOutcome::Satisfiable { first: 0, last: 0 }, "a single byte");
+        assert_eq!(
+            parse_range("bytes=100-199", 1000),
+            RangeOutcome::Satisfiable {
+                first: 100,
+                last: 199
+            }
+        );
+        assert_eq!(
+            parse_range("bytes=0-0", 1000),
+            RangeOutcome::Satisfiable { first: 0, last: 0 },
+            "a single byte"
+        );
     }
 
     #[test]
@@ -1786,7 +1884,10 @@ mod tests {
         // of the representation rather than being rejected.
         assert_eq!(
             parse_range("bytes=100-999999999999", 1000),
-            RangeOutcome::Satisfiable { first: 100, last: 999 }
+            RangeOutcome::Satisfiable {
+                first: 100,
+                last: 999
+            }
         );
     }
 
@@ -1804,8 +1905,16 @@ mod tests {
         assert_eq!(parse_range("bytes=", 1000), RangeOutcome::Unsupported);
         assert_eq!(parse_range("", 1000), RangeOutcome::Unsupported);
         assert_eq!(parse_range("garbage", 1000), RangeOutcome::Unsupported);
-        assert_eq!(parse_range("bytes=100", 1000), RangeOutcome::Unsupported, "no hyphen at all");
-        assert_eq!(parse_range("Bytes=0-9", 1000), RangeOutcome::Unsupported, "unit token is case-sensitive here");
+        assert_eq!(
+            parse_range("bytes=100", 1000),
+            RangeOutcome::Unsupported,
+            "no hyphen at all"
+        );
+        assert_eq!(
+            parse_range("Bytes=0-9", 1000),
+            RangeOutcome::Unsupported,
+            "unit token is case-sensitive here"
+        );
     }
 
     #[test]
@@ -1815,36 +1924,75 @@ mod tests {
 
     #[test]
     fn parse_range_multi_range_is_unsupported() {
-        assert_eq!(parse_range("bytes=0-99,200-299", 1000), RangeOutcome::Unsupported);
-        assert_eq!(parse_range("bytes=0-,", 1000), RangeOutcome::Unsupported, "a trailing comma is still multi-range shaped");
+        assert_eq!(
+            parse_range("bytes=0-99,200-299", 1000),
+            RangeOutcome::Unsupported
+        );
+        assert_eq!(
+            parse_range("bytes=0-,", 1000),
+            RangeOutcome::Unsupported,
+            "a trailing comma is still multi-range shaped"
+        );
     }
 
     #[test]
     fn parse_range_huge_numbers_never_panic_or_wrap() {
         // Larger than u64::MAX by a wide margin, on either side of the
         // hyphen — must not panic and must not silently wrap.
-        assert_eq!(parse_range("bytes=99999999999999999999999999-", 1000), RangeOutcome::Unsupported);
-        assert_eq!(parse_range("bytes=0-99999999999999999999999999", 1000), RangeOutcome::Unsupported);
         assert_eq!(
-            parse_range("bytes=99999999999999999999999999-99999999999999999999999999", 1000),
+            parse_range("bytes=99999999999999999999999999-", 1000),
+            RangeOutcome::Unsupported
+        );
+        assert_eq!(
+            parse_range("bytes=0-99999999999999999999999999", 1000),
+            RangeOutcome::Unsupported
+        );
+        assert_eq!(
+            parse_range(
+                "bytes=99999999999999999999999999-99999999999999999999999999",
+                1000
+            ),
             RangeOutcome::Unsupported
         );
     }
 
     #[test]
     fn parse_range_first_at_or_past_total_is_unsatisfiable() {
-        assert_eq!(parse_range("bytes=1000-", 1000), RangeOutcome::Unsatisfiable, "first == total");
-        assert_eq!(parse_range("bytes=5000-", 1000), RangeOutcome::Unsatisfiable, "first > total");
-        assert_eq!(parse_range("bytes=0-", 0), RangeOutcome::Unsatisfiable, "an empty resource is never satisfiable");
+        assert_eq!(
+            parse_range("bytes=1000-", 1000),
+            RangeOutcome::Unsatisfiable,
+            "first == total"
+        );
+        assert_eq!(
+            parse_range("bytes=5000-", 1000),
+            RangeOutcome::Unsatisfiable,
+            "first > total"
+        );
+        assert_eq!(
+            parse_range("bytes=0-", 0),
+            RangeOutcome::Unsatisfiable,
+            "an empty resource is never satisfiable"
+        );
     }
 
     #[test]
     fn parse_epoch_param_extracts_only_the_epoch_key() {
-        assert_eq!(parse_epoch_param(Some("from=1&to=5&epoch=00ff00ff00ff00ff")), Some("00ff00ff00ff00ff"));
+        assert_eq!(
+            parse_epoch_param(Some("from=1&to=5&epoch=00ff00ff00ff00ff")),
+            Some("00ff00ff00ff00ff")
+        );
         assert_eq!(parse_epoch_param(Some("epoch=abc&from=1")), Some("abc"));
-        assert_eq!(parse_epoch_param(Some("epoch=")), Some(""), "an empty value is presented, not absent — it will simply mismatch");
+        assert_eq!(
+            parse_epoch_param(Some("epoch=")),
+            Some(""),
+            "an empty value is presented, not absent — it will simply mismatch"
+        );
         assert_eq!(parse_epoch_param(Some("from=1&to=5")), None);
-        assert_eq!(parse_epoch_param(Some("EPOCH=abc")), None, "case-sensitive, like every other param here");
+        assert_eq!(
+            parse_epoch_param(Some("EPOCH=abc")),
+            None,
+            "case-sensitive, like every other param here"
+        );
         assert_eq!(parse_epoch_param(Some("garbage")), None);
         assert_eq!(parse_epoch_param(None), None);
     }

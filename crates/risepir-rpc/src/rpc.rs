@@ -43,7 +43,12 @@ use crate::private_eth::PrivateEth;
 /// The only methods this deployment ever answers itself. Anything else
 /// either 501s (no proxy configured) or is forwarded verbatim (proxy
 /// configured) — see [`handle`].
-const KNOWN_METHODS: [&str; 4] = ["eth_getBalance", "eth_chainId", "net_version", "eth_blockNumber"];
+const KNOWN_METHODS: [&str; 4] = [
+    "eth_getBalance",
+    "eth_chainId",
+    "net_version",
+    "eth_blockNumber",
+];
 
 /// One JSON-RPC 2.0 error object (`{"code":.., "message":..}`).
 struct JsonRpcError {
@@ -53,7 +58,10 @@ struct JsonRpcError {
 
 impl JsonRpcError {
     fn new(code: i64, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     fn parse_error(detail: impl std::fmt::Display) -> Self {
@@ -83,7 +91,10 @@ impl JsonRpcError {
     /// caller-facing explanation of that gap for a block strictly older
     /// than our head).
     fn historical() -> Self {
-        Self::new(-32000, "historical state not available (this endpoint serves head state only)")
+        Self::new(
+            -32000,
+            "historical state not available (this endpoint serves head state only)",
+        )
     }
 
     /// The symmetric, unspecified-by-name-in-the-brief-but-obviously-needed
@@ -163,7 +174,9 @@ pub fn router(state: Arc<PrivateEth>) -> Router {
 async fn handle(State(state): State<Arc<PrivateEth>>, body: Bytes) -> Response {
     let value: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return Json(envelope(Value::Null, Err(JsonRpcError::parse_error(e)))).into_response(),
+        Err(e) => {
+            return Json(envelope(Value::Null, Err(JsonRpcError::parse_error(e)))).into_response()
+        }
     };
     // `Value::get` returns `None` for any shape (not just a non-matching
     // key on an object) rather than panicking, so this is safe even if
@@ -197,7 +210,10 @@ fn parse_method_and_params(value: &Value) -> Result<(String, Value), JsonRpcErro
         .and_then(Value::as_str)
         .ok_or_else(|| JsonRpcError::invalid_request("missing or non-string \"method\""))?
         .to_string();
-    let params = value.get("params").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+    let params = value
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
     Ok((method, params))
 }
 
@@ -224,11 +240,16 @@ async fn dispatch(state: &PrivateEth, method: &str, params: &Value) -> Result<Va
 /// block selector against our head (`docs/plan.md` ADR-0007), then the
 /// private lookup itself.
 async fn eth_get_balance(state: &PrivateEth, params: &Value) -> Result<Value, JsonRpcError> {
-    let GetBalanceParams(addr_str, block_str) = serde_json::from_value(params.clone())
-        .map_err(|e| JsonRpcError::invalid_params(format!("eth_getBalance expects params [address, block]: {e}")))?;
+    let GetBalanceParams(addr_str, block_str) =
+        serde_json::from_value(params.clone()).map_err(|e| {
+            JsonRpcError::invalid_params(format!(
+                "eth_getBalance expects params [address, block]: {e}"
+            ))
+        })?;
 
-    let addr20 =
-        parse_address(&addr_str).ok_or_else(|| JsonRpcError::invalid_params("address must be a 0x-prefixed 20-byte hex string"))?;
+    let addr20 = parse_address(&addr_str).ok_or_else(|| {
+        JsonRpcError::invalid_params("address must be a 0x-prefixed 20-byte hex string")
+    })?;
 
     let head = state.head().await?;
     classify_block_param(&block_str, head)?;
@@ -286,7 +307,9 @@ fn classify_block_param(s: &str, head: u64) -> Result<(), JsonRpcError> {
 fn envelope(id: Value, result: Result<Value, JsonRpcError>) -> Value {
     match result {
         Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
-        Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": e.code, "message": e.message}}),
+        Err(e) => {
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": e.code, "message": e.message}})
+        }
     }
 }
 
@@ -305,7 +328,13 @@ async fn proxy_forward(http: &reqwest::Client, upstream: &str, body: Bytes) -> R
 
     let resp = match sent {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("proxy_upstream request failed: {e}")).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("proxy_upstream request failed: {e}"),
+            )
+                .into_response()
+        }
     };
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -320,12 +349,17 @@ async fn proxy_forward(http: &reqwest::Client, upstream: &str, body: Bytes) -> R
             let mut out = (status, bytes.to_vec()).into_response();
             if let Some(ct) = content_type {
                 if let Ok(header_value) = axum::http::HeaderValue::from_str(&ct) {
-                    out.headers_mut().insert(axum::http::header::CONTENT_TYPE, header_value);
+                    out.headers_mut()
+                        .insert(axum::http::header::CONTENT_TYPE, header_value);
                 }
             }
             out
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("proxy_upstream response body read failed: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("proxy_upstream response body read failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -335,11 +369,21 @@ mod tests {
 
     #[test]
     fn parse_address_accepts_valid_and_rejects_malformed() {
-        assert_eq!(parse_address("0x1111111111111111111111111111111111111111"), Some([0x11u8; 20]));
-        assert_eq!(parse_address("0X2222222222222222222222222222222222222222"), Some([0x22u8; 20]));
+        assert_eq!(
+            parse_address("0x1111111111111111111111111111111111111111"),
+            Some([0x11u8; 20])
+        );
+        assert_eq!(
+            parse_address("0X2222222222222222222222222222222222222222"),
+            Some([0x22u8; 20])
+        );
         assert_eq!(parse_address(""), None);
         assert_eq!(parse_address("0x1234"), None, "too short");
-        assert_eq!(parse_address("111111111111111111111111111111111111111a"), None, "missing 0x");
+        assert_eq!(
+            parse_address("111111111111111111111111111111111111111a"),
+            None,
+            "missing 0x"
+        );
         assert_eq!(
             parse_address("0xzzzz111111111111111111111111111111111111"),
             None,
@@ -350,20 +394,35 @@ mod tests {
     #[test]
     fn classify_block_param_accepts_known_tags() {
         for tag in ["latest", "pending", "safe", "finalized"] {
-            assert!(classify_block_param(tag, 42).is_ok(), "{tag} must be accepted at any head");
+            assert!(
+                classify_block_param(tag, 42).is_ok(),
+                "{tag} must be accepted at any head"
+            );
         }
     }
 
     #[test]
     fn classify_block_param_accepts_exact_head_only() {
-        assert!(classify_block_param("0x2a", 42).is_ok(), "0x2a == 42 must be accepted");
-        assert!(classify_block_param("0x29", 42).is_err(), "41 < 42 must be rejected (historical)");
-        assert!(classify_block_param("0x2b", 42).is_err(), "43 > 42 must be rejected (future)");
+        assert!(
+            classify_block_param("0x2a", 42).is_ok(),
+            "0x2a == 42 must be accepted"
+        );
+        assert!(
+            classify_block_param("0x29", 42).is_err(),
+            "41 < 42 must be rejected (historical)"
+        );
+        assert!(
+            classify_block_param("0x2b", 42).is_err(),
+            "43 > 42 must be rejected (future)"
+        );
     }
 
     #[test]
     fn classify_block_param_rejects_garbage() {
-        assert!(classify_block_param("earliest", 42).is_err(), "not one of the four accepted tags");
+        assert!(
+            classify_block_param("earliest", 42).is_err(),
+            "not one of the four accepted tags"
+        );
         assert!(classify_block_param("banana", 42).is_err());
         assert!(classify_block_param("0xzz", 42).is_err());
     }

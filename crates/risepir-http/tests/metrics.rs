@@ -44,7 +44,15 @@ fn codec() -> ValueCodec {
 /// truth comparison, so there is no `MockFeed` here (unlike `tests/http.rs`).
 fn build_node() -> Arc<NodeState> {
     let value_codec = codec();
-    let geom = Geometry::for_accounts(200, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple).expect("geometry");
+    let geom = Geometry::for_accounts(
+        200,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -63,16 +71,29 @@ fn build_node() -> Arc<NodeState> {
 }
 
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
-    let resp = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     (status, body, headers)
 }
 
 async fn post_answer(app: &axum::Router, epoch: &str, body: Vec<u8>) -> StatusCode {
     app.clone()
-        .oneshot(Request::builder().method("POST").uri(format!("/answer?epoch={epoch}")).body(Body::from(body)).unwrap())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/answer?epoch={epoch}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
         .await
         .unwrap()
         .status()
@@ -100,35 +121,61 @@ fn parse_and_check(text: &str) -> Vec<Sample> {
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("# HELP ") {
-            let name = rest.split_whitespace().next().unwrap_or_else(|| panic!("HELP line names no metric: {line:?}"));
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_else(|| panic!("HELP line names no metric: {line:?}"));
             declared_help.insert(name.to_string());
             continue;
         }
         if let Some(rest) = line.strip_prefix("# TYPE ") {
             let mut it = rest.split_whitespace();
-            let name = it.next().unwrap_or_else(|| panic!("TYPE line names no metric: {line:?}"));
-            let ty = it.next().unwrap_or_else(|| panic!("TYPE line names no type: {line:?}"));
-            assert!(["gauge", "counter", "histogram"].contains(&ty), "unknown metric type {ty:?}: {line:?}");
+            let name = it
+                .next()
+                .unwrap_or_else(|| panic!("TYPE line names no metric: {line:?}"));
+            let ty = it
+                .next()
+                .unwrap_or_else(|| panic!("TYPE line names no type: {line:?}"));
+            assert!(
+                ["gauge", "counter", "histogram"].contains(&ty),
+                "unknown metric type {ty:?}: {line:?}"
+            );
             declared_type.insert(name.to_string(), ty.to_string());
             continue;
         }
         if line.is_empty() {
             continue;
         }
-        assert!(!line.starts_with('#'), "unrecognised comment line: {line:?}");
+        assert!(
+            !line.starts_with('#'),
+            "unrecognised comment line: {line:?}"
+        );
 
-        let (head, value_str) = line.rsplit_once(' ').unwrap_or_else(|| panic!("no value on line: {line:?}"));
-        let value: f64 = value_str.parse().unwrap_or_else(|_| panic!("value {value_str:?} does not parse as a number: {line:?}"));
+        let (head, value_str) = line
+            .rsplit_once(' ')
+            .unwrap_or_else(|| panic!("no value on line: {line:?}"));
+        let value: f64 = value_str
+            .parse()
+            .unwrap_or_else(|_| panic!("value {value_str:?} does not parse as a number: {line:?}"));
 
         let (name, labels) = match head.split_once('{') {
             None => (head.to_string(), Vec::new()),
             Some((name, rest)) => {
-                let inner = rest.strip_suffix('}').unwrap_or_else(|| panic!("unterminated label block: {line:?}"));
+                let inner = rest
+                    .strip_suffix('}')
+                    .unwrap_or_else(|| panic!("unterminated label block: {line:?}"));
                 let labels = inner
                     .split(',')
                     .map(|kv| {
-                        let (k, v) = kv.split_once('=').unwrap_or_else(|| panic!("malformed label {kv:?} in {line:?}"));
-                        let v = v.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or_else(|| panic!("label value not quoted: {kv:?} in {line:?}"));
+                        let (k, v) = kv
+                            .split_once('=')
+                            .unwrap_or_else(|| panic!("malformed label {kv:?} in {line:?}"));
+                        let v = v
+                            .strip_prefix('"')
+                            .and_then(|v| v.strip_suffix('"'))
+                            .unwrap_or_else(|| {
+                                panic!("label value not quoted: {kv:?} in {line:?}")
+                            });
                         (k.to_string(), v.to_string())
                     })
                     .collect();
@@ -137,11 +184,25 @@ fn parse_and_check(text: &str) -> Vec<Sample> {
         };
         assert!(!name.is_empty(), "empty metric name: {line:?}");
 
-        let base = name.strip_suffix("_bucket").or_else(|| name.strip_suffix("_sum")).or_else(|| name.strip_suffix("_count")).unwrap_or(&name);
-        assert!(declared_help.contains(base), "{name} sampled with no preceding # HELP: {line:?}");
-        assert!(declared_type.contains_key(base), "{name} sampled with no preceding # TYPE: {line:?}");
+        let base = name
+            .strip_suffix("_bucket")
+            .or_else(|| name.strip_suffix("_sum"))
+            .or_else(|| name.strip_suffix("_count"))
+            .unwrap_or(&name);
+        assert!(
+            declared_help.contains(base),
+            "{name} sampled with no preceding # HELP: {line:?}"
+        );
+        assert!(
+            declared_type.contains_key(base),
+            "{name} sampled with no preceding # TYPE: {line:?}"
+        );
 
-        samples.push(Sample { name, labels, value });
+        samples.push(Sample {
+            name,
+            labels,
+            value,
+        });
     }
     samples
 }
@@ -150,7 +211,10 @@ fn find<'a>(samples: &'a [Sample], name: &str) -> Vec<&'a Sample> {
     samples.iter().filter(|s| s.name == name).collect()
 }
 fn label<'a>(s: &'a Sample, k: &str) -> Option<&'a str> {
-    s.labels.iter().find(|(lk, _)| lk == k).map(|(_, v)| v.as_str())
+    s.labels
+        .iter()
+        .find(|(lk, _)| lk == k)
+        .map(|(_, v)| v.as_str())
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────
@@ -163,14 +227,28 @@ async fn metrics_body_is_well_formed_prometheus_text() {
     let (status, body, headers) = get(&app, "/metrics").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        headers.get(axum::http::header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "text/plain; version=0.0.4; charset=utf-8"
     );
-    assert_eq!(headers.get(axum::http::header::CACHE_CONTROL).unwrap().to_str().unwrap(), "no-store");
+    assert_eq!(
+        headers
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-store"
+    );
 
     let text = String::from_utf8(body).expect("metrics body must be UTF-8 text");
     let samples = parse_and_check(&text); // panics on any structural defect
-    assert!(!samples.is_empty(), "a fresh node must still emit its gauges");
+    assert!(
+        !samples.is_empty(),
+        "a fresh node must still emit its gauges"
+    );
 
     // A handful of the always-present gauges, by name — every one of these
     // must exist even on a node that has served zero requests, mirroring
@@ -186,7 +264,10 @@ async fn metrics_body_is_well_formed_prometheus_text() {
         "risepir_reconcile_configured",
         "risepir_state_save_configured",
     ] {
-        assert!(!find(&samples, name).is_empty(), "missing always-present metric {name}");
+        assert!(
+            !find(&samples, name).is_empty(),
+            "missing always-present metric {name}"
+        );
     }
 
     // GET /healthz stays byte-for-byte the constraint it always was —
@@ -234,19 +315,35 @@ async fn histogram_buckets_are_monotonic_and_count_matches_answer_calls() {
     );
     let mut prev = 0.0f64;
     for b in &buckets {
-        assert!(b.value >= prev, "bucket counts must be monotonically non-decreasing: {text}");
+        assert!(
+            b.value >= prev,
+            "bucket counts must be monotonically non-decreasing: {text}"
+        );
         prev = b.value;
     }
-    let inf_count = buckets.iter().find(|s| label(s, "le") == Some("+Inf")).unwrap().value;
+    let inf_count = buckets
+        .iter()
+        .find(|s| label(s, "le") == Some("+Inf"))
+        .unwrap()
+        .value;
 
     let count_line = find(&samples, "risepir_answer_duration_seconds_count");
     assert_eq!(count_line.len(), 1, "exactly one _count line");
-    assert_eq!(count_line[0].value, N as f64, "the histogram must have observed exactly the {N} /answer calls this test made");
-    assert_eq!(inf_count, count_line[0].value, "the +Inf bucket must equal _count");
+    assert_eq!(
+        count_line[0].value, N as f64,
+        "the histogram must have observed exactly the {N} /answer calls this test made"
+    );
+    assert_eq!(
+        inf_count, count_line[0].value,
+        "the +Inf bucket must equal _count"
+    );
 
     let sum_line = find(&samples, "risepir_answer_duration_seconds_sum");
     assert_eq!(sum_line.len(), 1);
-    assert!(sum_line[0].value >= 0.0, "a duration sum can never be negative");
+    assert!(
+        sum_line[0].value >= 0.0,
+        "a duration sum can never be negative"
+    );
 }
 
 /// `risepir_requests_total{route,outcome}` and
@@ -284,19 +381,27 @@ async fn request_and_error_counters_reflect_real_traffic() {
     let ok_count = find(&samples, "risepir_requests_total")
         .into_iter()
         .find(|s| label(s, "route") == Some("answer") && label(s, "outcome") == Some("ok"))
-        .unwrap_or_else(|| panic!("no risepir_requests_total{{route=answer,outcome=ok}} sample in:\n{text}"));
+        .unwrap_or_else(|| {
+            panic!("no risepir_requests_total{{route=answer,outcome=ok}} sample in:\n{text}")
+        });
     assert_eq!(ok_count.value, 1.0);
 
     let err_count = find(&samples, "risepir_requests_total")
         .into_iter()
         .find(|s| label(s, "route") == Some("answer") && label(s, "outcome") == Some("error"))
-        .unwrap_or_else(|| panic!("no risepir_requests_total{{route=answer,outcome=error}} sample in:\n{text}"));
+        .unwrap_or_else(|| {
+            panic!("no risepir_requests_total{{route=answer,outcome=error}} sample in:\n{text}")
+        });
     assert_eq!(err_count.value, 1.0);
 
     let class_count = find(&samples, "risepir_request_errors_total")
         .into_iter()
         .find(|s| label(s, "route") == Some("answer") && label(s, "class") == Some("BadMagic"))
-        .unwrap_or_else(|| panic!("no risepir_request_errors_total{{route=answer,class=BadMagic}} sample in:\n{text}"));
+        .unwrap_or_else(|| {
+            panic!(
+                "no risepir_request_errors_total{{route=answer,class=BadMagic}} sample in:\n{text}"
+            )
+        });
     assert_eq!(class_count.value, 1.0);
 }
 
@@ -330,6 +435,9 @@ async fn served_metrics_body_contains_nothing_address_shaped() {
     let text = String::from_utf8(body).unwrap();
 
     for token in text.split(|c: char| !c.is_ascii_hexdigit()) {
-        assert!(token.len() < 40, "found a 40+ hex-digit run, address-shaped: {token:?} in the served /metrics body");
+        assert!(
+            token.len() < 40,
+            "found a 40+ hex-digit run, address-shaped: {token:?} in the served /metrics body"
+        );
     }
 }

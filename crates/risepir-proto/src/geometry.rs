@@ -155,12 +155,20 @@ impl std::fmt::Display for GeomError {
         match self {
             Self::InvalidArity(a) => write!(f, "arity must be 2, 3, or 4, got {a}"),
             Self::InvalidBucketSize => write!(f, "bucket_size must be >= 1"),
-            Self::InvalidFieldWidth => write!(f, "fingerprint_bits and value_bits must both be >= 1"),
+            Self::InvalidFieldWidth => {
+                write!(f, "fingerprint_bits and value_bits must both be >= 1")
+            }
             Self::TooManyAccounts => {
-                write!(f, "account count requires a num_buckets that does not fit in u32")
+                write!(
+                    f,
+                    "account count requires a num_buckets that does not fit in u32"
+                )
             }
             Self::InvalidNumBuckets(n) => {
-                write!(f, "num_buckets must be >= 1 and a multiple of arity, got {n}")
+                write!(
+                    f,
+                    "num_buckets must be >= 1 and a multiple of arity, got {n}"
+                )
             }
         }
     }
@@ -367,8 +375,16 @@ impl Geometry {
             }
             other => return Err(GeomError::InvalidArity(other)),
         };
-        let num_buckets = u32::try_from(num_buckets_u128).map_err(|_| GeomError::TooManyAccounts)?;
-        Self::for_num_buckets(num_buckets, arity, bucket_size, fingerprint_bits, value_codec, backend)
+        let num_buckets =
+            u32::try_from(num_buckets_u128).map_err(|_| GeomError::TooManyAccounts)?;
+        Self::for_num_buckets(
+            num_buckets,
+            arity,
+            bucket_size,
+            fingerprint_bits,
+            value_codec,
+            backend,
+        )
     }
 
     /// The same derivation as [`Self::for_accounts`], but from an
@@ -425,9 +441,13 @@ impl Geometry {
         // and found it unchanged; `plaintext_bits_is_unchanged_by_the_
         // delta_cell_targeted_selector` below is what keeps that true.
         let plaintext_bits = match backend {
-            Backend::Frodo => {
-                frodo_max_plaintext_bits(arity, segment_rows, bucket_size, fingerprint_bits, value_bits)
-            }
+            Backend::Frodo => frodo_max_plaintext_bits(
+                arity,
+                segment_rows,
+                bucket_size,
+                fingerprint_bits,
+                value_bits,
+            ),
             Backend::Simple => simple_max_plaintext_bits(
                 arity,
                 segment_rows,
@@ -483,26 +503,33 @@ impl Geometry {
             .and_then(|v| v.checked_mul(4))
             .expect("server_db overflowed u64");
 
-        let (k, reshape_rows, reshape_row_width, hint_per_segment, query_per_segment, response_per_segment, a_per_segment) =
-            match backend {
-                Backend::Frodo => {
-                    let lwe_dim = u64::from(FrodoParams::DEFAULT_LWE_DIM);
-                    let hint = lwe_dim * u64::from(row_width) * 4;
-                    let query = u64::from(segment_rows) * 4;
-                    let response = u64::from(row_width) * 4;
-                    let a = u64::from(segment_rows) * lwe_dim * 4;
-                    (0, 0, 0, hint, query, response, a)
-                }
-                Backend::Simple => {
-                    let (k, r, c) = reshape_dims(segment_rows, row_width);
-                    let lwe_dim = u64::from(SimpleParams::DEFAULT_LWE_DIM);
-                    let hint = lwe_dim * u64::from(c) * 4;
-                    let query = u64::from(r) * 4;
-                    let response = u64::from(c) * 4;
-                    let a = u64::from(r) * lwe_dim * 4;
-                    (k, r, c, hint, query, response, a)
-                }
-            };
+        let (
+            k,
+            reshape_rows,
+            reshape_row_width,
+            hint_per_segment,
+            query_per_segment,
+            response_per_segment,
+            a_per_segment,
+        ) = match backend {
+            Backend::Frodo => {
+                let lwe_dim = u64::from(FrodoParams::DEFAULT_LWE_DIM);
+                let hint = lwe_dim * u64::from(row_width) * 4;
+                let query = u64::from(segment_rows) * 4;
+                let response = u64::from(row_width) * 4;
+                let a = u64::from(segment_rows) * lwe_dim * 4;
+                (0, 0, 0, hint, query, response, a)
+            }
+            Backend::Simple => {
+                let (k, r, c) = reshape_dims(segment_rows, row_width);
+                let lwe_dim = u64::from(SimpleParams::DEFAULT_LWE_DIM);
+                let hint = lwe_dim * u64::from(c) * 4;
+                let query = u64::from(r) * 4;
+                let response = u64::from(c) * 4;
+                let a = u64::from(r) * lwe_dim * 4;
+                (k, r, c, hint, query, response, a)
+            }
+        };
 
         Sizes {
             cells_per_slot,
@@ -712,7 +739,8 @@ mod tests {
     #[test]
     fn for_accounts_enforces_arity_shape() {
         for arity in [2u32, 4] {
-            let g = Geometry::for_accounts(1_234_567, arity, 4, 32, &codec_96(), Backend::Simple).unwrap();
+            let g = Geometry::for_accounts(1_234_567, arity, 4, 32, &codec_96(), Backend::Simple)
+                .unwrap();
             assert!(g.num_buckets.is_power_of_two());
             assert!(g.num_buckets >= arity);
         }
@@ -726,8 +754,15 @@ mod tests {
         for accounts in [1u64, 100, 98_304, 98_305, 196_608, 10_000_000] {
             for arity in [2u32, 3, 4] {
                 for bucket_size in [1u32, 2, 4] {
-                    let g = Geometry::for_accounts(accounts, arity, bucket_size, 32, &codec_96(), Backend::Simple)
-                        .unwrap();
+                    let g = Geometry::for_accounts(
+                        accounts,
+                        arity,
+                        bucket_size,
+                        32,
+                        &codec_96(),
+                        Backend::Simple,
+                    )
+                    .unwrap();
                     let sizes = g.sizes(Backend::Simple, accounts);
                     assert!(
                         sizes.load_factor <= 0.90 + 1e-9,
@@ -800,9 +835,10 @@ mod tests {
                 let row = (arity - 2) as usize;
                 let col = (bucket_size - 1) as usize;
                 let original = MAX_LOAD_FACTOR[row][col];
-                let hundredths = max_load_factor_hundredths(arity, bucket_size).unwrap_or_else(|| {
-                    panic!("({arity},{bucket_size}) must have a MAX_LOAD_FACTOR entry")
-                });
+                let hundredths =
+                    max_load_factor_hundredths(arity, bucket_size).unwrap_or_else(|| {
+                        panic!("({arity},{bucket_size}) must have a MAX_LOAD_FACTOR entry")
+                    });
                 assert_eq!(
                     hundredths as f64 / 100.0,
                     original,
@@ -911,7 +947,8 @@ mod tests {
             (200_503_969, 100_663_296), // the live complete mainnet set, pre-ADR-0034
         ];
         for (accounts, expected_num_buckets) in cases {
-            let g = Geometry::for_accounts(accounts, 3, 4, 32, &codec_96(), Backend::Simple).unwrap();
+            let g =
+                Geometry::for_accounts(accounts, 3, 4, 32, &codec_96(), Backend::Simple).unwrap();
             assert_eq!(
                 g.num_buckets, expected_num_buckets,
                 "accounts={accounts}: num_buckets must be bit-identical across both retunes"
@@ -935,7 +972,8 @@ mod tests {
             (200_503_969, 67_108_864), // the live complete mainnet set
         ];
         for (accounts, expected_num_buckets) in cases {
-            let g = Geometry::for_accounts(accounts, 2, 4, 32, &codec_96(), Backend::Simple).unwrap();
+            let g =
+                Geometry::for_accounts(accounts, 2, 4, 32, &codec_96(), Backend::Simple).unwrap();
             assert_eq!(
                 g.num_buckets, expected_num_buckets,
                 "accounts={accounts}: num_buckets must match the deployed (arity=2, bucket_size=4) geometry"

@@ -35,8 +35,15 @@ fn value_codec() -> ValueCodec {
 
 fn build_node() -> Arc<NodeState> {
     let codec = value_codec();
-    let geom = Geometry::for_accounts(1_000, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        1_000,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -58,7 +65,10 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>, axum::http:
         .expect("oneshot");
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.expect("body").to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
     (status, body, headers)
 }
 
@@ -82,7 +92,11 @@ async fn recent_is_empty_until_the_follower_records_anything() {
     let app = NodeState::router(build_node());
     let (status, body, _) = get(&app, "/recent").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, vec![0, 0, 0, 0], "an empty deployment reports a count of zero, not an error");
+    assert_eq!(
+        body,
+        vec![0, 0, 0, 0],
+        "an empty deployment reports a count of zero, not an error"
+    );
 }
 
 #[tokio::test]
@@ -100,12 +114,18 @@ async fn recent_serves_newest_first_and_deduplicates() {
     let count = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
     assert_eq!(count, 3, "duplicate address was not collapsed");
     assert_eq!(body.len(), 4 + count * 20);
-    assert_eq!(&body[4..24], &addr(1), "most recently seen address must come first");
+    assert_eq!(
+        &body[4..24],
+        &addr(1),
+        "most recently seen address must come first"
+    );
     assert_eq!(&body[24..44], &addr(3));
     assert_eq!(&body[44..64], &addr(2));
 
     assert_eq!(
-        headers.get(axum::http::header::CACHE_CONTROL).map(|v| v.to_str().unwrap()),
+        headers
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
         Some("no-store"),
         "the suggestion list tracks the chain; a cached copy would go stale silently"
     );
@@ -120,7 +140,11 @@ async fn recent_is_capped() {
     let app = NodeState::router(state);
     let (_, body, _) = get(&app, "/recent").await;
     let count = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
-    assert_eq!(count, risepir_http::node::RECENT_CAPACITY, "the ring must be bounded");
+    assert_eq!(
+        count,
+        risepir_http::node::RECENT_CAPACITY,
+        "the ring must be bounded"
+    );
     assert_eq!(&body[4..24], &addr(255), "and must keep the newest");
 }
 
@@ -133,7 +157,10 @@ fn loading_assets_from_a_directory_without_them_is_a_startup_error() {
         Ok(_) => panic!("a missing asset directory must not load"),
         Err(e) => e.to_string(),
     };
-    assert!(msg.contains("index.html"), "the error should name the file it could not read: {msg}");
+    assert!(
+        msg.contains("index.html"),
+        "the error should name the file it could not read: {msg}"
+    );
 }
 
 #[test]
@@ -147,7 +174,10 @@ fn a_directory_missing_only_the_wasm_says_how_to_build_it() {
         Err(e) => e.to_string(),
     };
     assert!(msg.contains("client.wasm"), "{msg}");
-    assert!(msg.contains("xtask"), "the error should say how to produce it: {msg}");
+    assert!(
+        msg.contains("xtask"),
+        "the error should say how to produce it: {msg}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -176,7 +206,11 @@ async fn assets_are_served_with_their_hardening_headers() {
         assert_eq!(status, StatusCode::OK, "{route}");
         assert!(!body.is_empty(), "{route} served an empty body");
         assert_eq!(
-            headers.get(axum::http::header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             content_type,
             "{route}"
         );
@@ -194,7 +228,11 @@ async fn assets_are_served_with_their_hardening_headers() {
         assert!(csp.contains("'wasm-unsafe-eval'"), "{route}: {csp}");
         assert!(csp.contains("default-src 'none'"), "{route}: {csp}");
         assert_eq!(
-            headers.get("x-content-type-options").unwrap().to_str().unwrap(),
+            headers
+                .get("x-content-type-options")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "nosniff",
             "{route}"
         );
@@ -314,7 +352,10 @@ fn tempdir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "risepir-web-test-{}-{:?}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir

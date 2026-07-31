@@ -69,9 +69,22 @@ fn addr(byte: u8) -> [u8; 20] {
 /// `risepir-http/tests/client.rs`'s `spawn_node`, parameterized over the
 /// knobs this file's tests actually need to vary. Returns the base URL
 /// plus a handle to keep driving blocks against it directly.
-async fn spawn_test_node(capacity: u64, ring_capacity: usize, complete: bool, genesis: &[(AddressHash, u128)]) -> (String, Arc<NodeState>) {
+async fn spawn_test_node(
+    capacity: u64,
+    ring_capacity: usize,
+    complete: bool,
+    genesis: &[(AddressHash, u128)],
+) -> (String, Arc<NodeState>) {
     let value_codec = codec();
-    let geom = Geometry::for_accounts(capacity, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple).expect("geometry");
+    let geom = Geometry::for_accounts(
+        capacity,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -81,16 +94,26 @@ async fn spawn_test_node(capacity: u64, ring_capacity: usize, complete: bool, ge
     )
     .expect("store");
     for (key, balance) in genesis {
-        let encoded = value_codec.encode(key, *balance).expect("encode genesis balance");
-        store.insert(*key, &encoded).expect("insert genesis balance");
+        let encoded = value_codec
+            .encode(key, *balance)
+            .expect("encode genesis balance");
+        store
+            .insert(*key, &encoded)
+            .expect("insert genesis balance");
     }
 
     let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
-    let state = Arc::new(NodeState::new(server, DeltaRing::new(ring_capacity), complete));
+    let state = Arc::new(NodeState::new(
+        server,
+        DeltaRing::new(ring_capacity),
+        complete,
+    ));
     let router = NodeState::router(state.clone());
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
         axum::serve(listener, router).await.expect("axum::serve");
@@ -112,7 +135,11 @@ fn churn_update(block: u64) -> BlockUpdate {
         key[24..].copy_from_slice(&(block * 8 + i).to_be_bytes());
         changes.push((key, 1u128));
     }
-    BlockUpdate { block, changes, credits: Vec::new() }
+    BlockUpdate {
+        block,
+        changes,
+        credits: Vec::new(),
+    }
 }
 
 /// Bootstraps a [`PrivateEth`] exactly the way `front.rs`'s `spawn` does:
@@ -140,20 +167,30 @@ async fn stalled_client_rebootstraps_and_recovers_the_correct_balance() {
     let (base, state) = spawn_test_node(1_000, 3, true, &[(target_key, TARGET_BALANCE)]).await;
 
     let private_eth = bootstrap(&base, TEST_CHAIN_ID).await;
-    assert_eq!(private_eth.pinned_block().await, 0, "sanity: pinned at genesis");
+    assert_eq!(
+        private_eth.pinned_block().await,
+        0,
+        "sanity: pinned at genesis"
+    );
 
     // Sanity: the balance is reachable before the ring ages out — proves
     // the eventual success below is really about recovering from the
     // wedge, not a setup bug that would have failed regardless.
     assert_eq!(
-        private_eth.get_balance(target_addr).await.expect("pre-wedge lookup must succeed"),
+        private_eth
+            .get_balance(target_addr)
+            .await
+            .expect("pre-wedge lookup must succeed"),
         TARGET_BALANCE
     );
 
     // Advance the chain, touching only unrelated addresses, far past the
     // ring's tiny capacity.
     for block in 1..=20u64 {
-        state.apply_block(&churn_update(block)).await.expect("apply_block");
+        state
+            .apply_block(&churn_update(block))
+            .await
+            .expect("apply_block");
     }
 
     // Old behaviour: this call's internal sync of (0, 20] against a
@@ -164,7 +201,10 @@ async fn stalled_client_rebootstraps_and_recovers_the_correct_balance() {
         .get_balance(target_addr)
         .await
         .expect("get_balance must recover via one automatic re-bootstrap, not return Stalled");
-    assert_eq!(recovered, TARGET_BALANCE, "recovered balance must be byte-exact");
+    assert_eq!(
+        recovered, TARGET_BALANCE,
+        "recovered balance must be byte-exact"
+    );
 
     assert_eq!(
         private_eth.pinned_block().await,
@@ -174,7 +214,13 @@ async fn stalled_client_rebootstraps_and_recovers_the_correct_balance() {
 
     // Healthy afterward too, not just "recovered once by accident": a
     // subsequent ordinary call (no further stall) still works.
-    assert_eq!(private_eth.get_balance(target_addr).await.expect("post-recovery lookup"), TARGET_BALANCE);
+    assert_eq!(
+        private_eth
+            .get_balance(target_addr)
+            .await
+            .expect("post-recovery lookup"),
+        TARGET_BALANCE
+    );
 }
 
 // ── 3: strict_not_found is re-derived, never carried over stale ────────
@@ -193,7 +239,14 @@ async fn rebootstrap_recovers_strict_not_found_after_a_stale_complete_assumption
     // construct that stale state.
     let pir = PirHttpClient::new(&base);
     let bundle = pir.setup().await.expect("GET /setup");
-    let private_eth = PrivateEth::from_setup(pir, bundle, codec(), /* complete = */ true, TEST_CHAIN_ID, None);
+    let private_eth = PrivateEth::from_setup(
+        pir,
+        bundle,
+        codec(),
+        /* complete = */ true,
+        TEST_CHAIN_ID,
+        None,
+    );
 
     let untracked = addr(0x99);
 
@@ -214,7 +267,10 @@ async fn rebootstrap_recovers_strict_not_found_after_a_stale_complete_assumption
 
     // Force a stall: advance past the tiny ring capacity.
     for block in 1..=20u64 {
-        state.apply_block(&churn_update(block)).await.expect("apply_block");
+        state
+            .apply_block(&churn_update(block))
+            .await
+            .expect("apply_block");
     }
 
     // The automatic re-bootstrap re-fetches GET /mode fresh, which must
@@ -261,7 +317,15 @@ async fn force_stall(req: Request, next: Next) -> Response {
 /// function's docs.
 async fn spawn_permanently_stalled_node(capacity: u64, complete: bool) -> String {
     let value_codec = codec();
-    let geom = Geometry::for_accounts(capacity, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple).expect("geometry");
+    let geom = Geometry::for_accounts(
+        capacity,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -278,7 +342,9 @@ async fn spawn_permanently_stalled_node(capacity: u64, complete: bool) -> String
     let state = Arc::new(NodeState::new(server, DeltaRing::new(1), complete));
     let router = NodeState::router(state).layer(middleware::from_fn(force_stall));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
         axum::serve(listener, router).await.expect("axum::serve");
@@ -291,7 +357,11 @@ async fn spawn_permanently_stalled_node(capacity: u64, complete: bool) -> String
 async fn a_second_consecutive_stall_is_reported_not_retried_forever() {
     let base = spawn_permanently_stalled_node(100, true).await;
     let private_eth = bootstrap(&base, TEST_CHAIN_ID).await;
-    assert_eq!(private_eth.pinned_block().await, 0, "sanity: pinned at genesis");
+    assert_eq!(
+        private_eth.pinned_block().await,
+        0,
+        "sanity: pinned at genesis"
+    );
 
     // First attempt: /head always reports 999_999, so sync_to(0, 999_999)
     // calls /sync, which always 409s -> Stalled. get_balance then
@@ -348,8 +418,15 @@ async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
 
     let setup_fetches = StdArc::new(AtomicUsize::new(0));
     let value_codec = codec();
-    let geom = Geometry::for_accounts(100, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        100,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -361,9 +438,13 @@ async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
     let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
     let state = Arc::new(NodeState::new(server, DeltaRing::new(1), true));
-    let router = NodeState::router(state)
-        .layer(middleware::from_fn_with_state(StdArc::clone(&setup_fetches), count_setup_and_stall));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let router = NodeState::router(state).layer(middleware::from_fn_with_state(
+        StdArc::clone(&setup_fetches),
+        count_setup_and_stall,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let sock_addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
         axum::serve(listener, router).await.expect("axum::serve");
@@ -371,7 +452,11 @@ async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
     let base = format!("http://{sock_addr}");
 
     let private_eth = bootstrap(&base, TEST_CHAIN_ID).await;
-    assert_eq!(setup_fetches.load(Ordering::SeqCst), 1, "bootstrap = one /setup");
+    assert_eq!(
+        setup_fetches.load(Ordering::SeqCst),
+        1,
+        "bootstrap = one /setup"
+    );
 
     // First stalled call: consumes the one cooldown slot — exactly one
     // more /setup — and still (this server never un-stalls) reports
@@ -380,7 +465,11 @@ async fn a_rebootstrap_within_the_cooldown_is_not_paid_again() {
         Err(RpcError::Stalled) => {}
         other => panic!("expected Stalled, got {other:?}"),
     }
-    assert_eq!(setup_fetches.load(Ordering::SeqCst), 2, "one re-bootstrap = one more /setup");
+    assert_eq!(
+        setup_fetches.load(Ordering::SeqCst),
+        2,
+        "one re-bootstrap = one more /setup"
+    );
 
     // Immediate follow-up calls, well inside the cooldown: the stall is
     // reported honestly and /setup is NOT fetched again — the meter, not

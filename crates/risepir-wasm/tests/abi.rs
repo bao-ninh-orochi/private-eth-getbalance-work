@@ -21,7 +21,9 @@ use risepir_http::wire;
 use risepir_proto::{codec, keccak256, Backend, BlockUpdate, Geometry, ValueCodec};
 use risepir_server::{RisePirServer, SetupBundle};
 use risepir_wasm::abi::*;
-use risepir_wasm::{STATUS_DECODE_FAILED, STATUS_ERROR, STATUS_FOUND, STATUS_UNTRACKED, STATUS_ZERO};
+use risepir_wasm::{
+    STATUS_DECODE_FAILED, STATUS_ERROR, STATUS_FOUND, STATUS_UNTRACKED, STATUS_ZERO,
+};
 use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
 const ARITY: u32 = 2;
@@ -55,8 +57,15 @@ type Server = RisePirServer<Segmented2aryScheme, SimplePirBackend>;
 /// A server holding [`ACCOUNTS`] deterministic accounts at block 0.
 fn build_server() -> Server {
     let codec = value_codec();
-    let geom = Geometry::for_accounts(ACCOUNTS, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        ACCOUNTS,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -94,7 +103,8 @@ fn answer_over_wire(server: &Server, query_body: &[u8]) -> Vec<u8> {
     let params = server.params();
     let backend_params = server.setup().backend_params;
     let expected: Vec<u32> = backend_params.iter().map(|sp| sp.reshape_rows).collect();
-    let queries = wire::decode_query_bundle(query_body, &params, &expected).expect("server decodes our query");
+    let queries = wire::decode_query_bundle(query_body, &params, &expected)
+        .expect("server decodes our query");
     let (responses, head) = server.answer(&queries).expect("server answers");
     wire::encode_response_bundle(&responses, head)
 }
@@ -162,7 +172,10 @@ fn absent_account_is_untracked_for_a_partial_set() {
     addr[1] = 0xAD;
     let (status, _) = lookup(&server, &addr);
     assert_eq!(status, STATUS_UNTRACKED, "{}", last_error());
-    assert_ne!(status, STATUS_ZERO, "partial mode must never answer 0x0 for an untracked account");
+    assert_ne!(
+        status, STATUS_ZERO,
+        "partial mode must never answer 0x0 for an untracked account"
+    );
 }
 
 // ─── the rewind ────────────────────────────────────────────────────────
@@ -197,9 +210,16 @@ fn finish_refuses_until_the_delta_is_synced_then_succeeds() {
     let n = put_input(&response_body);
     assert_eq!(risepir_answer(n), 1, "answer should be stamped at block 1");
 
-    assert_eq!(risepir_finish(), STATUS_ERROR, "finish must refuse to guess the span");
+    assert_eq!(
+        risepir_finish(),
+        STATUS_ERROR,
+        "finish must refuse to guess the span"
+    );
     let err = last_error();
-    assert!(err.contains("answered at block 1"), "error should name the block: {err}");
+    assert!(
+        err.contains("answered at block 1"),
+        "error should name the block: {err}"
+    );
     assert!(err.contains("sync"), "error should say what to do: {err}");
 
     // Sync, then finish the same in-flight lookup.
@@ -209,7 +229,11 @@ fn finish_refuses_until_the_delta_is_synced_then_succeeds() {
 
     let status = risepir_finish();
     assert_eq!(status, STATUS_FOUND, "{}", last_error());
-    assert_eq!(balance_of(&output()), new_balance, "must be the post-block balance");
+    assert_eq!(
+        balance_of(&output()),
+        new_balance,
+        "must be the post-block balance"
+    );
 }
 
 /// The step-4-before-step-5 trap, through the ABI: an account that did not
@@ -271,7 +295,10 @@ fn repeated_queries_for_one_address_differ() {
     let second = output();
 
     assert_eq!(first.len(), second.len(), "same geometry, so same length");
-    assert_ne!(first, second, "a repeated query must carry fresh randomness");
+    assert_ne!(
+        first, second,
+        "a repeated query must carry fresh randomness"
+    );
 }
 
 // ─── refusing bad input ────────────────────────────────────────────────
@@ -280,7 +307,11 @@ fn repeated_queries_for_one_address_differ() {
 fn mode_byte_must_be_exactly_zero_or_one() {
     for body in [vec![], vec![2u8], vec![0u8, 1], vec![255]] {
         let n = put_input(&body);
-        assert_eq!(risepir_set_mode(n), STATUS_ERROR, "accepted mode body {body:?}");
+        assert_eq!(
+            risepir_set_mode(n),
+            STATUS_ERROR,
+            "accepted mode body {body:?}"
+        );
         assert!(last_error().contains("/mode"), "{}", last_error());
     }
 }
@@ -343,9 +374,18 @@ fn malformed_answer_and_delta_bodies_are_rejected() {
     assert!(risepir_query(n) > 0);
     let good = answer_over_wire(&server, &output());
 
-    for body in [Vec::new(), b"garbage".to_vec(), good[..good.len() - 1].to_vec()] {
+    for body in [
+        Vec::new(),
+        b"garbage".to_vec(),
+        good[..good.len() - 1].to_vec(),
+    ] {
         let n = put_input(&body);
-        assert_eq!(risepir_answer(n), i64::from(STATUS_ERROR), "accepted {} bytes", body.len());
+        assert_eq!(
+            risepir_answer(n),
+            i64::from(STATUS_ERROR),
+            "accepted {} bytes",
+            body.len()
+        );
         assert!(!last_error().is_empty());
     }
 
@@ -363,7 +403,11 @@ fn address_must_be_twenty_bytes() {
 
     for len in [0usize, 19, 21, 32] {
         let n = put_input(&vec![7u8; len]);
-        assert_eq!(risepir_query(n), i64::from(STATUS_ERROR), "accepted a {len}-byte address");
+        assert_eq!(
+            risepir_query(n),
+            i64::from(STATUS_ERROR),
+            "accepted a {len}-byte address"
+        );
         assert!(last_error().contains("20 bytes"), "{}", last_error());
     }
 }
@@ -384,7 +428,11 @@ fn a_second_query_before_finishing_is_refused() {
     let (other, _) = account(6);
     let n = put_input(&other);
     assert_eq!(risepir_query(n), i64::from(STATUS_ERROR));
-    assert!(last_error().contains("already in flight"), "{}", last_error());
+    assert!(
+        last_error().contains("already in flight"),
+        "{}",
+        last_error()
+    );
 
     // The first lookup is untouched and still completes correctly.
     let response_body = answer_over_wire(&server, &first_query);
@@ -399,7 +447,11 @@ fn finish_without_a_query_is_refused() {
     let server = build_server();
     init(&server, true);
     assert_eq!(risepir_finish(), STATUS_ERROR);
-    assert!(last_error().contains("no query in flight"), "{}", last_error());
+    assert!(
+        last_error().contains("no query in flight"),
+        "{}",
+        last_error()
+    );
 }
 
 /// Corruption of a response must never produce a *wrong number*.
@@ -474,7 +526,10 @@ fn a_corrupted_response_never_becomes_a_wrong_balance() {
             }
         }
     }
-    assert!(absorbed > 0, "every single-byte flip was rejected; the noise-tolerance regime went unexercised");
+    assert!(
+        absorbed > 0,
+        "every single-byte flip was rejected; the noise-tolerance regime went unexercised"
+    );
 
     // Regime 2: gross corruption, well past any noise budget. This must
     // never come back as a number — and if it somehow does, that number
@@ -494,7 +549,10 @@ fn a_corrupted_response_never_becomes_a_wrong_balance() {
             ),
         }
     }
-    assert!(caught > 0, "wholesale corruption was never caught; the integrity checks went unexercised");
+    assert!(
+        caught > 0,
+        "wholesale corruption was never caught; the integrity checks went unexercised"
+    );
 }
 
 // ── lineage epoch (ADR-0033) ───────────────────────────────────────────
@@ -506,7 +564,11 @@ fn a_corrupted_response_never_becomes_a_wrong_balance() {
 #[test]
 fn epoch_matches_the_wire_derivation_and_needs_a_session() {
     // Before init: an error, not a made-up token.
-    assert_eq!(risepir_epoch(), i64::from(STATUS_ERROR), "no session ⇒ no epoch");
+    assert_eq!(
+        risepir_epoch(),
+        i64::from(STATUS_ERROR),
+        "no session ⇒ no epoch"
+    );
 
     let server = build_server();
     init(&server, true);
@@ -515,7 +577,9 @@ fn epoch_matches_the_wire_derivation_and_needs_a_session() {
     assert!(n > 0, "epoch: {}", last_error());
     let epoch = String::from_utf8(output()).expect("epoch is ASCII hex");
     assert_eq!(epoch.len(), 16, "16 lowercase-hex chars");
-    assert!(epoch.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(epoch
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     assert_eq!(
         epoch,
         wire::lineage_epoch(&server.setup().backend_params),
@@ -532,9 +596,19 @@ fn set_mode_byte_validates_and_initialises() {
     assert_eq!(risepir_set_mode_byte(u32::MAX), STATUS_ERROR);
 
     let server = build_server();
-    assert_eq!(risepir_set_mode_byte(0), 0, "set_mode_byte(0): {}", last_error());
+    assert_eq!(
+        risepir_set_mode_byte(0),
+        0,
+        "set_mode_byte(0): {}",
+        last_error()
+    );
     let setup = setup_bytes(&server);
     let n = put_input(&setup);
-    assert_eq!(risepir_init(n), 0, "init after set_mode_byte: {}", last_error());
+    assert_eq!(
+        risepir_init(n),
+        0,
+        "init after set_mode_byte: {}",
+        last_error()
+    );
     assert_eq!(risepir_complete(), 0, "mode 0 = partial must stick");
 }

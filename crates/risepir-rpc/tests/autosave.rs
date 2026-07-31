@@ -37,14 +37,29 @@ fn codec() -> ValueCodec {
 /// `tests/journal.rs`'s job), so only *a* valid width matters here, not
 /// this exact one — kept consistent with `small_server` regardless.
 fn plaintext_bits() -> u32 {
-    simple_max_plaintext_bits(2, 64, 4, 32, codec().value_bits(), SimpleParams::DEFAULT_SIGMA)
+    simple_max_plaintext_bits(
+        2,
+        64,
+        4,
+        32,
+        codec().value_bits(),
+        SimpleParams::DEFAULT_SIGMA,
+    )
 }
 
 fn small_server() -> Server {
     let codec = codec();
     let num_buckets = 2 * 64;
-    let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-    let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+    let pb = simple_max_plaintext_bits(
+        2,
+        num_buckets / 2,
+        4,
+        32,
+        codec.value_bits(),
+        SimpleParams::DEFAULT_SIGMA,
+    );
+    let store =
+        Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
     Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
 }
 
@@ -60,10 +75,17 @@ fn update_for(b: u64) -> BlockUpdate {
     let mut changes = Vec::with_capacity(6);
     for i in 0..6u64 {
         let idx = ((b * 7 + i * 13) % 40) as u8;
-        changes.push((keccak256(&[idx; 20]), 1_000_000u128 + b as u128 * 1_000 + i as u128));
+        changes.push((
+            keccak256(&[idx; 20]),
+            1_000_000u128 + b as u128 * 1_000 + i as u128,
+        ));
     }
     let credits = vec![(keccak256(&[(b % 40) as u8; 20]), 7u128)];
-    BlockUpdate { block: b, changes, credits }
+    BlockUpdate {
+        block: b,
+        changes,
+        credits,
+    }
 }
 
 /// The balances `update_for(1..=n)` must leave behind, computed with
@@ -97,7 +119,10 @@ async fn queued_writer_parks_new_readers() {
 
     // Sanity: with no writer queued, readers share freely.
     let held = lock.read().await;
-    assert!(lock.try_read().is_ok(), "readers must share while no writer waits");
+    assert!(
+        lock.try_read().is_ok(),
+        "readers must share while no writer waits"
+    );
 
     // Queue a writer behind the held read guard.
     let writer = tokio::spawn({
@@ -221,14 +246,28 @@ async fn concurrent_saves_reload_consistently() {
         copies.iter().any(|(b, _)| *b < LAST_BLOCK),
         "every save landed at the final height; nothing was captured mid-run"
     );
-    assert_eq!(copies.last().unwrap().0, LAST_BLOCK, "the forced final save must capture the last block");
-    assert!(copies.windows(2).all(|w| w[0].0 < w[1].0), "saved heights must be strictly increasing");
+    assert_eq!(
+        copies.last().unwrap().0,
+        LAST_BLOCK,
+        "the forced final save must capture the last block"
+    );
+    assert!(
+        copies.windows(2).all(|w| w[0].0 < w[1].0),
+        "saved heights must be strictly increasing"
+    );
 
     for (saved_block, copy) in &copies {
-        let LoadedState { server: mut loaded, complete, .. } =
-            state::load(copy, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
+        let LoadedState {
+            server: mut loaded,
+            complete,
+            ..
+        } = state::load(copy, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
         assert!(complete);
-        assert_eq!(loaded.block(), *saved_block, "file must carry the height it was captured at");
+        assert_eq!(
+            loaded.block(),
+            *saved_block,
+            "file must carry the height it was captured at"
+        );
 
         // Check 1: D is exactly the simulated state at `saved_block`.
         let expected = simulate(*saved_block);
@@ -246,7 +285,11 @@ async fn concurrent_saves_reload_consistently() {
         for b in (*saved_block + 1)..=LAST_BLOCK {
             loaded.apply_block(&update_for(b)).unwrap();
         }
-        assert_eq!(loaded.cells(), &final_cells[..], "cells diverge after replay from height {saved_block}");
+        assert_eq!(
+            loaded.cells(),
+            &final_cells[..],
+            "cells diverge after replay from height {saved_block}"
+        );
         assert_eq!(
             wire::encode_setup(&loaded.setup()),
             final_setup,
@@ -277,23 +320,40 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     // well inside it; the NotDue assertion below is about the *clock*,
     // and a save that outlives the interval would make it racy.
     let interval = Duration::from_millis(250);
-    let saver = StateSaver::new(path.clone(), codec(), true, interval, None, plaintext_bits(), None);
+    let saver = StateSaver::new(
+        path.clone(),
+        codec(),
+        true,
+        interval,
+        None,
+        plaintext_bits(),
+        None,
+    );
 
     node.apply_block(&update_for(1)).await.unwrap();
     tokio::time::sleep(interval * 2).await;
-    assert!(matches!(saver.maybe_save(&node).await.unwrap(), SaveOutcome::Saved { block: 1, .. }));
+    assert!(matches!(
+        saver.maybe_save(&node).await.unwrap(),
+        SaveOutcome::Saved { block: 1, .. }
+    ));
 
     // Immediately after a save the interval has not elapsed.
     assert_eq!(saver.maybe_save(&node).await.unwrap(), SaveOutcome::NotDue);
 
     // Interval elapsed but nothing applied: no rewrite.
     tokio::time::sleep(interval * 2).await;
-    assert_eq!(saver.maybe_save(&node).await.unwrap(), SaveOutcome::Unchanged { block: 1 });
+    assert_eq!(
+        saver.maybe_save(&node).await.unwrap(),
+        SaveOutcome::Unchanged { block: 1 }
+    );
 
     // A new block makes the next due save fire again.
     node.apply_block(&update_for(2)).await.unwrap();
     tokio::time::sleep(interval * 2).await;
-    assert!(matches!(saver.maybe_save(&node).await.unwrap(), SaveOutcome::Saved { block: 2, .. }));
+    assert!(matches!(
+        saver.maybe_save(&node).await.unwrap(),
+        SaveOutcome::Saved { block: 2, .. }
+    ));
 
     // save_now writes even with an unchanged height (the operator asked).
     assert!(matches!(
@@ -302,9 +362,20 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     ));
 
     // Disabled saver: never due, no matter what.
-    let disabled = StateSaver::new(tmp("disabled.bin"), codec(), true, Duration::ZERO, None, plaintext_bits(), None);
+    let disabled = StateSaver::new(
+        tmp("disabled.bin"),
+        codec(),
+        true,
+        Duration::ZERO,
+        None,
+        plaintext_bits(),
+        None,
+    );
     tokio::time::sleep(interval).await;
-    assert_eq!(disabled.maybe_save(&node).await.unwrap(), SaveOutcome::NotDue);
+    assert_eq!(
+        disabled.maybe_save(&node).await.unwrap(),
+        SaveOutcome::NotDue
+    );
     assert!(!tmp("disabled.bin").exists());
 
     let loaded = state::load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
@@ -320,7 +391,15 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
 async fn concurrent_save_now_calls_serialize() {
     let path = tmp("serialize.bin");
     let node = Arc::new(NodeState::new(small_server(), DeltaRing::new(16), true));
-    let saver = Arc::new(StateSaver::new(path.clone(), codec(), true, Duration::ZERO, None, plaintext_bits(), None));
+    let saver = Arc::new(StateSaver::new(
+        path.clone(),
+        codec(),
+        true,
+        Duration::ZERO,
+        None,
+        plaintext_bits(),
+        None,
+    ));
     node.apply_block(&update_for(1)).await.unwrap();
 
     let tasks: Vec<_> = (0..2)
@@ -365,7 +444,15 @@ async fn a_backward_gap_append_is_skipped_not_a_journal_failure() {
 
     let path = tmp("benign-gap.bin");
     let node = NodeState::new(small_server(), DeltaRing::new(16), true);
-    let saver = StateSaver::new(path.clone(), codec(), true, Duration::from_secs(3600), None, plaintext_bits(), None);
+    let saver = StateSaver::new(
+        path.clone(),
+        codec(),
+        true,
+        Duration::from_secs(3600),
+        None,
+        plaintext_bits(),
+        None,
+    );
 
     node.apply_block(&update_for(1)).await.unwrap();
     node.apply_block(&update_for(2)).await.unwrap();
@@ -395,8 +482,12 @@ async fn a_backward_gap_append_is_skipped_not_a_journal_failure() {
     let len = file.metadata().unwrap().len();
     // 2 = small_server()'s real arity — a mismatch here would make every
     // record's payload fail to decode (ArityMismatch), not just look wrong.
-    let (header, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 2).unwrap();
-    assert_eq!(header.base_block, 2, "the rotation moved the base to the save height");
+    let (header, reader) =
+        JournalReader::open(BufReader::new(file), len, plaintext_bits(), 2).unwrap();
+    assert_eq!(
+        header.base_block, 2,
+        "the rotation moved the base to the save height"
+    );
     let blocks: Vec<u64> = reader.map(|rec| rec.delta.block).collect();
     assert_eq!(
         blocks,
@@ -420,7 +511,11 @@ async fn a_backward_gap_append_is_skipped_not_a_journal_failure() {
     let len = file.metadata().unwrap().len();
     let (_, reader) = JournalReader::open(BufReader::new(file), len, plaintext_bits(), 2).unwrap();
     let blocks: Vec<u64> = reader.map(|rec| rec.delta.block).collect();
-    assert_eq!(blocks, vec![3], "after a forward gap nothing further may be recorded");
+    assert_eq!(
+        blocks,
+        vec![3],
+        "after a forward gap nothing further may be recorded"
+    );
 
     std::fs::remove_file(&path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();

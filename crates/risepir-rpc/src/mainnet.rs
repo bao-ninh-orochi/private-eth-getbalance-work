@@ -401,7 +401,10 @@ fn die(msg: impl std::fmt::Display) -> ! {
 /// under the process between then and now) — not worth a fatal error over
 /// a diagnostic log line.
 fn report_journal_savings(state_path: &Path, journal_path: &Path, record_count: u64) {
-    let (Ok(state_meta), Ok(journal_meta)) = (std::fs::metadata(state_path), std::fs::metadata(journal_path)) else {
+    let (Ok(state_meta), Ok(journal_meta)) = (
+        std::fs::metadata(state_path),
+        std::fs::metadata(journal_path),
+    ) else {
         return;
     };
     logln!(
@@ -499,7 +502,8 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // deployed `(arity 2, bucket_size 4)` geometry (ADR-0034)
     // (`state::acquire_state_path`).
     let _state_lock = cfg.state.as_ref().map(|path| {
-        state::acquire_state_path(path).unwrap_or_else(|e| die(format!("--state {}: {e}", path.display())))
+        state::acquire_state_path(path)
+            .unwrap_or_else(|e| die(format!("--state {}: {e}", path.display())))
     });
 
     // `--hard-refresh` (ADR-0040) is validated here, before any bootstrap
@@ -533,12 +537,28 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             // onto raw parts before the store is built, so the fresh
             // server starts at the journal's height instead of the base
             // file's own. ──
-            logln!("risepir-rpc mainnet: loading state (--journal-restore) from {} ...", path.display());
+            logln!(
+                "risepir-rpc mainnet: loading state (--journal-restore) from {} ...",
+                path.display()
+            );
             let started = std::time::Instant::now();
-            let restored = state::load_with_journal_restore(path, backend_config.clone(), &codec, cfg.ring_capacity)
-                .unwrap_or_else(|e| die(format!("loading {} with journal restore: {e}", path.display())));
+            let restored = state::load_with_journal_restore(
+                path,
+                backend_config.clone(),
+                &codec,
+                cfg.ring_capacity,
+            )
+            .unwrap_or_else(|e| {
+                die(format!(
+                    "loading {} with journal restore: {e}",
+                    path.display()
+                ))
+            });
             let state::RestoredState {
-                loaded: state::LoadedState { server, complete, .. },
+                loaded:
+                    state::LoadedState {
+                        server, complete, ..
+                    },
                 replayed,
                 base_block,
                 tail_deltas,
@@ -553,7 +573,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 started.elapsed().as_secs_f64(),
                 server.block(),
                 server.num_items(),
-                if complete { "complete set" } else { "PARTIAL set" },
+                if complete {
+                    "complete set"
+                } else {
+                    "PARTIAL set"
+                },
             );
             if let Some(ScanStop::Invalid { offset, reason }) = &scan_stop {
                 logln!(
@@ -573,7 +597,9 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                     server.block(),
                 );
             } else if adopt_at.is_some() {
-                logln!("risepir-rpc mainnet: journal matched the base but had nothing new to replay");
+                logln!(
+                    "risepir-rpc mainnet: journal matched the base but had nothing new to replay"
+                );
             } else {
                 logln!("risepir-rpc mainnet: no usable journal found; serving from the base state file alone");
             }
@@ -607,16 +633,27 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             // before, but scan the journal read-only and report what it
             // would have done — the original ADR-0026 soak signal, still
             // available for an operator who wants to opt back out. ──
-            logln!("risepir-rpc mainnet: loading state from {} ...", path.display());
+            logln!(
+                "risepir-rpc mainnet: loading state from {} ...",
+                path.display()
+            );
             let started = std::time::Instant::now();
-            let state::LoadedState { server, complete, digest } = state::load(path, backend_config.clone(), &codec)
+            let state::LoadedState {
+                server,
+                complete,
+                digest,
+            } = state::load(path, backend_config.clone(), &codec)
                 .unwrap_or_else(|e| die(format!("loading {}: {e}", path.display())));
             logln!(
                 "risepir-rpc mainnet: state loaded in {:.1}s — block {}, {} accounts, {}",
                 started.elapsed().as_secs_f64(),
                 server.block(),
                 server.num_items(),
-                if complete { "complete set" } else { "PARTIAL set" },
+                if complete {
+                    "complete set"
+                } else {
+                    "PARTIAL set"
+                },
             );
 
             let plaintext_bits = server.params().plaintext_bits;
@@ -630,7 +667,12 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             // advice ("ignoring it until the next save upgrades the state
             // file") would now be wrong: an RPST1 file never gets a next
             // save, because it is refused at load.
-            let initial_journal = match journal::scan_report_only(&journal_path, digest, plaintext_bits, arity) {
+            let initial_journal = match journal::scan_report_only(
+                &journal_path,
+                digest,
+                plaintext_bits,
+                arity,
+            ) {
                 Ok(Some(report)) => {
                     // This whole branch only runs with journal-restore
                     // OFF, which since ADR-0037 means the operator
@@ -664,10 +706,17 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                     // file untouched (it is someone's recovery data)
                     // and let the next save's rotation start fresh.
                     if report.end_height == b {
-                        match JournalWriter::adopt(&journal_path, plaintext_bits, report.end_offset, report.end_height) {
+                        match JournalWriter::adopt(
+                            &journal_path,
+                            plaintext_bits,
+                            report.end_offset,
+                            report.end_height,
+                        ) {
                             Ok(w) => Some(w),
                             Err(e) => {
-                                logln!("risepir-rpc mainnet: WARNING: could not adopt journal: {e}");
+                                logln!(
+                                    "risepir-rpc mainnet: WARNING: could not adopt journal: {e}"
+                                );
                                 None
                             }
                         }
@@ -696,7 +745,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                     None
                 }
                 Err(e) => {
-                    logln!("risepir-rpc mainnet: WARNING: could not scan journal {}: {e}", journal_path.display());
+                    logln!(
+                        "risepir-rpc mainnet: WARNING: could not scan journal {}: {e}",
+                        journal_path.display()
+                    );
                     None
                 }
             };
@@ -711,9 +763,9 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             }
         }
     } else if !cfg.snapshot.is_empty() {
-        let snapshot_block = cfg
-            .snapshot_block
-            .unwrap_or_else(|| die("--snapshot requires --snapshot-block (the block the snapshot is exact at)"));
+        let snapshot_block = cfg.snapshot_block.unwrap_or_else(|| {
+            die("--snapshot requires --snapshot-block (the block the snapshot is exact at)")
+        });
 
         // The post-bootstrap snapshot audit (ADR-0040) needs at least 2
         // distinct reference providers whenever it will actually sample
@@ -731,8 +783,9 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         // starts at may be earlier than the snapshot's own declared exact
         // block — see `crate::snapshot_rewind`'s docs for what this
         // narrows and, just as importantly, what it does not fix.
-        let effective_genesis = snapshot_rewind::rewound_genesis(snapshot_block, cfg.snapshot_rewind)
-            .unwrap_or_else(|e| die(e));
+        let effective_genesis =
+            snapshot_rewind::rewound_genesis(snapshot_block, cfg.snapshot_rewind)
+                .unwrap_or_else(|e| die(e));
         if cfg.snapshot_rewind > 0 {
             logln!(
                 "risepir-rpc mainnet: --snapshot-rewind {}: treating the snapshot as exact at block {} \
@@ -755,8 +808,15 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 }
             }
         };
-        let geom = Geometry::for_accounts(accounts.max(1_000), ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-            .unwrap_or_else(|e| die(format!("geometry for {accounts} accounts: {e}")));
+        let geom = Geometry::for_accounts(
+            accounts.max(1_000),
+            ARITY,
+            BUCKET_SIZE,
+            FINGERPRINT_BITS,
+            &codec,
+            Backend::Simple,
+        )
+        .unwrap_or_else(|e| die(format!("geometry for {accounts} accounts: {e}")));
         let sizes = geom.sizes(Backend::Simple, accounts);
         logln!(
             "risepir-rpc mainnet: geometry for {accounts} accounts: {} buckets, server DB {:.2} GB, load {:.3}",
@@ -789,7 +849,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             );
         }
 
-        logln!("risepir-rpc mainnet: ingesting snapshot ({} shard(s)) ...", cfg.snapshot.len());
+        logln!(
+            "risepir-rpc mainnet: ingesting snapshot ({} shard(s)) ...",
+            cfg.snapshot.len()
+        );
         let started = std::time::Instant::now();
         let mut ingested = 0u64;
         let stats = snapshot::ingest(&cfg.snapshot, |addr20, key, balance| {
@@ -833,7 +896,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
         let mut on_disk_height = None;
         let mut initial_journal = None;
         if let Some(path) = &cfg.state {
-            logln!("risepir-rpc mainnet: saving state to {} ...", path.display());
+            logln!(
+                "risepir-rpc mainnet: saving state to {} ...",
+                path.display()
+            );
             let started = std::time::Instant::now();
             match state::save(&server, &codec, true, path) {
                 Ok(state::SaveReport { bytes, digest }) => {
@@ -856,7 +922,9 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
                 }
                 // Non-fatal: the server is correct in memory; only restart
                 // speed is lost. Say so and continue.
-                Err(e) => logln!("risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"),
+                Err(e) => logln!(
+                    "risepir-rpc mainnet: WARNING: state save failed ({e}); continuing without"
+                ),
             }
         }
 
@@ -892,8 +960,15 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             Ok(f) => f,
             Err(e) => die(format!("fetching finalized block: {e}")),
         };
-        let geom = Geometry::for_accounts(cfg.partial_capacity, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-            .unwrap_or_else(|e| die(format!("geometry: {e}")));
+        let geom = Geometry::for_accounts(
+            cfg.partial_capacity,
+            ARITY,
+            BUCKET_SIZE,
+            FINGERPRINT_BITS,
+            &codec,
+            Backend::Simple,
+        )
+        .unwrap_or_else(|e| die(format!("geometry: {e}")));
         let store = Segmented2aryCuckooKVStore::new(
             geom.num_buckets,
             geom.bucket_size,
@@ -931,7 +1006,11 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     } = bootstrap;
     let head_at_start = server.block();
     let plaintext_bits = server.params().plaintext_bits;
-    let node = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), complete));
+    let node = Arc::new(NodeState::new(
+        server,
+        DeltaRing::new(cfg.ring_capacity),
+        complete,
+    ));
     if !tail_deltas.is_empty() {
         // Restore-mode only (module docs, `NodeState::seed_history`):
         // these are exactly the deltas just replayed into this same
@@ -991,7 +1070,9 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // if a *stale* one from a previous lineage happens to exist, it is
     // overwritten within minutes by the fresh audit spawned below.
     if let Some(path) = &cfg.state {
-        if let snapshot_audit::AuditSidecar::Known(record) = snapshot_audit::read_sidecar(&snapshot_audit::sidecar_path(path)) {
+        if let snapshot_audit::AuditSidecar::Known(record) =
+            snapshot_audit::read_sidecar(&snapshot_audit::sidecar_path(path))
+        {
             node.set_snapshot_audit_line(snapshot_audit::healthz_value(&record));
         }
     }
@@ -1012,7 +1093,12 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
              (never blocks serving or following)",
             path.display()
         );
-        tokio::spawn(hard_refresh::run(node.clone(), corrections.clone(), path.clone(), cfg.refresh_urls.clone()));
+        tokio::spawn(hard_refresh::run(
+            node.clone(),
+            corrections.clone(),
+            path.clone(),
+            cfg.refresh_urls.clone(),
+        ));
     }
 
     if let Some(audit) = pending_audit {
@@ -1230,7 +1316,9 @@ async fn record_save_tick(saver: &StateSaver, node: &NodeState) {
     let outcome = saver.maybe_save(node).await;
     let elapsed = t0.elapsed();
     match outcome {
-        Ok(SaveOutcome::Saved { bytes, .. }) => node.record_save_outcome(unix_now(), elapsed, bytes),
+        Ok(SaveOutcome::Saved { bytes, .. }) => {
+            node.record_save_outcome(unix_now(), elapsed, bytes)
+        }
         Ok(SaveOutcome::Unchanged { .. } | SaveOutcome::NotDue | SaveOutcome::Busy) => {}
         Err(_) => node.record_save_failure(),
     }
@@ -1310,7 +1398,9 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                         || match node.balance_of(&key).await {
                             Ok(v) => v.is_some(),
                             Err(e) => {
-                                critical(&format!("verified read during credit filtering failed: {e}"));
+                                critical(&format!(
+                                    "verified read during credit filtering failed: {e}"
+                                ));
                                 return;
                             }
                         };
@@ -1337,15 +1427,20 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             // `--hard-refresh` was never set) is a cheap no-op, so this
             // runs unconditionally every block rather than behind an
             // `Option` check.
-            let drained = cfg.corrections.drain_up_to(hard_refresh::MAX_CORRECTIONS_PER_BLOCK);
+            let drained = cfg
+                .corrections
+                .drain_up_to(hard_refresh::MAX_CORRECTIONS_PER_BLOCK);
             if !drained.is_empty() {
-                let (still_valid, stale) = match hard_refresh::filter_stale_corrections(&node, drained).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        critical(&format!("verified read while re-checking hard-refresh corrections failed: {e}"));
-                        return;
-                    }
-                };
+                let (still_valid, stale) =
+                    match hard_refresh::filter_stale_corrections(&node, drained).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            critical(&format!(
+                            "verified read while re-checking hard-refresh corrections failed: {e}"
+                        ));
+                            return;
+                        }
+                    };
                 if stale > 0 {
                     logln!(
                         "risepir-rpc mainnet: hard-refresh: {stale} correction(s) dropped as stale in block {n} \
@@ -1359,7 +1454,10 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                          ({still_queued} still queued)",
                         still_valid.len()
                     );
-                    update.changes = hard_refresh::prepend_corrections(still_valid, std::mem::take(&mut update.changes));
+                    update.changes = hard_refresh::prepend_corrections(
+                        still_valid,
+                        std::mem::take(&mut update.changes),
+                    );
                 }
             }
 
@@ -1409,7 +1507,8 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             // exactly when the deployment actually holds it, never before.
             // These are the block's own touched addresses — public chain
             // data, and the same list for every caller.
-            node.note_recent(changed.iter().map(|(addr, _)| *addr)).await;
+            node.note_recent(changed.iter().map(|(addr, _)| *addr))
+                .await;
 
             if cfg.reconcile_every > 0 && n.is_multiple_of(cfg.reconcile_every) {
                 // Free: `finalized` and `n` (the block just applied) are
@@ -1545,11 +1644,16 @@ fn classify_checkpoint(candidates: usize, results: &[SampleResult], lag: u64) ->
     if candidates == 0 {
         return CheckpointOutcome::Empty;
     }
-    let checked = results.iter().filter(|r| **r == SampleResult::Matched).count();
+    let checked = results
+        .iter()
+        .filter(|r| **r == SampleResult::Matched)
+        .count();
     if checked > 0 {
         CheckpointOutcome::Success { checked }
     } else {
-        CheckpointOutcome::Dark { attempted: results.len() }
+        CheckpointOutcome::Dark {
+            attempted: results.len(),
+        }
     }
 }
 
@@ -1709,7 +1813,10 @@ impl FailureLogger {
     const VERBATIM_CAP: usize = 2;
 
     fn new() -> Self {
-        Self { logged: 0, suppressed: 0 }
+        Self {
+            logged: 0,
+            suppressed: 0,
+        }
     }
 
     /// Record one fetch failure; prints it verbatim for the first
@@ -1756,13 +1863,25 @@ enum CompareOutcome {
 /// deferred reservoir, ADR-0036 §4) — the halt behavior and the message's
 /// shape are otherwise identical to a normal candidate's, unchanged from
 /// before this ADR.
-async fn compare_one(node: &Arc<NodeState>, addr: &Address, n: u64, reference: Balance, reservoir_entry: bool) -> CompareOutcome {
+async fn compare_one(
+    node: &Arc<NodeState>,
+    addr: &Address,
+    n: u64,
+    reference: Balance,
+    reservoir_entry: bool,
+) -> CompareOutcome {
     let ours = match node.balance_of(&keccak256(addr)).await {
         Ok(v) => v.unwrap_or(0),
         Err(e) => {
             node.mark_reconcile_halted();
-            let suffix = if reservoir_entry { " (this address was a deferred-reservoir entry, ADR-0036 §4)" } else { "" };
-            critical(&format!("verified read during reconcile failed: {e}{suffix}"));
+            let suffix = if reservoir_entry {
+                " (this address was a deferred-reservoir entry, ADR-0036 §4)"
+            } else {
+                ""
+            };
+            critical(&format!(
+                "verified read during reconcile failed: {e}{suffix}"
+            ));
             return CompareOutcome::Halted;
         }
     };
@@ -1791,7 +1910,11 @@ fn since_last_success(health: &ReconcileHealth) -> String {
         "no successful comparison yet this run".to_string()
     } else {
         let elapsed = unix_now().saturating_sub(health.last_success_unix);
-        format!("{} since the last one, at block {}", format_duration_secs(elapsed), health.last_success_block)
+        format!(
+            "{} since the last one, at block {}",
+            format_duration_secs(elapsed),
+            health.last_success_block
+        )
     }
 }
 
@@ -1921,7 +2044,9 @@ async fn reconcile<C: ConfirmSource>(
         CheckpointOutcome::Empty => (0, false),
         CheckpointOutcome::Success { checked } => (checked, false),
         CheckpointOutcome::Dark { .. } => (0, true),
-        CheckpointOutcome::Deferred { .. } => unreachable!("lag <= RECENT_DEPTH_BLOCKS was already established above"),
+        CheckpointOutcome::Deferred { .. } => {
+            unreachable!("lag <= RECENT_DEPTH_BLOCKS was already established above")
+        }
     };
     let health = node.record_reconcile_checkpoint(n, record_checked, dark, false);
 
@@ -1941,7 +2066,9 @@ async fn reconcile<C: ConfirmSource>(
             );
             maybe_escalate(&health, reconcile_every);
         }
-        CheckpointOutcome::Deferred { .. } => unreachable!("lag <= RECENT_DEPTH_BLOCKS was already established above"),
+        CheckpointOutcome::Deferred { .. } => {
+            unreachable!("lag <= RECENT_DEPTH_BLOCKS was already established above")
+        }
     }
 
     // Drain the deferred reservoir (ADR-0036 §4): this checkpoint ran
@@ -2024,7 +2151,11 @@ mod tests {
     /// to check".
     #[test]
     fn all_fetches_failed_classifies_as_dark_not_success() {
-        let results = [SampleResult::FetchFailed, SampleResult::FetchFailed, SampleResult::FetchFailed];
+        let results = [
+            SampleResult::FetchFailed,
+            SampleResult::FetchFailed,
+            SampleResult::FetchFailed,
+        ];
         let outcome = classify_checkpoint(3, &results, 0);
         assert_eq!(outcome, CheckpointOutcome::Dark { attempted: 3 });
     }
@@ -2048,7 +2179,10 @@ mod tests {
     /// wrong reason. Pin the actual contract: candidate count decides.
     #[test]
     fn empty_classification_is_keyed_on_candidate_count() {
-        assert_eq!(classify_checkpoint(0, &[SampleResult::Matched], 0), CheckpointOutcome::Empty);
+        assert_eq!(
+            classify_checkpoint(0, &[SampleResult::Matched], 0),
+            CheckpointOutcome::Empty
+        );
     }
 
     /// At least one completed comparison, even amid failures, is `Success`
@@ -2057,7 +2191,12 @@ mod tests {
     /// `Matched` here is trustworthy.
     #[test]
     fn one_match_among_failures_is_success_with_exact_count() {
-        let results = [SampleResult::FetchFailed, SampleResult::Matched, SampleResult::FetchFailed, SampleResult::Matched];
+        let results = [
+            SampleResult::FetchFailed,
+            SampleResult::Matched,
+            SampleResult::FetchFailed,
+            SampleResult::Matched,
+        ];
         let outcome = classify_checkpoint(4, &results, 0);
         assert_eq!(outcome, CheckpointOutcome::Success { checked: 2 });
     }
@@ -2072,7 +2211,10 @@ mod tests {
     #[test]
     fn lag_beyond_recent_depth_classifies_as_deferred_regardless_of_results() {
         let lag = RECENT_DEPTH_BLOCKS + 1;
-        assert_eq!(classify_checkpoint(5, &[], lag), CheckpointOutcome::Deferred { lag });
+        assert_eq!(
+            classify_checkpoint(5, &[], lag),
+            CheckpointOutcome::Deferred { lag }
+        );
         assert_eq!(
             classify_checkpoint(5, &[SampleResult::Matched], lag),
             CheckpointOutcome::Deferred { lag },
@@ -2084,8 +2226,14 @@ mod tests {
     /// it) — pins the boundary rather than leaving `>` vs `>=` ambiguous.
     #[test]
     fn lag_exactly_at_threshold_is_not_deferred() {
-        assert_eq!(classify_checkpoint(0, &[], RECENT_DEPTH_BLOCKS), CheckpointOutcome::Empty);
-        assert_eq!(classify_checkpoint(3, &[SampleResult::Matched], RECENT_DEPTH_BLOCKS), CheckpointOutcome::Success { checked: 1 });
+        assert_eq!(
+            classify_checkpoint(0, &[], RECENT_DEPTH_BLOCKS),
+            CheckpointOutcome::Empty
+        );
+        assert_eq!(
+            classify_checkpoint(3, &[SampleResult::Matched], RECENT_DEPTH_BLOCKS),
+            CheckpointOutcome::Success { checked: 1 }
+        );
     }
 
     /// Zero lag (fully caught up) behaves exactly as pre-ADR-0036 — the
@@ -2101,7 +2249,10 @@ mod tests {
     #[test]
     fn escalation_does_not_fire_before_threshold() {
         for n in 0..DARK_ESCALATION_THRESHOLD {
-            assert!(!should_escalate(n), "must not escalate at consecutive_dark={n}");
+            assert!(
+                !should_escalate(n),
+                "must not escalate at consecutive_dark={n}"
+            );
         }
     }
 
@@ -2153,9 +2304,17 @@ mod tests {
         assert_eq!(stats.min, Some(Duration::from_millis(10)));
         assert_eq!(stats.max, Some(Duration::from_millis(30)));
         // mean = (10 + 30 + 20) / 3 = 20 ms
-        assert!((stats.mean_ms() - 20.0).abs() < 1e-9, "mean_ms = {}", stats.mean_ms());
+        assert!(
+            (stats.mean_ms() - 20.0).abs() < 1e-9,
+            "mean_ms = {}",
+            stats.mean_ms()
+        );
         // mean K = (100 + 200 + 300) / 3 = 200
-        assert!((stats.mean_k() - 200.0).abs() < 1e-9, "mean_k = {}", stats.mean_k());
+        assert!(
+            (stats.mean_k() - 200.0).abs() < 1e-9,
+            "mean_k = {}",
+            stats.mean_k()
+        );
     }
 
     #[test]
@@ -2244,7 +2403,11 @@ mod tests {
         let samples = 8usize;
         let budget = samples.saturating_mul(2);
         let outcomes = sample_reference(&AlwaysSucceeds, 1, &candidates, samples, budget).await;
-        assert_eq!(outcomes.len(), samples, "must stop once `samples` fetches have succeeded");
+        assert_eq!(
+            outcomes.len(),
+            samples,
+            "must stop once `samples` fetches have succeeded"
+        );
         assert!(outcomes.iter().all(Result::is_ok));
     }
 
@@ -2262,9 +2425,15 @@ mod tests {
     #[test]
     fn reservoir_caps_at_capacity_and_keeps_the_earliest_entries() {
         let mut r = DeferredReservoir::default();
-        let addrs: Vec<Address> = (0..(DEFERRED_RESERVOIR_CAP as u32 + 50)).map(addr_for).collect();
+        let addrs: Vec<Address> = (0..(DEFERRED_RESERVOIR_CAP as u32 + 50))
+            .map(addr_for)
+            .collect();
         r.insert_many(addrs.iter().copied());
-        assert_eq!(r.len(), DEFERRED_RESERVOIR_CAP, "must not grow past the cap");
+        assert_eq!(
+            r.len(),
+            DEFERRED_RESERVOIR_CAP,
+            "must not grow past the cap"
+        );
         // The FIRST entries are kept, not the last -- no eviction/thrash of
         // already-queued (older) addresses to make room for newer ones.
         assert_eq!(r.pop_front_up_to(1), vec![addr_for(0)]);
@@ -2316,7 +2485,11 @@ mod tests {
             detail: "stub".to_string(),
         };
         let mut logger = FailureLogger::new();
-        assert_eq!(FailureLogger::VERBATIM_CAP, 2, "test assumes the documented default of 2");
+        assert_eq!(
+            FailureLogger::VERBATIM_CAP,
+            2,
+            "test assumes the documented default of 2"
+        );
         for _ in 0..5 {
             logger.log(&addr, 1, &err);
         }

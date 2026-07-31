@@ -157,6 +157,10 @@ pub async fn spawn(cfg: FrontConfig) -> FrontHandle {
 /// but is not a reliable *destination*), the bind address itself
 /// otherwise.
 pub(crate) fn local_url(bind: Ipv4Addr, port: u16) -> String {
-    let ip = if bind.is_unspecified() { Ipv4Addr::LOCALHOST } else { bind };
+    let ip = if bind.is_unspecified() {
+        Ipv4Addr::LOCALHOST
+    } else {
+        bind
+    };
     format!("http://{ip}:{port}")
 }

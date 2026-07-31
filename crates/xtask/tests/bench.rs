@@ -30,17 +30,30 @@ fn tiny_bench_run_is_self_consistent() {
     assert_eq!(scale.accounts, 20_000);
     assert_eq!(report.requested_top_scale, 20_000);
     assert_eq!(report.reached_top_scale, 20_000);
-    assert!(report.top_scale_fallback_reason.is_none(), "a single small scale must never trigger the fallback");
+    assert!(
+        report.top_scale_fallback_reason.is_none(),
+        "a single small scale must never trigger the fallback"
+    );
 
     // 1. Full-rebuild time must be a real, positive measurement.
-    assert!(scale.rebuild.as_nanos() > 0, "rebuild time must be measured as > 0");
+    assert!(
+        scale.rebuild.as_nanos() > 0,
+        "rebuild time must be measured as > 0"
+    );
 
     // 2. Per-block patch time: the full K curve, every point positive.
     assert_eq!(report.patch_curve.len(), cfg.k_values.len());
     for point in &report.patch_curve {
-        assert!(point.avg_ms > 0.0, "K={} patch time must be measured as > 0", point.k);
+        assert!(
+            point.avg_ms > 0.0,
+            "K={} patch time must be measured as > 0",
+            point.k
+        );
     }
-    assert!(scale.headline_patch_ms > 0.0, "headline patch time must be measured as > 0");
+    assert!(
+        scale.headline_patch_ms > 0.0,
+        "headline patch time must be measured as > 0"
+    );
 
     // 3. Compact delta bytes must beat the naive 10 B/cell baseline.
     assert!(
@@ -56,7 +69,10 @@ fn tiny_bench_run_is_self_consistent() {
     assert!(report.delta_bytes.ratio > 1.0);
 
     // 5. Answer latency must be a real, positive measurement.
-    assert!(report.answer_latency.avg_ms > 0.0, "answer latency must be measured as > 0");
+    assert!(
+        report.answer_latency.avg_ms > 0.0,
+        "answer latency must be measured as > 0"
+    );
     assert_eq!(report.answer_latency.n_queries, cfg.measured_queries);
 
     // Sizes (item 4) are computed, not timed, but must still be internally

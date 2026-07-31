@@ -165,8 +165,10 @@ impl BlockDelta {
                 row_map
                     .into_iter()
                     .filter_map(|(row, cell_map)| {
-                        let cells: Vec<(u16, i64)> =
-                            cell_map.into_iter().filter(|(_, delta)| *delta != 0).collect();
+                        let cells: Vec<(u16, i64)> = cell_map
+                            .into_iter()
+                            .filter(|(_, delta)| *delta != 0)
+                            .collect();
                         if cells.is_empty() {
                             None
                         } else {

@@ -61,8 +61,15 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
 
     // Size the geometry from the genesis account count (75% target load; the
     // invariant live set keeps us there), then build the store from genesis.
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -79,14 +86,18 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
     let mut server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), codec, 0);
     let mut ring = DeltaRing::new(300);
-    let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(server.setup(), codec);
+    let mut client: RisePirClient<SimplePirBackend> =
+        RisePirClient::from_setup(server.setup(), codec);
 
     // Follow the mock, wiring every block through apply_block, the ring, and
     // the client's rolling delta. Meanwhile collect category samples.
     let mut deleted: Vec<AddressHash> = Vec::new();
     let mut activity: HashMap<AddressHash, u32> = HashMap::new();
     for _ in 0..BLOCKS {
-        let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         for (addr, bal) in &upd.changes {
             if *bal == 0 {
                 deleted.push(*addr);
@@ -101,7 +112,11 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
 
     assert_eq!(server.block(), BLOCKS);
     assert_eq!(ring.head(), Some(BLOCKS));
-    assert_eq!(client.pinned_block(), 0, "hint stays pinned at genesis; no GC");
+    assert_eq!(
+        client.pinned_block(),
+        0,
+        "hint stays pinned at genesis; no GC"
+    );
 
     // ── Build the category samples ──────────────────────────────────────
     let live_set: HashSet<AddressHash> = feed.live_keys().iter().copied().collect();
@@ -114,14 +129,23 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
         .filter(|a| feed.balance_of(a) == 0 && !live_set.contains(a))
         .take(8)
         .collect();
-    assert!(!deleted_sample.is_empty(), "sample must contain deleted keys (non-vacuous)");
+    assert!(
+        !deleted_sample.is_empty(),
+        "sample must contain deleted keys (non-vacuous)"
+    );
 
     // HIGH-ACTIVITY: still-live keys touched the most times during the run.
-    let mut activity_live: Vec<(AddressHash, u32)> =
-        activity.iter().filter(|(a, _)| live_set.contains(*a)).map(|(a, c)| (*a, *c)).collect();
+    let mut activity_live: Vec<(AddressHash, u32)> = activity
+        .iter()
+        .filter(|(a, _)| live_set.contains(*a))
+        .map(|(a, c)| (*a, *c))
+        .collect();
     activity_live.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let high_activity: Vec<AddressHash> = activity_live.iter().take(6).map(|(a, _)| *a).collect();
-    assert!(!high_activity.is_empty(), "sample must contain touched (high-activity) keys");
+    assert!(
+        !high_activity.is_empty(),
+        "sample must contain touched (high-activity) keys"
+    );
 
     // LIVE-UNTOUCHED: genesis keys still live that were never in the change
     // stream (a low block count leaves most genesis keys untouched).
@@ -132,12 +156,21 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
         .filter(|a| !activity.contains_key(a))
         .take(8)
         .collect();
-    assert!(!untouched.is_empty(), "sample must contain untouched-since-genesis keys");
+    assert!(
+        !untouched.is_empty(),
+        "sample must contain untouched-since-genesis keys"
+    );
 
     // NEVER-EXISTED: ids the mock never generates (its ids stay well below 1e7).
-    let never: Vec<AddressHash> = (0..8u64).map(|i| MockFeed::address_for(10_000_000 + i)).collect();
+    let never: Vec<AddressHash> = (0..8u64)
+        .map(|i| MockFeed::address_for(10_000_000 + i))
+        .collect();
     for a in &never {
-        assert_eq!(feed.balance_of(a), 0, "sanity: never-existed keys are absent from ground truth");
+        assert_eq!(
+            feed.balance_of(a),
+            0,
+            "sanity: never-existed keys are absent from ground truth"
+        );
     }
 
     // ── Diff every sampled private answer against ground truth ──────────
@@ -162,9 +195,15 @@ fn mock_pipeline_matches_ground_truth_across_all_categories() {
     // LIVE (high-activity + untouched) must resolve to the exact ground-truth balance.
     for addr in high_activity.iter().chain(untouched.iter()) {
         let expected: Balance = feed.balance_of(addr);
-        assert_ne!(expected, 0, "sanity: a live key has a nonzero ground-truth balance");
+        assert_ne!(
+            expected, 0,
+            "sanity: a live key has a nonzero ground-truth balance"
+        );
         match private_lookup(&mut client, &server, addr) {
-            Lookup::Found(b) => assert_eq!(b, expected, "private balance must match ground truth for {addr:?}"),
+            Lookup::Found(b) => assert_eq!(
+                b, expected,
+                "private balance must match ground truth for {addr:?}"
+            ),
             other => panic!("live key {addr:?} resolved to {other:?}, expected Found({expected})"),
         }
     }

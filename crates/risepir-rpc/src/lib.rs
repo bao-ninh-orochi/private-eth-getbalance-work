@@ -64,5 +64,5 @@ pub mod snapshot_rewind;
 pub mod state;
 
 pub use error::RpcError;
-pub use risepir_proto::keccak256;
 pub use private_eth::PrivateEth;
+pub use risepir_proto::keccak256;

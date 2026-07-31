@@ -154,9 +154,19 @@ fn full_rebuild_never_copies_the_cell_array_and_stays_correct() {
     // would ever be needed.
     for block in 1u64..=3 {
         let changes: Vec<(AddressHash, Balance)> = (0..500u64)
-            .map(|i| (addr(block * 10_000 + i), 1_000_000_000_000_000_000u128 + u128::from(block * 10_000 + i)))
+            .map(|i| {
+                (
+                    addr(block * 10_000 + i),
+                    1_000_000_000_000_000_000u128 + u128::from(block * 10_000 + i),
+                )
+            })
             .collect();
-        s.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+        s.apply_block(&BlockUpdate {
+            block,
+            changes,
+            credits: vec![],
+        })
+        .unwrap();
     }
 
     // The whole-database size a single allocation must never match.
@@ -215,9 +225,17 @@ fn full_rebuild_never_copies_the_cell_array_and_stays_correct() {
     // off-by-one in the reshape/tiling math without querying the whole
     // (small, but not tiny) test database.
     for &row in &[0u32, segment_size / 2] {
-        let queries: Vec<_> = states.iter_mut().map(|st| SimplePirBackend::client_query(st, row)).collect();
-        let (responses, answered_at) = s.answer(&queries).expect("well-formed queries must be answered");
-        assert_eq!(answered_at, 3, "full_rebuild must not change the server's block");
+        let queries: Vec<_> = states
+            .iter_mut()
+            .map(|st| SimplePirBackend::client_query(st, row))
+            .collect();
+        let (responses, answered_at) = s
+            .answer(&queries)
+            .expect("well-formed queries must be answered");
+        assert_eq!(
+            answered_at, 3,
+            "full_rebuild must not change the server's block"
+        );
 
         for (j, (state, response)) in states.iter().zip(&responses).enumerate() {
             let decoded = SimplePirBackend::client_decode(state, response);
@@ -234,5 +252,8 @@ fn full_rebuild_never_copies_the_cell_array_and_stays_correct() {
     // Sanity: the store itself is untouched by full_rebuild (it never
     // writes to `self.store`), so the ordinary verified read path must
     // still round-trip correctly after the rebuild.
-    assert_eq!(s.balance_of(&addr(10_000)).unwrap(), Some(1_000_000_000_000_010_000u128));
+    assert_eq!(
+        s.balance_of(&addr(10_000)).unwrap(),
+        Some(1_000_000_000_000_010_000u128)
+    );
 }

@@ -517,7 +517,10 @@ pub struct BenchReport {
 /// here means the harness itself is misconfigured, not that it hit a
 /// real, expected error condition.
 pub fn run(cfg: &BenchConfig) -> BenchReport {
-    assert!(!cfg.scales.is_empty(), "bench: cfg.scales must not be empty");
+    assert!(
+        !cfg.scales.is_empty(),
+        "bench: cfg.scales must not be empty"
+    );
     assert!(
         cfg.scales.contains(&cfg.mid_scale),
         "bench: cfg.mid_scale ({}) must be one of cfg.scales ({:?})",
@@ -555,7 +558,9 @@ pub fn run(cfg: &BenchConfig) -> BenchReport {
         // ("largest additional scale ... that both fits in memory ... and
         // completes ... in a reasonable time").
         if is_last && i > 0 {
-            if let Some(reason) = unsafe_to_attempt_top_scale(&scale_reports[i - 1], accounts, &codec) {
+            if let Some(reason) =
+                unsafe_to_attempt_top_scale(&scale_reports[i - 1], accounts, &codec)
+            {
                 let prev_accounts = scale_reports[i - 1].accounts;
                 let mut candidate = accounts;
                 loop {
@@ -565,7 +570,8 @@ pub fn run(cfg: &BenchConfig) -> BenchReport {
                     }
                     candidate = next;
                     if candidate <= prev_accounts
-                        || unsafe_to_attempt_top_scale(&scale_reports[i - 1], candidate, &codec).is_none()
+                        || unsafe_to_attempt_top_scale(&scale_reports[i - 1], candidate, &codec)
+                            .is_none()
                     {
                         break;
                     }
@@ -599,7 +605,14 @@ pub fn run(cfg: &BenchConfig) -> BenchReport {
                 let avg_ms = if k == cfg.headline_k {
                     headline_ms
                 } else {
-                    measure_patch_at_k(&mut build.server, &mut build.feed, k, cfg.warmup_blocks, cfg.measured_blocks).0
+                    measure_patch_at_k(
+                        &mut build.server,
+                        &mut build.feed,
+                        k,
+                        cfg.warmup_blocks,
+                        cfg.measured_blocks,
+                    )
+                    .0
                 };
                 patch_curve.push(PatchCurvePoint { k, avg_ms });
             }
@@ -622,7 +635,8 @@ pub fn run(cfg: &BenchConfig) -> BenchReport {
                 ratio: naive_bytes as f64 / compact_bytes.max(1) as f64,
             });
 
-            let avg_ms = measure_answer_latency(&build.server, &build.feed, &codec, cfg.measured_queries);
+            let avg_ms =
+                measure_answer_latency(&build.server, &build.feed, &codec, cfg.measured_queries);
             answer_latency = Some(AnswerLatencyReport {
                 accounts,
                 n_queries: cfg.measured_queries,
@@ -646,8 +660,10 @@ pub fn run(cfg: &BenchConfig) -> BenchReport {
         config: cfg.clone(),
         scales: scale_reports,
         patch_curve,
-        delta_bytes: delta_bytes.expect("mid_scale is always in cfg.scales (asserted above), so it always runs"),
-        answer_latency: answer_latency.expect("mid_scale is always in cfg.scales (asserted above), so it always runs"),
+        delta_bytes: delta_bytes
+            .expect("mid_scale is always in cfg.scales (asserted above), so it always runs"),
+        answer_latency: answer_latency
+            .expect("mid_scale is always in cfg.scales (asserted above), so it always runs"),
         requested_top_scale,
         reached_top_scale,
         top_scale_fallback_reason,
@@ -672,9 +688,21 @@ struct ScaleBuild {
 /// configured for insert/delete-free churn (`inserts_per_block =
 /// deletes_per_block = 0`) so every subsequent `next_block()` call is pure
 /// updates to already-live accounts (see the module docs).
-fn build_scale(accounts: u64, seed: u64, max_changes_per_block: usize, codec: ValueCodec) -> ScaleBuild {
-    let geometry = Geometry::for_accounts(accounts, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-        .unwrap_or_else(|e| panic!("bench: geometry for {accounts} accounts: {e}"));
+fn build_scale(
+    accounts: u64,
+    seed: u64,
+    max_changes_per_block: usize,
+    codec: ValueCodec,
+) -> ScaleBuild {
+    let geometry = Geometry::for_accounts(
+        accounts,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &codec,
+        Backend::Simple,
+    )
+    .unwrap_or_else(|e| panic!("bench: geometry for {accounts} accounts: {e}"));
 
     let feed = MockFeed::new(MockConfig {
         seed,
@@ -730,7 +758,11 @@ fn sliced_block(feed: &mut MockFeed, k: usize) -> BlockUpdate {
         .expect("MockFeed always has a next block");
     let block = upd.block;
     let changes = upd.changes.into_iter().take(k).collect();
-    BlockUpdate { block, changes, credits: vec![] }
+    BlockUpdate {
+        block,
+        changes,
+        credits: vec![],
+    }
 }
 
 /// Applies `warmup_blocks` (discarded) then `measured_blocks` (timed)
@@ -747,9 +779,9 @@ fn measure_patch_at_k(
 ) -> (f64, BlockDelta) {
     for _ in 0..warmup_blocks {
         let update = sliced_block(feed, k);
-        server
-            .apply_block(&update)
-            .expect("bench: apply_block under the insert/delete-free K-update workload must not fail");
+        server.apply_block(&update).expect(
+            "bench: apply_block under the insert/delete-free K-update workload must not fail",
+        );
     }
 
     let mut total = Duration::ZERO;
@@ -757,25 +789,36 @@ fn measure_patch_at_k(
     for _ in 0..measured_blocks {
         let update = sliced_block(feed, k);
         let t0 = Instant::now();
-        let delta = server
-            .apply_block(&update)
-            .expect("bench: apply_block under the insert/delete-free K-update workload must not fail");
+        let delta = server.apply_block(&update).expect(
+            "bench: apply_block under the insert/delete-free K-update workload must not fail",
+        );
         total += t0.elapsed();
         last_delta = Some(delta);
     }
 
     let avg_ms = total.as_secs_f64() * 1000.0 / measured_blocks as f64;
-    (avg_ms, last_delta.expect("measured_blocks is always >= 1 in this module's configs"))
+    (
+        avg_ms,
+        last_delta.expect("measured_blocks is always >= 1 in this module's configs"),
+    )
 }
 
 /// Builds a real [`RisePirClient`] from `server.setup()` and times
 /// `server.answer(&queries)` (only — never `client.finish`, per the
 /// brief) over `n_queries` real, live keys, returning the average in
 /// milliseconds.
-fn measure_answer_latency(server: &Server, feed: &MockFeed, codec: &ValueCodec, n_queries: usize) -> f64 {
+fn measure_answer_latency(
+    server: &Server,
+    feed: &MockFeed,
+    codec: &ValueCodec,
+    n_queries: usize,
+) -> f64 {
     let mut client: Client = RisePirClient::from_setup(server.setup(), *codec);
     let live = feed.live_keys();
-    assert!(!live.is_empty(), "bench: a scale's live set must be non-empty");
+    assert!(
+        !live.is_empty(),
+        "bench: a scale's live set must be non-empty"
+    );
 
     let mut rng = Xorshift64(0xA5A5_5A5A_1234_5678);
     let mut total = Duration::ZERO;
@@ -783,7 +826,9 @@ fn measure_answer_latency(server: &Server, feed: &MockFeed, codec: &ValueCodec, 
         let idx = (rng.next() as usize) % live.len();
         let (queries, _ctx) = client.build_query(&live[idx]);
         let t0 = Instant::now();
-        let _ = server.answer(&queries).expect("bench: answer must succeed for a well-formed query");
+        let _ = server
+            .answer(&queries)
+            .expect("bench: answer must succeed for a well-formed query");
         total += t0.elapsed();
     }
     total.as_secs_f64() * 1000.0 / n_queries as f64
@@ -799,7 +844,11 @@ fn measure_answer_latency(server: &Server, feed: &MockFeed, codec: &ValueCodec, 
 /// whether to attempt a scale — it is never itself reported as a measured
 /// number (the brief: report actual measured times, never extrapolated
 /// ones).
-fn unsafe_to_attempt_top_scale(prev: &ScaleReport, candidate: u64, codec: &ValueCodec) -> Option<String> {
+fn unsafe_to_attempt_top_scale(
+    prev: &ScaleReport,
+    candidate: u64,
+    codec: &ValueCodec,
+) -> Option<String> {
     let prev_secs = prev.rebuild.as_secs_f64().max(1e-6);
     let projected_secs = prev_secs * (candidate as f64 / prev.accounts as f64) * SAFETY_FACTOR;
     if projected_secs > MAX_PROJECTED_REBUILD_SECS {
@@ -832,8 +881,15 @@ fn unsafe_to_attempt_top_scale(prev: &ScaleReport, candidate: u64, codec: &Value
 /// module consumes) — this crate does not expose an exact formula for the
 /// latter, so the allowance is deliberately generous.
 fn projected_memory_bytes(accounts: u64, codec: &ValueCodec) -> u64 {
-    let geometry = Geometry::for_accounts(accounts, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, codec, Backend::Simple)
-        .expect("bench: geometry must be constructible for the projected scale");
+    let geometry = Geometry::for_accounts(
+        accounts,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        codec,
+        Backend::Simple,
+    )
+    .expect("bench: geometry must be constructible for the projected scale");
     let sizes = geometry.sizes(Backend::Simple, accounts);
     let backend_bytes = 3 * (sizes.hint_per_segment + 2 * sizes.a_per_segment);
     let mock_feed_overhead = accounts * 120;
@@ -923,12 +979,20 @@ struct TopScaleFigures {
 /// a future `--scales` run that stops short of this scale), falls back to
 /// the frozen constants and flags `self_describing: false`.
 fn resolve_top_scale_figures(report: &BenchReport) -> TopScaleFigures {
-    match report.scales.iter().find(|s| s.accounts == PUBLISHED_TOP_SCALE_ACCOUNTS) {
+    match report
+        .scales
+        .iter()
+        .find(|s| s.accounts == PUBLISHED_TOP_SCALE_ACCOUNTS)
+    {
         Some(s) => {
             let rebuild_secs = s.rebuild.as_secs_f64();
             let patch_secs = s.headline_patch_ms / 1000.0;
             let ratio = (rebuild_secs / patch_secs.max(1e-9)).round() as u64;
-            TopScaleFigures { rebuild_secs, ratio, self_describing: true }
+            TopScaleFigures {
+                rebuild_secs,
+                ratio,
+                self_describing: true,
+            }
         }
         None => TopScaleFigures {
             rebuild_secs: PUBLISHED_REBUILD_SECS_AT_TOP_SCALE,
@@ -952,9 +1016,15 @@ struct MidScaleLatency {
 /// `self_describing: false`.
 fn resolve_mid_scale_latency(report: &BenchReport) -> MidScaleLatency {
     if report.answer_latency.accounts == PUBLISHED_MID_SCALE_ACCOUNTS {
-        MidScaleLatency { ms: report.answer_latency.avg_ms, self_describing: true }
+        MidScaleLatency {
+            ms: report.answer_latency.avg_ms,
+            self_describing: true,
+        }
     } else {
-        MidScaleLatency { ms: PUBLISHED_ANSWER_LATENCY_MS_AT_MID_SCALE, self_describing: false }
+        MidScaleLatency {
+            ms: PUBLISHED_ANSWER_LATENCY_MS_AT_MID_SCALE,
+            self_describing: false,
+        }
     }
 }
 
@@ -984,7 +1054,12 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     let top_figs = resolve_top_scale_figures(report);
     let mid_lat = resolve_mid_scale_latency(report);
 
-    writeln!(out, "## 7. The complete mainnet set ({} accounts)", fmt_num(DEPLOYMENT_ACCOUNTS)).unwrap();
+    writeln!(
+        out,
+        "## 7. The complete mainnet set ({} accounts)",
+        fmt_num(DEPLOYMENT_ACCOUNTS)
+    )
+    .unwrap();
     writeln!(out).unwrap();
     // "This file's largest bench scale" is always `report.reached_top_scale`
     // — whatever this exact render actually reached — never
@@ -1020,10 +1095,19 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     .unwrap();
     writeln!(out).unwrap();
 
-    let deployed_db_bytes = Geometry::for_accounts(DEPLOYMENT_ACCOUNTS, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-        .expect("complete_set_markdown: the deployed (arity, bucket_size) must size the live account count")
-        .sizes(Backend::Simple, DEPLOYMENT_ACCOUNTS)
-        .server_db;
+    let deployed_db_bytes = Geometry::for_accounts(
+        DEPLOYMENT_ACCOUNTS,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &codec,
+        Backend::Simple,
+    )
+    .expect(
+        "complete_set_markdown: the deployed (arity, bucket_size) must size the live account count",
+    )
+    .sizes(Backend::Simple, DEPLOYMENT_ACCOUNTS)
+    .server_db;
 
     writeln!(
         out,
@@ -1053,10 +1137,19 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     )
     .unwrap();
     writeln!(out).unwrap();
-    writeln!(out, "| accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) |").unwrap();
+    writeln!(
+        out,
+        "| accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) |"
+    )
+    .unwrap();
     writeln!(out, "|---:|---:|---:|---:|").unwrap();
     for &(accounts, rebuild_secs, patch_ms, ratio) in &RUN_B_LARGEST_SCALES {
-        writeln!(out, "| {} | {rebuild_secs:.3} s | {patch_ms:.4} ms | {ratio}× |", fmt_num(accounts)).unwrap();
+        writeln!(
+            out,
+            "| {} | {rebuild_secs:.3} s | {patch_ms:.4} ms | {ratio}× |",
+            fmt_num(accounts)
+        )
+        .unwrap();
     }
     writeln!(out).unwrap();
     writeln!(
@@ -1225,12 +1318,20 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     )
     .unwrap();
     writeln!(out, "|---:|---:|---:|---:|---:|---:|---:|").unwrap();
-    for (&(a2, r2, p2, ratio2), &(a3, r3, p3, ratio3)) in
-        TODAY_CONTROL_ARITY2_SCALES.iter().zip(TODAY_CONTROL_ARITY3_SCALES.iter())
+    for (&(a2, r2, p2, ratio2), &(a3, r3, p3, ratio3)) in TODAY_CONTROL_ARITY2_SCALES
+        .iter()
+        .zip(TODAY_CONTROL_ARITY3_SCALES.iter())
     {
-        debug_assert_eq!(a2, a3, "the two control tables must list the same scales in the same order");
-        writeln!(out, "| {} | {r2:.3} s | {p2:.4} ms | {ratio2}× | {r3:.3} s | {p3:.4} ms | {ratio3}× |", fmt_num(a2))
-            .unwrap();
+        debug_assert_eq!(
+            a2, a3,
+            "the two control tables must list the same scales in the same order"
+        );
+        writeln!(
+            out,
+            "| {} | {r2:.3} s | {p2:.4} ms | {ratio2}× | {r3:.3} s | {p3:.4} ms | {ratio3}× |",
+            fmt_num(a2)
+        )
+        .unwrap();
     }
     writeln!(out).unwrap();
     writeln!(
@@ -1244,7 +1345,11 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     .unwrap();
     writeln!(out).unwrap();
 
-    writeln!(out, "Three things this control establishes, holding the machine fixed:").unwrap();
+    writeln!(
+        out,
+        "Three things this control establishes, holding the machine fixed:"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // Facts 1 and 2 deliberately compare the `(3,4)` control against the
@@ -1268,7 +1373,8 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     .unwrap();
 
     let (_, _, _, ctrl3_top_ratio) = TODAY_CONTROL_ARITY3_SCALES[2];
-    let ratio_pct_diff = (PUBLISHED_HEADLINE_RATIO_AT_TOP_SCALE as f64 - ctrl3_top_ratio as f64).abs()
+    let ratio_pct_diff = (PUBLISHED_HEADLINE_RATIO_AT_TOP_SCALE as f64 - ctrl3_top_ratio as f64)
+        .abs()
         / PUBLISHED_HEADLINE_RATIO_AT_TOP_SCALE as f64
         * 100.0;
     writeln!(
@@ -1287,7 +1393,8 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     let bench_top_arity3_geom =
         Geometry::for_accounts(PUBLISHED_TOP_SCALE_ACCOUNTS, 3, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
             .expect("complete_set_markdown: pre-ADR-0034 (arity 3, bucket_size 4) must size the published top scale");
-    let bench_top_arity3_sizes = bench_top_arity3_geom.sizes(Backend::Simple, PUBLISHED_TOP_SCALE_ACCOUNTS);
+    let bench_top_arity3_sizes =
+        bench_top_arity3_geom.sizes(Backend::Simple, PUBLISHED_TOP_SCALE_ACCOUNTS);
     let bench_top_arity2_geom = Geometry::for_accounts(
         PUBLISHED_TOP_SCALE_ACCOUNTS,
         ARITY,
@@ -1297,9 +1404,12 @@ fn complete_set_markdown(report: &BenchReport) -> String {
         Backend::Simple,
     )
     .expect("complete_set_markdown: the deployed (arity 2, bucket_size 4) must size the published top scale");
-    let bench_top_arity2_sizes = bench_top_arity2_geom.sizes(Backend::Simple, PUBLISHED_TOP_SCALE_ACCOUNTS);
-    let bench_top_arity3_cells = bench_top_arity3_sizes.slots * u64::from(bench_top_arity3_sizes.cells_per_slot);
-    let bench_top_arity2_cells = bench_top_arity2_sizes.slots * u64::from(bench_top_arity2_sizes.cells_per_slot);
+    let bench_top_arity2_sizes =
+        bench_top_arity2_geom.sizes(Backend::Simple, PUBLISHED_TOP_SCALE_ACCOUNTS);
+    let bench_top_arity3_cells =
+        bench_top_arity3_sizes.slots * u64::from(bench_top_arity3_sizes.cells_per_slot);
+    let bench_top_arity2_cells =
+        bench_top_arity2_sizes.slots * u64::from(bench_top_arity2_sizes.cells_per_slot);
     let bench_top_data_ratio = bench_top_arity2_cells as f64 / bench_top_arity3_cells as f64;
     let (_, ctrl2_top_rebuild, ctrl2_top_patch, _) = TODAY_CONTROL_ARITY2_SCALES[2];
     let (_, ctrl3_top_rebuild, ctrl3_top_patch, _) = TODAY_CONTROL_ARITY3_SCALES[2];
@@ -1422,12 +1532,20 @@ impl BenchReport {
         writeln!(out, "| accounts | full rebuild (measured) |").unwrap();
         writeln!(out, "|---:|---:|").unwrap();
         for s in &self.scales {
-            let flag = if s.accounts == self.reached_top_scale && self.top_scale_fallback_reason.is_some() {
+            let flag = if s.accounts == self.reached_top_scale
+                && self.top_scale_fallback_reason.is_some()
+            {
                 " *(fallback scale — see note above)*"
             } else {
                 ""
             };
-            writeln!(out, "| {} | {:.3} s{flag} |", fmt_num(s.accounts), s.rebuild.as_secs_f64()).unwrap();
+            writeln!(
+                out,
+                "| {} | {:.3} s{flag} |",
+                fmt_num(s.accounts),
+                s.rebuild.as_secs_f64()
+            )
+            .unwrap();
         }
         writeln!(out).unwrap();
 
@@ -1448,7 +1566,11 @@ impl BenchReport {
         )
         .unwrap();
         writeln!(out).unwrap();
-        writeln!(out, "| K (mutations/block) | patch time (ms/block, measured) |").unwrap();
+        writeln!(
+            out,
+            "| K (mutations/block) | patch time (ms/block, measured) |"
+        )
+        .unwrap();
         writeln!(out, "|---:|---:|").unwrap();
         for p in &self.patch_curve {
             writeln!(out, "| {} | {:.4} |", p.k, p.avg_ms).unwrap();
@@ -1467,7 +1589,12 @@ impl BenchReport {
         writeln!(out).unwrap();
         writeln!(out, "| metric | value |").unwrap();
         writeln!(out, "|---|---:|").unwrap();
-        writeln!(out, "| nonzero cells in delta | {} |", fmt_num(self.delta_bytes.nonzero_cells as u64)).unwrap();
+        writeln!(
+            out,
+            "| nonzero cells in delta | {} |",
+            fmt_num(self.delta_bytes.nonzero_cells as u64)
+        )
+        .unwrap();
         writeln!(
             out,
             "| naive (10 B/cell, upstream `u16`+`i64`) | {} |",
@@ -1484,7 +1611,11 @@ impl BenchReport {
         writeln!(out).unwrap();
 
         // ── 4. Sizes ──────────────────────────────────────────────────
-        writeln!(out, "## 4. Hint / query / response / A / server-DB sizes, and client memory").unwrap();
+        writeln!(
+            out,
+            "## 4. Hint / query / response / A / server-DB sizes, and client memory"
+        )
+        .unwrap();
         writeln!(out).unwrap();
 
         // The deployment row every one of 4a/4b/4c appends after its
@@ -1502,8 +1633,10 @@ impl BenchReport {
         // Distinct from the committed file's old hand-typed label (which
         // this row replaces) precisely so it cannot be mistaken for a
         // measured scale — see the prose below for the full explanation.
-        let deployment_label =
-            format!("{} (complete mainnet — computed, no server built at this scale)", fmt_num(DEPLOYMENT_ACCOUNTS));
+        let deployment_label = format!(
+            "{} (complete mainnet — computed, no server built at this scale)",
+            fmt_num(DEPLOYMENT_ACCOUNTS)
+        );
 
         writeln!(
             out,
@@ -1562,7 +1695,11 @@ impl BenchReport {
         .unwrap();
         writeln!(out).unwrap();
 
-        writeln!(out, "### 4b. Per-segment sizes, per scale (computed, not timed)").unwrap();
+        writeln!(
+            out,
+            "### 4b. Per-segment sizes, per scale (computed, not timed)"
+        )
+        .unwrap();
         writeln!(out).unwrap();
         writeln!(out, "| accounts | hint/segment | query/segment | response/segment | A/segment | server DB |").unwrap();
         writeln!(out, "|---:|---:|---:|---:|---:|---:|").unwrap();
@@ -1592,7 +1729,11 @@ impl BenchReport {
         .unwrap();
         writeln!(out).unwrap();
 
-        writeln!(out, "### 4c. Deployment totals (×{ARITY} segments) and client memory (computed)").unwrap();
+        writeln!(
+            out,
+            "### 4c. Deployment totals (×{ARITY} segments) and client memory (computed)"
+        )
+        .unwrap();
         writeln!(out).unwrap();
         writeln!(
             out,
@@ -1699,16 +1840,36 @@ impl BenchReport {
         writeln!(out).unwrap();
 
         // ── 5. Answer latency ────────────────────────────────────────
-        writeln!(out, "## 5. Answer latency, at {} accounts", fmt_num(self.answer_latency.accounts)).unwrap();
+        writeln!(
+            out,
+            "## 5. Answer latency, at {} accounts",
+            fmt_num(self.answer_latency.accounts)
+        )
+        .unwrap();
         writeln!(out).unwrap();
         writeln!(out, "| metric | value |").unwrap();
         writeln!(out, "|---|---:|").unwrap();
-        writeln!(out, "| queries measured | {} |", self.answer_latency.n_queries).unwrap();
-        writeln!(out, "| avg `server.answer(&queries)` latency | {:.4} ms |", self.answer_latency.avg_ms).unwrap();
+        writeln!(
+            out,
+            "| queries measured | {} |",
+            self.answer_latency.n_queries
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "| avg `server.answer(&queries)` latency | {:.4} ms |",
+            self.answer_latency.avg_ms
+        )
+        .unwrap();
         writeln!(out).unwrap();
 
         // ── 6. Headline ───────────────────────────────────────────────
-        writeln!(out, "## 6. The headline: full rebuild ÷ per-block patch (K≈{})", self.config.headline_k).unwrap();
+        writeln!(
+            out,
+            "## 6. The headline: full rebuild ÷ per-block patch (K≈{})",
+            self.config.headline_k
+        )
+        .unwrap();
         writeln!(out).unwrap();
         writeln!(
             out,
@@ -1802,7 +1963,10 @@ mod complete_set_section_tests {
             "the extrapolated ratio (and its cross-check) must be labelled, never presented as if \
              it were measured"
         );
-        assert!(section.starts_with("## 7."), "must render as its own numbered markdown section");
+        assert!(
+            section.starts_with("## 7."),
+            "must render as its own numbered markdown section"
+        );
         assert!(
             section.contains("Same-machine control"),
             "must render the (2,4) vs (3,4) same-machine control table and its reproducibility \
@@ -1827,8 +1991,12 @@ mod complete_set_section_tests {
         assert!(markdown.contains("## 7. The complete mainnet set"));
         assert!(markdown.contains("200,503,969"));
 
-        let honest_summary_start = markdown.find("**Honest summary.**").expect("Honest summary must be present");
-        let repro_note_start = markdown.find("**Reproducibility note.**").expect("Reproducibility note must be present");
+        let honest_summary_start = markdown
+            .find("**Honest summary.**")
+            .expect("Honest summary must be present");
+        let repro_note_start = markdown
+            .find("**Reproducibility note.**")
+            .expect("Reproducibility note must be present");
         let honest_summary = &markdown[honest_summary_start..repro_note_start];
         assert!(
             honest_summary.contains("the previously committed file published"),
@@ -1888,19 +2056,28 @@ mod complete_set_section_tests {
              just table it"
         );
         assert!(
-            section_4.contains("init peak") && section_4.contains("ESTIMATED_PEAK_MULTIPLE") && section_4.contains("docs/adr/0019"),
+            section_4.contains("init peak")
+                && section_4.contains("ESTIMATED_PEAK_MULTIPLE")
+                && section_4.contains("docs/adr/0019"),
             "the client-cost interpretation must preserve its substance (the browser init-peak \
              caveat) and its cross-references (ADR-0019, `web/pir.js`'s `ESTIMATED_PEAK_MULTIPLE`)"
         );
 
         let codec = value_codec();
-        let deployment_sizes =
-            Geometry::for_accounts(DEPLOYMENT_ACCOUNTS, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-                .unwrap()
-                .sizes(Backend::Simple, DEPLOYMENT_ACCOUNTS);
+        let deployment_sizes = Geometry::for_accounts(
+            DEPLOYMENT_ACCOUNTS,
+            ARITY,
+            BUCKET_SIZE,
+            FINGERPRINT_BITS,
+            &codec,
+            Backend::Simple,
+        )
+        .unwrap()
+        .sizes(Backend::Simple, DEPLOYMENT_ACCOUNTS);
         let arity = u64::from(ARITY);
         let hint_total = deployment_sizes.hint_per_segment * arity;
-        let client_mem_total = (deployment_sizes.a_per_segment + deployment_sizes.hint_per_segment) * arity;
+        let client_mem_total =
+            (deployment_sizes.a_per_segment + deployment_sizes.hint_per_segment) * arity;
         assert!(
             section_4.contains(&fmt_bytes(hint_total)),
             "the interpretation paragraph's \"downloaded once\" figure must equal the deployment \
@@ -1957,9 +2134,15 @@ mod complete_set_section_tests {
     #[test]
     fn complete_set_markdown_self_describes_when_report_reaches_the_published_scale() {
         let codec = value_codec();
-        let geometry =
-            Geometry::for_accounts(PUBLISHED_TOP_SCALE_ACCOUNTS, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &codec, Backend::Simple)
-                .unwrap();
+        let geometry = Geometry::for_accounts(
+            PUBLISHED_TOP_SCALE_ACCOUNTS,
+            ARITY,
+            BUCKET_SIZE,
+            FINGERPRINT_BITS,
+            &codec,
+            Backend::Simple,
+        )
+        .unwrap();
         let sizes = geometry.sizes(Backend::Simple, PUBLISHED_TOP_SCALE_ACCOUNTS);
 
         const FAKE_REBUILD_SECS: f64 = 3.0;
@@ -2016,8 +2199,12 @@ mod complete_set_section_tests {
         assert_eq!(mid_lat.ms, FAKE_MID_LATENCY_MS);
 
         let section = complete_set_markdown(&report);
-        let honest_summary_start = section.find("**Honest summary.**").expect("Honest summary must be present");
-        let repro_note_start = section.find("**Reproducibility note.**").expect("Reproducibility note must be present");
+        let honest_summary_start = section
+            .find("**Honest summary.**")
+            .expect("Honest summary must be present");
+        let repro_note_start = section
+            .find("**Reproducibility note.**")
+            .expect("Reproducibility note must be present");
         let honest_summary = &section[honest_summary_start..repro_note_start];
         assert!(
             honest_summary.contains(&format!("{FAKE_RATIO}× this file publishes")),

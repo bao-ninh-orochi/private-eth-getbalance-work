@@ -32,13 +32,24 @@ fn codec() -> ValueCodec {
 fn small_server() -> Server {
     let codec = codec();
     let num_buckets = 2 * 64;
-    let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-    let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+    let pb = simple_max_plaintext_bits(
+        2,
+        num_buckets / 2,
+        4,
+        32,
+        codec.value_bits(),
+        SimpleParams::DEFAULT_SIGMA,
+    );
+    let store =
+        Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
     Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
 }
 
 fn tmp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("risepir-journal-test-{}-{name}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "risepir-journal-test-{}-{name}",
+        std::process::id()
+    ))
 }
 
 /// A distinct, out-of-band address the regular per-block changes/credits
@@ -57,7 +68,10 @@ fn update_for(b: u64) -> BlockUpdate {
     let mut changes = Vec::with_capacity(7);
     for i in 0..6u64 {
         let idx = ((b * 7 + i * 13) % 40) as u8;
-        changes.push((keccak256(&[idx; 20]), 1_000_000u128 + b as u128 * 1_000 + i as u128));
+        changes.push((
+            keccak256(&[idx; 20]),
+            1_000_000u128 + b as u128 * 1_000 + i as u128,
+        ));
     }
     if b == 1 {
         changes.push((keccak256(&DELETE_TARGET), 42_000_000_000u128));
@@ -65,7 +79,11 @@ fn update_for(b: u64) -> BlockUpdate {
         changes.push((keccak256(&DELETE_TARGET), 0u128));
     }
     let credits = vec![(keccak256(&[(b % 40) as u8; 20]), 7u128)];
-    BlockUpdate { block: b, changes, credits }
+    BlockUpdate {
+        block: b,
+        changes,
+        credits,
+    }
 }
 
 /// **THE test.** Build a base server, save it (capturing the digest), and
@@ -91,7 +109,8 @@ async fn journal_replay_matches_live_apply() {
     let node = NodeState::new(server, DeltaRing::new(64), true);
     let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
     let journal_path = journal_path_for(&base_path);
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=N {
         let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
@@ -100,31 +119,71 @@ async fn journal_replay_matches_live_apply() {
     drop(writer);
 
     let (live_cells, live_setup, live_block, live_num_items) = node
-        .with_server(|s| (s.cells().to_vec(), wire::encode_setup(&s.setup()), s.block(), s.num_items()))
+        .with_server(|s| {
+            (
+                s.cells().to_vec(),
+                wire::encode_setup(&s.setup()),
+                s.block(),
+                s.num_items(),
+            )
+        })
         .await;
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
     assert_eq!(restored.replayed, N);
     assert_eq!(restored.base_block, 0);
-    assert_eq!(restored.tail_deltas.len(), N as usize, "ring capacity 64 >= N, so every delta survives as tail");
+    assert_eq!(
+        restored.tail_deltas.len(),
+        N as usize,
+        "ring capacity 64 >= N, so every delta survives as tail"
+    );
     assert!(matches!(restored.scan_stop, Some(ScanStop::Eof)));
 
-    let LoadedState { server: restored_server, complete, .. } = restored.loaded;
+    let LoadedState {
+        server: restored_server,
+        complete,
+        ..
+    } = restored.loaded;
     assert!(complete);
     assert_eq!(restored_server.block(), live_block);
     assert_eq!(restored_server.block(), N);
     assert_eq!(restored_server.num_items(), live_num_items);
-    assert_eq!(restored_server.cells(), &live_cells[..], "cells must be byte-exact");
-    assert_eq!(wire::encode_setup(&restored_server.setup()), live_setup, "hints/params/block must be byte-exact");
+    assert_eq!(
+        restored_server.cells(),
+        &live_cells[..],
+        "cells must be byte-exact"
+    );
+    assert_eq!(
+        wire::encode_setup(&restored_server.setup()),
+        live_setup,
+        "hints/params/block must be byte-exact"
+    );
 
     let deleted_addr = keccak256(&DELETE_TARGET);
-    assert_eq!(restored_server.balance_of(&deleted_addr).unwrap(), None, "deleted account must read back None");
-    assert_eq!(node.balance_of(&deleted_addr).await.unwrap(), None, "sanity: L must also show it deleted");
+    assert_eq!(
+        restored_server.balance_of(&deleted_addr).unwrap(),
+        None,
+        "deleted account must read back None"
+    );
+    assert_eq!(
+        node.balance_of(&deleted_addr).await.unwrap(),
+        None,
+        "sanity: L must also show it deleted"
+    );
 
     let credited_addr = keccak256(&[(N % 40) as u8; 20]);
     let expected = node.balance_of(&credited_addr).await.unwrap();
-    assert!(expected.is_some(), "sanity: the credited address must actually be tracked");
-    assert_eq!(restored_server.balance_of(&credited_addr).unwrap(), expected, "credited account must agree");
+    assert!(
+        expected.is_some(),
+        "sanity: the credited address must actually be tracked"
+    );
+    assert_eq!(
+        restored_server.balance_of(&credited_addr).unwrap(),
+        expected,
+        "credited account must agree"
+    );
 
     std::fs::remove_file(&base_path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();
@@ -159,7 +218,11 @@ async fn recovery_drill_after_a_save_and_a_crash_restores_to_the_last_applied_bl
     for b in 1..=BEFORE_SAVE {
         server.apply_block(&update_for(b)).unwrap();
     }
-    assert_eq!(server.block(), BEFORE_SAVE, "sanity: phase 1 landed exactly where expected");
+    assert_eq!(
+        server.block(),
+        BEFORE_SAVE,
+        "sanity: phase 1 landed exactly where expected"
+    );
 
     // The full save: what a --journal-restore restart's *base* will be.
     let report = state::save(&server, &codec(), true, &base_path).unwrap();
@@ -170,7 +233,8 @@ async fn recovery_drill_after_a_save_and_a_crash_restores_to_the_last_applied_bl
     let node = NodeState::new(server, DeltaRing::new(64), true);
     let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
     let journal_path = journal_path_for(&base_path);
-    let mut writer = JournalWriter::create(&journal_path, report.digest, BEFORE_SAVE, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, BEFORE_SAVE, plaintext_bits).unwrap();
     for b in (BEFORE_SAVE + 1)..=last_applied {
         let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
@@ -183,42 +247,90 @@ async fn recovery_drill_after_a_save_and_a_crash_restores_to_the_last_applied_bl
     // restore call below never consults `node`, only the two files it
     // just wrote to disk.
     let (live_cells, live_setup, live_block, live_num_items) = node
-        .with_server(|s| (s.cells().to_vec(), wire::encode_setup(&s.setup()), s.block(), s.num_items()))
+        .with_server(|s| {
+            (
+                s.cells().to_vec(),
+                wire::encode_setup(&s.setup()),
+                s.block(),
+                s.num_items(),
+            )
+        })
         .await;
-    assert_eq!(live_block, last_applied, "sanity: the reference really did apply every block");
+    assert_eq!(
+        live_block, last_applied,
+        "sanity: the reference really did apply every block"
+    );
 
     // The restart: the exact --journal-restore-on code path, against
     // nothing but the base file + journal left on disk.
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
-    assert_eq!(restored.replayed, AFTER_SAVE, "every post-save block must have replayed");
-    assert_eq!(restored.base_block, BEFORE_SAVE, "sanity: the base really was saved mid-run, not at genesis");
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
+    assert_eq!(
+        restored.replayed, AFTER_SAVE,
+        "every post-save block must have replayed"
+    );
+    assert_eq!(
+        restored.base_block, BEFORE_SAVE,
+        "sanity: the base really was saved mid-run, not at genesis"
+    );
     assert!(matches!(restored.scan_stop, Some(ScanStop::Eof)));
 
     // The assertion this whole PR exists for: the restored head is the
     // LAST APPLIED block, never the last SAVED one — and the two must
     // actually differ, or this drill would prove nothing.
-    assert_ne!(last_applied, restored.base_block, "sanity: last applied and last saved must differ");
+    assert_ne!(
+        last_applied, restored.base_block,
+        "sanity: last applied and last saved must differ"
+    );
     let restored_server = restored.loaded.server;
-    assert_eq!(restored_server.block(), last_applied, "must resume at the last APPLIED block, not the last SAVED one");
+    assert_eq!(
+        restored_server.block(),
+        last_applied,
+        "must resume at the last APPLIED block, not the last SAVED one"
+    );
 
     // Byte-exact match against the uninterrupted reference.
     assert!(restored.loaded.complete);
     assert_eq!(restored_server.num_items(), live_num_items);
-    assert_eq!(restored_server.cells(), &live_cells[..], "cells must be byte-exact");
-    assert_eq!(wire::encode_setup(&restored_server.setup()), live_setup, "hints/params/block must be byte-exact");
+    assert_eq!(
+        restored_server.cells(),
+        &live_cells[..],
+        "cells must be byte-exact"
+    );
+    assert_eq!(
+        wire::encode_setup(&restored_server.setup()),
+        live_setup,
+        "hints/params/block must be byte-exact"
+    );
 
     // Spot-check individual balances on both sides of the save: the
     // target created in phase 1 and deleted before the save (must stay
     // deleted, never resurrected by replay), and the address credited by
     // the very last replayed block (exercises the journal path itself).
     let deleted_addr = keccak256(&DELETE_TARGET);
-    assert_eq!(restored_server.balance_of(&deleted_addr).unwrap(), None, "deleted account must read back None");
-    assert_eq!(node.balance_of(&deleted_addr).await.unwrap(), None, "sanity: the live reference agrees");
+    assert_eq!(
+        restored_server.balance_of(&deleted_addr).unwrap(),
+        None,
+        "deleted account must read back None"
+    );
+    assert_eq!(
+        node.balance_of(&deleted_addr).await.unwrap(),
+        None,
+        "sanity: the live reference agrees"
+    );
 
     let credited_addr = keccak256(&[(last_applied % 40) as u8; 20]);
     let expected_credited = node.balance_of(&credited_addr).await.unwrap();
-    assert!(expected_credited.is_some(), "sanity: the last block's credited address must be tracked");
-    assert_eq!(restored_server.balance_of(&credited_addr).unwrap(), expected_credited, "credited account must agree");
+    assert!(
+        expected_credited.is_some(),
+        "sanity: the last block's credited address must be tracked"
+    );
+    assert_eq!(
+        restored_server.balance_of(&credited_addr).unwrap(),
+        expected_credited,
+        "credited account must agree"
+    );
 
     std::fs::remove_file(&base_path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();
@@ -237,7 +349,8 @@ async fn torn_tail_restores_to_last_good_height_then_recovers() {
     let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
     let journal_path = journal_path_for(&base_path);
 
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=5u64 {
         let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
@@ -249,14 +362,19 @@ async fn torn_tail_restores_to_last_good_height_then_recovers() {
     bytes.truncate(bytes.len() - 4); // cut into the last record
     std::fs::write(&journal_path, &bytes).unwrap();
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
     assert_eq!(restored.replayed, 4, "the torn 5th record must not be used");
     assert_eq!(restored.loaded.server.block(), 4);
     assert!(matches!(restored.scan_stop, Some(ScanStop::Invalid { .. })));
-    let (end_offset, end_height) = restored.adopt_at.expect("a torn tail must still be adopt-eligible up to its good prefix");
+    let (end_offset, end_height) = restored
+        .adopt_at
+        .expect("a torn tail must still be adopt-eligible up to its good prefix");
     assert_eq!(end_height, 4);
 
-    let mut writer2 = JournalWriter::adopt(&journal_path, plaintext_bits, end_offset, end_height).unwrap();
+    let mut writer2 =
+        JournalWriter::adopt(&journal_path, plaintext_bits, end_offset, end_height).unwrap();
     let mut resumed_server = restored.loaded.server;
     for b in 5..=8u64 {
         let delta = resumed_server.apply_block(&update_for(b)).unwrap();
@@ -264,8 +382,13 @@ async fn torn_tail_restores_to_last_good_height_then_recovers() {
     }
     drop(writer2);
 
-    let restored2 = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
-    assert_eq!(restored2.replayed, 8, "adopt + further appends must restore cleanly again");
+    let restored2 =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
+    assert_eq!(
+        restored2.replayed, 8,
+        "adopt + further appends must restore cleanly again"
+    );
     assert_eq!(restored2.loaded.server.block(), 8);
     assert!(matches!(restored2.scan_stop, Some(ScanStop::Eof)));
 
@@ -285,7 +408,8 @@ async fn mid_file_corruption_stops_replay_there() {
     let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
     let journal_path = journal_path_for(&base_path);
 
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=6u64 {
         let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
@@ -298,10 +422,22 @@ async fn mid_file_corruption_stops_replay_there() {
     bytes[flip_at] ^= 0x01;
     std::fs::write(&journal_path, &bytes).unwrap();
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
-    assert!(restored.replayed < 6, "the corruption must have stopped replay before all 6 records");
-    assert!(restored.replayed >= 1, "records before the flip must still have been used");
-    assert_eq!(restored.loaded.server.block(), restored.replayed, "base_block is 0, so block == records replayed");
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
+    assert!(
+        restored.replayed < 6,
+        "the corruption must have stopped replay before all 6 records"
+    );
+    assert!(
+        restored.replayed >= 1,
+        "records before the flip must still have been used"
+    );
+    assert_eq!(
+        restored.loaded.server.block(),
+        restored.replayed,
+        "base_block is 0, so block == records replayed"
+    );
     assert!(matches!(restored.scan_stop, Some(ScanStop::Invalid { .. })));
 
     std::fs::remove_file(&base_path).unwrap();
@@ -323,11 +459,16 @@ async fn base_mismatch_falls_back_to_plain_load() {
     // A journal bound to a wholly different digest/height.
     JournalWriter::create(&journal_path, 0xDEAD_BEEF_0000_0001, 999, plaintext_bits).unwrap();
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
     assert_eq!(restored.replayed, 0);
     assert_eq!(restored.tail_deltas.len(), 0);
     assert!(restored.adopt_at.is_none());
-    assert!(restored.scan_stop.is_none(), "a mismatched journal must never even be consulted");
+    assert!(
+        restored.scan_stop.is_none(),
+        "a mismatched journal must never even be consulted"
+    );
     assert_eq!(restored.loaded.server.block(), 0);
 
     std::fs::remove_file(&base_path).unwrap();
@@ -347,7 +488,8 @@ async fn gap_is_refused_at_append_time_and_replay_stops_at_the_prefix() {
     let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
     let journal_path = journal_path_for(&base_path);
 
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     let (d1, _) = node.apply_block(&update_for(1)).await.unwrap();
     let n1 = node.with_server(|s| s.num_items()).await;
     writer.append(&d1, n1).unwrap();
@@ -357,15 +499,26 @@ async fn gap_is_refused_at_append_time_and_replay_stops_at_the_prefix() {
     let (d3, _) = node.apply_block(&update_for(3)).await.unwrap();
     let n3 = node.with_server(|s| s.num_items()).await;
     match writer.append(&d3, n3) {
-        Err(JournalError::Gap { expected: 2, found: 3 }) => {}
+        Err(JournalError::Gap {
+            expected: 2,
+            found: 3,
+        }) => {}
         other => panic!("expected append to refuse the gap, got {other:?}"),
     }
     drop(writer);
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
-    assert_eq!(restored.replayed, 1, "only block 1 was ever actually written to disk");
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
+    assert_eq!(
+        restored.replayed, 1,
+        "only block 1 was ever actually written to disk"
+    );
     assert_eq!(restored.loaded.server.block(), 1);
-    assert!(matches!(restored.scan_stop, Some(ScanStop::Eof)), "a short-but-clean file, not a torn one");
+    assert!(
+        matches!(restored.scan_stop, Some(ScanStop::Eof)),
+        "a short-but-clean file, not a torn one"
+    );
 
     std::fs::remove_file(&base_path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();
@@ -386,7 +539,8 @@ async fn restore_caps_and_orders_the_tail_deltas() {
     let plaintext_bits = node.with_server(|s| s.params().plaintext_bits).await;
     let journal_path = journal_path_for(&base_path);
 
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     for b in 1..=10u64 {
         let (delta, _) = node.apply_block(&update_for(b)).await.unwrap();
         let n_items = node.with_server(|s| s.num_items()).await;
@@ -395,11 +549,21 @@ async fn restore_caps_and_orders_the_tail_deltas() {
     drop(writer);
 
     let ring_capacity = 4;
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), ring_capacity).unwrap();
+    let restored = state::load_with_journal_restore(
+        &base_path,
+        SimpleConfig::with_lwe_dim(256),
+        &codec(),
+        ring_capacity,
+    )
+    .unwrap();
     assert_eq!(restored.replayed, 10);
     assert_eq!(restored.tail_deltas.len(), ring_capacity);
     let heights: Vec<u64> = restored.tail_deltas.iter().map(|d| d.block).collect();
-    assert_eq!(heights, vec![7, 8, 9, 10], "tail must be the most recent ring_capacity blocks, oldest first");
+    assert_eq!(
+        heights,
+        vec![7, 8, 9, 10],
+        "tail must be the most recent ring_capacity blocks, oldest first"
+    );
 
     std::fs::remove_file(&base_path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();
@@ -419,7 +583,11 @@ async fn semantically_wrong_record_is_an_apply_failure_not_a_fallback() {
     let base_path = tmp("applyfail-base.bin");
     let server = small_server();
     let plaintext_bits = server.params().plaintext_bits;
-    assert_eq!(server.cells()[0], 0, "precondition: a fresh store's first cell is empty (zero)");
+    assert_eq!(
+        server.cells()[0],
+        0,
+        "precondition: a fresh store's first cell is empty (zero)"
+    );
     let report = state::save(&server, &codec(), true, &base_path).unwrap();
     let journal_path = journal_path_for(&base_path);
 
@@ -427,7 +595,8 @@ async fn semantically_wrong_record_is_an_apply_failure_not_a_fallback() {
     // applied to a zero cell it lands at -(p-1) < 0 — decode-clean,
     // apply-impossible against this base.
     let poison = -((1i64 << plaintext_bits) - 1);
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     writer
         .append(
             &BlockDelta {
@@ -439,9 +608,17 @@ async fn semantically_wrong_record_is_an_apply_failure_not_a_fallback() {
         .unwrap();
     drop(writer);
 
-    match state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64) {
+    match state::load_with_journal_restore(
+        &base_path,
+        SimpleConfig::with_lwe_dim(256),
+        &codec(),
+        64,
+    ) {
         Err(RestoreError::ApplyFailure(msg)) => {
-            assert!(msg.contains("violates"), "the message must name the bound violation, got: {msg}");
+            assert!(
+                msg.contains("violates"),
+                "the message must name the bound violation, got: {msg}"
+            );
         }
         Err(other) => panic!("expected ApplyFailure, got a different error: {other}"),
         Ok(restored) => panic!(
@@ -471,7 +648,9 @@ async fn oversized_record_length_is_a_clean_stop_not_an_oom() {
     bytes.extend_from_slice(&u32::MAX.to_le_bytes());
     std::fs::write(&journal_path, &bytes).unwrap();
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
     assert_eq!(restored.replayed, 0);
     assert!(matches!(restored.scan_stop, Some(ScanStop::Invalid { .. })));
     assert_eq!(restored.loaded.server.block(), 0);
@@ -496,7 +675,8 @@ async fn matching_digest_but_wrong_base_block_is_refused() {
 
     // The REAL digest, the wrong height: only the new cross-check can
     // tell this journal apart from a healthy one.
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 5, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 5, plaintext_bits).unwrap();
     writer
         .append(
             &BlockDelta {
@@ -508,10 +688,22 @@ async fn matching_digest_but_wrong_base_block_is_refused() {
         .unwrap();
     drop(writer);
 
-    let restored = state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64).unwrap();
-    assert_eq!(restored.replayed, 0, "a wrong-base-block journal must not be replayed");
-    assert_eq!(restored.loaded.server.block(), 0, "the base loads untouched");
-    assert!(restored.scan_stop.is_none(), "the journal must not even be consulted");
+    let restored =
+        state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64)
+            .unwrap();
+    assert_eq!(
+        restored.replayed, 0,
+        "a wrong-base-block journal must not be replayed"
+    );
+    assert_eq!(
+        restored.loaded.server.block(),
+        0,
+        "the base loads untouched"
+    );
+    assert!(
+        restored.scan_stop.is_none(),
+        "the journal must not even be consulted"
+    );
 
     std::fs::remove_file(&base_path).unwrap();
     std::fs::remove_file(&journal_path).unwrap();
@@ -531,7 +723,8 @@ async fn row_straddling_offset_is_an_apply_failure() {
     let report = state::save(&server, &codec(), true, &base_path).unwrap();
     let journal_path = journal_path_for(&base_path);
 
-    let mut writer = JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
+    let mut writer =
+        JournalWriter::create(&journal_path, report.digest, 0, plaintext_bits).unwrap();
     writer
         .append(
             &BlockDelta {
@@ -546,9 +739,17 @@ async fn row_straddling_offset_is_an_apply_failure() {
         .unwrap();
     drop(writer);
 
-    match state::load_with_journal_restore(&base_path, SimpleConfig::with_lwe_dim(256), &codec(), 64) {
+    match state::load_with_journal_restore(
+        &base_path,
+        SimpleConfig::with_lwe_dim(256),
+        &codec(),
+        64,
+    ) {
         Err(RestoreError::ApplyFailure(msg)) => {
-            assert!(msg.contains("neighbouring row"), "the message must name the hazard, got: {msg}");
+            assert!(
+                msg.contains("neighbouring row"),
+                "the message must name the hazard, got: {msg}"
+            );
         }
         Err(other) => panic!("expected ApplyFailure, got: {other}"),
         Ok(restored) => panic!(

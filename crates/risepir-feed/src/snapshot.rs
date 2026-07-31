@@ -205,7 +205,8 @@ where
 /// accepted shapes; anything else is an error, never a guess.
 fn parse_row(row: &str) -> Result<([u8; 20], Balance), String> {
     let mut fields = row.split(',');
-    let (Some(addr_str), Some(bal_str), None) = (fields.next(), fields.next(), fields.next()) else {
+    let (Some(addr_str), Some(bal_str), None) = (fields.next(), fields.next(), fields.next())
+    else {
         return Err("expected exactly 2 comma-separated fields".to_string());
     };
     let addr20 = parse_address(addr_str.trim())
@@ -259,10 +260,8 @@ mod tests {
     /// `name` gzip-compresses the contents, mirroring how the loader
     /// decides to decompress.
     fn temp_file(name: &str, contents: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "risepir-snapshot-{}-{name}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("risepir-snapshot-{}-{name}", std::process::id()));
         if name.ends_with(".gz") {
             let f = File::create(&path).unwrap();
             let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
@@ -274,7 +273,9 @@ mod tests {
         path
     }
 
-    fn collect(paths: &[PathBuf]) -> Result<(Vec<(AddressHash, Balance)>, SnapshotStats), SnapshotError> {
+    fn collect(
+        paths: &[PathBuf],
+    ) -> Result<(Vec<(AddressHash, Balance)>, SnapshotStats), SnapshotError> {
         let mut rows = Vec::new();
         let stats = ingest(paths, |_addr20, k, v| {
             rows.push((k, v));
@@ -352,7 +353,10 @@ mod tests {
 
         let bad = temp_file("frac-bad.csv", &format!("{A1},123.5\n"));
         let err = collect(std::slice::from_ref(&bad)).unwrap_err();
-        assert!(matches!(err, SnapshotError::MalformedRow { line: 1, .. }), "{err}");
+        assert!(
+            matches!(err, SnapshotError::MalformedRow { line: 1, .. }),
+            "{err}"
+        );
         std::fs::remove_file(bad).unwrap();
     }
 
@@ -363,7 +367,11 @@ mod tests {
             ("hexbal.csv", format!("{A1},0x10\n"), 1),
             ("neg.csv", format!("{A1},-5\n"), 1),
             ("shortaddr.csv", "0x1234,10\n".to_string(), 1),
-            ("noprefix.csv", "4838b106fce9647bdf1e7877bf73ce8b0bad5f97,10\n".to_string(), 1),
+            (
+                "noprefix.csv",
+                "4838b106fce9647bdf1e7877bf73ce8b0bad5f97,10\n".to_string(),
+                1,
+            ),
             ("threefields.csv", format!("{A1},10,extra\n"), 1),
             ("late.csv", format!("{A1},10\ngarbage\n"), 2),
         ] {
@@ -398,7 +406,11 @@ mod tests {
         let (rows, stats) = collect(&paths).unwrap();
         assert_eq!(stats.rows, 3);
         assert_eq!(rows.iter().map(|r| r.1).collect::<Vec<_>>(), vec![1, 2]);
-        assert_eq!(count_rows(&paths).unwrap(), 3, "count_rows counts zero rows too");
+        assert_eq!(
+            count_rows(&paths).unwrap(),
+            3,
+            "count_rows counts zero rows too"
+        );
 
         std::fs::remove_file(f1).unwrap();
         std::fs::remove_file(f2).unwrap();
@@ -427,7 +439,10 @@ mod tests {
 
     #[test]
     fn u128_overflow_balance_rejected() {
-        let f = temp_file("big.csv", &format!("{A1},340282366920938463463374607431768211456\n")); // 2^128
+        let f = temp_file(
+            "big.csv",
+            &format!("{A1},340282366920938463463374607431768211456\n"),
+        ); // 2^128
         let err = collect(std::slice::from_ref(&f)).unwrap_err();
         assert!(matches!(err, SnapshotError::MalformedRow { .. }));
         std::fs::remove_file(f).unwrap();

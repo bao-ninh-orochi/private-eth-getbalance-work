@@ -34,8 +34,8 @@ use risepir_proto::{Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-use risepir_proto::keccak256;
 use crate::private_eth::PrivateEth;
+use risepir_proto::keccak256;
 
 /// SCF geometry constants for the demo deployment. `LWE_DIM` is well
 /// below `SimpleConfig::default()`'s 1275: this deployment is a few
@@ -140,11 +140,11 @@ pub struct DemoHandle {
 fn demo_accounts() -> Vec<([u8; 20], u128)> {
     const ETH: u128 = 1_000_000_000_000_000_000;
     vec![
-        ([0x11u8; 20], ETH),           // 1 ETH
-        ([0x22u8; 20], 5 * ETH),       // 5 ETH
-        ([0x33u8; 20], 42 * ETH),      // 42 ETH
-        ([0x44u8; 20], 1_000 * ETH),   // 1000 ETH
-        ([0x55u8; 20], 100),           // 100 wei — a sub-gwei "dust" balance, proving this is wei-exact
+        ([0x11u8; 20], ETH),         // 1 ETH
+        ([0x22u8; 20], 5 * ETH),     // 5 ETH
+        ([0x33u8; 20], 42 * ETH),    // 42 ETH
+        ([0x44u8; 20], 1_000 * ETH), // 1000 ETH
+        ([0x55u8; 20], 100), // 100 wei — a sub-gwei "dust" balance, proving this is wei-exact
     ]
 }
 
@@ -173,8 +173,15 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     };
     let mut feed = MockFeed::new(mock_cfg);
 
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("demo geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("demo geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -185,30 +192,41 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     .expect("demo store");
 
     for (addr, bal) in feed.snapshot() {
-        let v = value_codec.encode(&addr, bal).expect("encode genesis balance");
+        let v = value_codec
+            .encode(&addr, bal)
+            .expect("encode genesis balance");
         store.insert(addr, &v).expect("insert genesis balance");
     }
 
     let demo_accounts = demo_accounts();
     for (addr20, balance) in &demo_accounts {
         let key = keccak256(addr20);
-        let v = value_codec.encode(&key, *balance).expect("encode demo account");
+        let v = value_codec
+            .encode(&key, *balance)
+            .expect("encode demo account");
         store.insert(key, &v).expect("insert demo account");
     }
 
     let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(LWE_DIM), value_codec, 0);
-    let node_state = Arc::new(NodeState::new(server, DeltaRing::new(cfg.ring_capacity), true));
+    let node_state = Arc::new(NodeState::new(
+        server,
+        DeltaRing::new(cfg.ring_capacity),
+        true,
+    ));
 
     // The mock universe is complete, so every address answers — but the
     // front end still offers these as one-click examples, and they are the
     // only addresses in it a human can name (see the module docs).
-    node_state.note_recent(demo_accounts.iter().map(|(addr, _)| *addr)).await;
+    node_state
+        .note_recent(demo_accounts.iter().map(|(addr, _)| *addr))
+        .await;
 
     // Loaded before binding: a missing asset is a startup failure, not a
     // 404 the first visitor discovers.
     let web_assets = cfg.web_dir.as_ref().map(|dir| {
-        risepir_http::WebAssets::load(dir).unwrap_or_else(|e| panic!("--web {}: {e}", dir.display()))
+        risepir_http::WebAssets::load(dir)
+            .unwrap_or_else(|e| panic!("--web {}: {e}", dir.display()))
     });
     let web_served = web_assets.is_some();
 
@@ -253,7 +271,10 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
     // loopback, even when the listener is bound to 0.0.0.0 for remote
     // clients — connecting to the unspecified address is unreliable.
     let pir_client = PirHttpClient::new(crate::front::local_url(cfg.bind, pir_addr.port()));
-    let setup_bundle = pir_client.setup().await.expect("GET /setup against the freshly-started PIR server");
+    let setup_bundle = pir_client
+        .setup()
+        .await
+        .expect("GET /setup against the freshly-started PIR server");
 
     let private_eth = Arc::new(PrivateEth::from_setup(
         pir_client,

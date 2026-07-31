@@ -260,7 +260,14 @@ pub fn compute_row(
     fingerprint_bits: u32,
     codec: &ValueCodec,
 ) -> Result<GeometryRow, GeomError> {
-    let g = Geometry::for_accounts(accounts, arity, bucket_size, fingerprint_bits, codec, Backend::Simple)?;
+    let g = Geometry::for_accounts(
+        accounts,
+        arity,
+        bucket_size,
+        fingerprint_bits,
+        codec,
+        Backend::Simple,
+    )?;
     let s = g.sizes(Backend::Simple, accounts);
     let arity64 = u64::from(arity);
 
@@ -268,7 +275,8 @@ pub fn compute_row(
     // form of the same `accounts/slots <= target` test `for_accounts`
     // applies internally, asking that module for this configuration's own
     // target rather than assuming a flat one (see the note above).
-    let (target_num, target_den) = risepir_proto::geometry::effective_target_load(arity, bucket_size);
+    let (target_num, target_den) =
+        risepir_proto::geometry::effective_target_load(arity, bucket_size);
     let max_accounts_at_target = u64::try_from((u128::from(s.slots) * target_num) / target_den)
         .expect("slots * target fits u64: slots itself is u64 and the ratio only shrinks it");
 
@@ -359,7 +367,13 @@ pub fn sweep(cfg: &SweepConfig) -> Result<Vec<GeometryRow>, GeomError> {
     let mut rows = Vec::with_capacity(cfg.arities.len() * cfg.bucket_sizes.len());
     for &arity in &cfg.arities {
         for &bucket_size in &cfg.bucket_sizes {
-            rows.push(compute_row(cfg.accounts, arity, bucket_size, cfg.fingerprint_bits, &codec)?);
+            rows.push(compute_row(
+                cfg.accounts,
+                arity,
+                bucket_size,
+                cfg.fingerprint_bits,
+                &codec,
+            )?);
         }
     }
     Ok(rows)
@@ -497,11 +511,26 @@ pub struct FillCandidate {
 /// at a shared rung" claim is checked empirically against the deployed
 /// point, not just arithmetically.
 pub const DEFAULT_FILL_CANDIDATES: [FillCandidate; 5] = [
-    FillCandidate { arity: 2, bucket_size: 4 },
-    FillCandidate { arity: 3, bucket_size: 4 },
-    FillCandidate { arity: 3, bucket_size: 6 },
-    FillCandidate { arity: 3, bucket_size: 3 },
-    FillCandidate { arity: 4, bucket_size: 4 },
+    FillCandidate {
+        arity: 2,
+        bucket_size: 4,
+    },
+    FillCandidate {
+        arity: 3,
+        bucket_size: 4,
+    },
+    FillCandidate {
+        arity: 3,
+        bucket_size: 6,
+    },
+    FillCandidate {
+        arity: 3,
+        bucket_size: 3,
+    },
+    FillCandidate {
+        arity: 4,
+        bucket_size: 4,
+    },
 ];
 
 /// Default `--fill-accounts` scale: comfortably fits 16 GB, and matches
@@ -570,7 +599,11 @@ pub struct FillCheckResult {
 /// fill-check is a claim about cuckoo eviction alone, and running the full
 /// LWE `server_setup` on top would burn minutes measuring something this
 /// deliverable never asked about.
-fn fill_store<S: IndexScheme>(mut store: CuckooKVStore<S>, accounts: u64, codec: &ValueCodec) -> FillOutcome {
+fn fill_store<S: IndexScheme>(
+    mut store: CuckooKVStore<S>,
+    accounts: u64,
+    codec: &ValueCodec,
+) -> FillOutcome {
     let feed = MockFeed::new(MockConfig {
         seed: FILL_CHECK_SEED,
         num_genesis_keys: accounts,
@@ -608,10 +641,22 @@ fn fill_store<S: IndexScheme>(mut store: CuckooKVStore<S>, accounts: u64, codec:
 /// `segmented_cuckoo` store type matching `candidate.arity`, and runs
 /// `fill_store`. Never panics on a bad candidate — a construction
 /// failure is folded into `FillCheckResult::outcome` as `Err`.
-pub fn fill_check_one(candidate: FillCandidate, accounts: u64, fingerprint_bits: u32, codec: &ValueCodec) -> FillCheckResult {
+pub fn fill_check_one(
+    candidate: FillCandidate,
+    accounts: u64,
+    fingerprint_bits: u32,
+    codec: &ValueCodec,
+) -> FillCheckResult {
     let outcome = (|| -> Result<FillOutcome, String> {
-        let geom = Geometry::for_accounts(accounts, candidate.arity, candidate.bucket_size, fingerprint_bits, codec, Backend::Simple)
-            .map_err(|e| format!("geometry: {e}"))?;
+        let geom = Geometry::for_accounts(
+            accounts,
+            candidate.arity,
+            candidate.bucket_size,
+            fingerprint_bits,
+            codec,
+            Backend::Simple,
+        )
+        .map_err(|e| format!("geometry: {e}"))?;
         match candidate.arity {
             2 => {
                 let store = Segmented2aryCuckooKVStore::new(
@@ -646,7 +691,9 @@ pub fn fill_check_one(candidate: FillCandidate, accounts: u64, fingerprint_bits:
                 .map_err(|e| format!("store construction: {e}"))?;
                 Ok(fill_store(store, accounts, codec))
             }
-            other => Err(format!("fill_check_one: arity must be 2, 3, or 4, got {other}")),
+            other => Err(format!(
+                "fill_check_one: arity must be 2, 3, or 4, got {other}"
+            )),
         }
     })();
 
@@ -664,9 +711,16 @@ pub fn fill_check_one(candidate: FillCandidate, accounts: u64, fingerprint_bits:
 /// multi-minute run, which is exactly why `xtask::main` only reaches this
 /// function behind an explicit opt-in `--fill-check` flag, never as part
 /// of the always-on sweep.
-pub fn fill_check(candidates: &[FillCandidate], accounts: u64, fingerprint_bits: u32) -> Vec<FillCheckResult> {
+pub fn fill_check(
+    candidates: &[FillCandidate],
+    accounts: u64,
+    fingerprint_bits: u32,
+) -> Vec<FillCheckResult> {
     let codec = crate::bench::value_codec();
-    candidates.iter().map(|&c| fill_check_one(c, accounts, fingerprint_bits, &codec)).collect()
+    candidates
+        .iter()
+        .map(|&c| fill_check_one(c, accounts, fingerprint_bits, &codec))
+        .collect()
 }
 
 /// Renders fill-check results as a plain-text table: requested vs.
@@ -724,9 +778,14 @@ mod tests {
     /// pinned here is the one the code actually produces).
     #[test]
     fn deployed_configuration_pins_live_geometry() {
-        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 4, 32, &codec()).expect("deployed configuration must size");
+        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 4, 32, &codec())
+            .expect("deployed configuration must size");
         assert_eq!(row.num_buckets, 67_108_864);
-        assert!((row.load_factor - 0.7469).abs() < 1e-4, "load_factor = {}", row.load_factor);
+        assert!(
+            (row.load_factor - 0.7469).abs() < 1e-4,
+            "load_factor = {}",
+            row.load_factor
+        );
         assert_eq!(row.server_db, 23_622_320_128);
         assert_eq!(row.hint_total, 553_819_200);
         assert!(row.deployed);
@@ -742,12 +801,20 @@ mod tests {
     /// flags [`GeometryRow::deployed`].
     #[test]
     fn pre_adr_0034_configuration_pins_historical_geometry() {
-        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 3, 4, 32, &codec()).expect("historical configuration must size");
+        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 3, 4, 32, &codec())
+            .expect("historical configuration must size");
         assert_eq!(row.num_buckets, 100_663_296);
-        assert!((row.load_factor - 0.4980).abs() < 1e-4, "load_factor = {}", row.load_factor);
+        assert!(
+            (row.load_factor - 0.4980).abs() < 1e-4,
+            "load_factor = {}",
+            row.load_factor
+        );
         assert_eq!(row.server_db, 35_433_480_192);
         assert_eq!(row.hint_total, 830_728_800);
-        assert!(!row.deployed, "ADR-0034 moved the deployed configuration to (2,4)");
+        assert!(
+            !row.deployed,
+            "ADR-0034 moved the deployed configuration to (2,4)"
+        );
         assert!(row.buildable);
     }
 
@@ -758,11 +825,15 @@ mod tests {
     /// trade — is what the other tests below refute.)
     #[test]
     fn arity4_bucket4_pins_the_briefs_arithmetic() {
-        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 4, 32, &codec()).expect("arity 4 / bucket_size 4 must size");
+        let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 4, 32, &codec())
+            .expect("arity 4 / bucket_size 4 must size");
         assert_eq!(row.server_db, 23_622_320_128);
         assert_eq!(row.hint_total, 784_502_400);
         assert!(!row.deployed);
-        assert!(row.buildable, "bucket_size 4 is within segmented_cuckoo::SUPPORTED_BUCKET_SIZES");
+        assert!(
+            row.buildable,
+            "bucket_size 4 is within segmented_cuckoo::SUPPORTED_BUCKET_SIZES"
+        );
     }
 
     /// The central correction: `server_db` depends on the achieved load
@@ -779,12 +850,18 @@ mod tests {
         let c = codec();
         let row2 = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 4, 32, &c).unwrap();
         let row4 = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 4, 32, &c).unwrap();
-        assert_eq!(row2.num_buckets, row4.num_buckets, "arity 2 and 4 must reach the same num_buckets at this scale");
+        assert_eq!(
+            row2.num_buckets, row4.num_buckets,
+            "arity 2 and 4 must reach the same num_buckets at this scale"
+        );
         assert_eq!(
             row2.server_db, row4.server_db,
             "server_db must depend only on slots/cells_per_slot, not arity"
         );
-        assert_ne!(row2.hint_total, row4.hint_total, "but the hint DOES move with arity (sqrt_arity_hint_law)");
+        assert_ne!(
+            row2.hint_total, row4.hint_total,
+            "but the hint DOES move with arity (sqrt_arity_hint_law)"
+        );
     }
 
     /// The `sqrt(arity)` hint law, checked at *equal* database size:
@@ -799,7 +876,10 @@ mod tests {
         let c = codec();
         let row3 = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 3, 6, 32, &c).unwrap();
         let row4 = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 9, 32, &c).unwrap();
-        assert_eq!(row3.server_db, row4.server_db, "both must land at the same 301,989,888-slot database size");
+        assert_eq!(
+            row3.server_db, row4.server_db,
+            "both must land at the same 301,989,888-slot database size"
+        );
 
         let ratio = row4.hint_total as f64 / row3.hint_total as f64;
         let expected = (4.0_f64 / 3.0).sqrt();
@@ -831,13 +911,25 @@ mod tests {
         let deployed = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 4, 32, &c).unwrap();
         let alt = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 4, 4, 32, &c).unwrap();
 
-        assert!(deployed.deployed, "(2,4) must be the flagged deployed configuration");
+        assert!(
+            deployed.deployed,
+            "(2,4) must be the flagged deployed configuration"
+        );
         assert!(!alt.deployed);
-        assert_eq!(deployed.num_buckets, alt.num_buckets, "(2,4) and (4,4) must land on the same rung");
-        assert_eq!(deployed.server_db, alt.server_db, "a shared rung means identical server_db");
+        assert_eq!(
+            deployed.num_buckets, alt.num_buckets,
+            "(2,4) and (4,4) must land on the same rung"
+        );
+        assert_eq!(
+            deployed.server_db, alt.server_db,
+            "a shared rung means identical server_db"
+        );
 
         let hint_delta_bytes = alt.hint_total - deployed.hint_total;
-        assert_eq!(hint_delta_bytes, 230_683_200, "(4,4) must cost exactly this much more hint than (2,4)");
+        assert_eq!(
+            hint_delta_bytes, 230_683_200,
+            "(4,4) must cost exactly this much more hint than (2,4)"
+        );
 
         // The cliff is gone: both configurations now carry comparable,
         // healthy headroom under the retuned target.
@@ -849,11 +941,28 @@ mod tests {
 
         // Target-load self-check (kept from the test this replaces):
         // capacity fits this num_buckets, one more account does not.
-        let at_capacity =
-            Geometry::for_accounts(alt.max_accounts_at_target, alt.arity, alt.bucket_size, 32, &c, Backend::Simple).unwrap();
-        assert_eq!(at_capacity.num_buckets, alt.num_buckets, "capacity must still fit this num_buckets");
-        let past_capacity =
-            Geometry::for_accounts(alt.max_accounts_at_target + 1, alt.arity, alt.bucket_size, 32, &c, Backend::Simple).unwrap();
+        let at_capacity = Geometry::for_accounts(
+            alt.max_accounts_at_target,
+            alt.arity,
+            alt.bucket_size,
+            32,
+            &c,
+            Backend::Simple,
+        )
+        .unwrap();
+        assert_eq!(
+            at_capacity.num_buckets, alt.num_buckets,
+            "capacity must still fit this num_buckets"
+        );
+        let past_capacity = Geometry::for_accounts(
+            alt.max_accounts_at_target + 1,
+            alt.arity,
+            alt.bucket_size,
+            32,
+            &c,
+            Backend::Simple,
+        )
+        .unwrap();
         assert!(
             past_capacity.num_buckets > alt.num_buckets,
             "one account past capacity must force the next doubling"
@@ -890,13 +999,19 @@ mod tests {
     fn the_motivating_configuration_is_now_sized_below_its_ceiling() {
         let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 1, 32, &codec()).unwrap();
         assert_eq!(row.load_ceiling, Some(0.48));
-        assert!(row.buildable, "bucket_size 1 is inside SUPPORTED_BUCKET_SIZES");
+        assert!(
+            row.buildable,
+            "bucket_size 1 is inside SUPPORTED_BUCKET_SIZES"
+        );
         assert!(
             row.load_factor <= 0.48,
             "ADR-0031 must size (2,1) at or under its published ceiling, got {}",
             row.load_factor
         );
-        assert!(row.fillable(), "nothing left to flag once it is sized correctly");
+        assert!(
+            row.fillable(),
+            "nothing left to flag once it is sized correctly"
+        );
         assert_eq!(row_annotation(&row), "");
     }
 
@@ -912,7 +1027,10 @@ mod tests {
         let mut row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, 2, 1, 32, &codec()).unwrap();
         assert_eq!(row.load_ceiling, Some(0.48));
         row.load_factor = 0.7469; // what a flat-0.75 target used to produce here
-        assert!(!row.fillable(), "must be flagged: sized above what the table holds");
+        assert!(
+            !row.fillable(),
+            "must be flagged: sized above what the table holds"
+        );
         assert_eq!(row_annotation(&row), "  ‡");
     }
 
@@ -922,7 +1040,8 @@ mod tests {
     #[test]
     fn fillable_rows_are_not_flagged() {
         for (arity, bucket_size) in [(2u32, 2u32), (2, 3), (2, 4), (3, 1), (3, 3), (3, 4), (4, 4)] {
-            let row = compute_row(LIVE_COMPLETE_SET_ACCOUNTS, arity, bucket_size, 32, &codec()).unwrap();
+            let row =
+                compute_row(LIVE_COMPLETE_SET_ACCOUNTS, arity, bucket_size, 32, &codec()).unwrap();
             assert!(
                 row.fillable(),
                 "({arity},{bucket_size}) sized at {} against ceiling {:?}",

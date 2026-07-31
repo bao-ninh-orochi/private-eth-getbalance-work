@@ -13,9 +13,10 @@
 # The live feed gate and fuzzing are nightly (nightly.yml): they need the
 # network / long wall-clock and must never flake a merge.
 #
-# `cargo fmt --check` is deliberately absent for now — see ADR-0021: the tree
-# predates rustfmt.toml, and the gate turns on right after the one-off
-# mechanical reformat lands.
+# `cargo fmt --check` runs in the `clippy + tests` job, first, since 2026-07-31.
+# It was deliberately absent until then (ADR-0021: the tree predated
+# rustfmt.toml) and turned on immediately after the one-off mechanical
+# reformat landed — that commit is listed in `.git-blame-ignore-revs`.
 #
 # The pinned IKPIR dependency is a *private* repo: every job that touches
 # cargo needs the IKPIR_TOKEN secret — a fine-grained PAT with read-only
@@ -84,6 +85,11 @@ jobs:
           fi
           git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # First check in the job: it is the cheapest one here and needs no
+      # compilation, so a formatting slip fails in seconds instead of after
+      # clippy and the test suite. `rustfmt.toml` holds the settings.
+      - name: rustfmt (check only)
+        run: cargo fmt --all -- --check
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests

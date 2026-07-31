@@ -124,8 +124,10 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
    landed 2026-07-22 at `3d60fa7`, and the f=64 / corrected-Lemma-2 refresh
    landed 2026-07-31 at `0f3b99b` — numbers re-measured each time; batching
    still needs an upstream `answer_batch` API).
-10. **Hygiene tail:** flip the `cargo fmt --check` CI gate on in a
-    formatting-only commit (rustfmt.toml is in place; ~296 files of drift);
+10. **Hygiene tail:** ~~flip the `cargo fmt --check` CI gate on in a
+    formatting-only commit~~ **DONE 2026-07-31** — the reformat touched 58
+    files (+4,769/−1,217), not the ~296 estimated here, and is listed in
+    `.git-blame-ignore-revs`; the gate runs first in `clippy + tests`.
     C6 read replicas (verify against ADR-0010 first — the answer path may
     be closer to replicable than "strict lockstep" suggests); C7's restore
     drill is documented, rehearse it on the VM once; E3 artifact-evaluation

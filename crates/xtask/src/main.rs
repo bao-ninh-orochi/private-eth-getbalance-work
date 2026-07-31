@@ -56,9 +56,13 @@ fn run_conformance(rest: &[String]) {
     while i < rest.len() {
         match rest[i].as_str() {
             "--blocks" => cfg.blocks = parse_value("xtask conformance", rest, &mut i, "--blocks"),
-            "--addresses" => cfg.min_addresses = parse_value("xtask conformance", rest, &mut i, "--addresses"),
+            "--addresses" => {
+                cfg.min_addresses = parse_value("xtask conformance", rest, &mut i, "--addresses")
+            }
             "--seed" => cfg.seed = parse_value("xtask conformance", rest, &mut i, "--seed"),
-            "--lwe-dim" => cfg.lwe_dim = parse_value("xtask conformance", rest, &mut i, "--lwe-dim"),
+            "--lwe-dim" => {
+                cfg.lwe_dim = parse_value("xtask conformance", rest, &mut i, "--lwe-dim")
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -136,7 +140,9 @@ fn parse_u32_list(cmd: &str, args: &[String], i: &mut usize, name: &str) -> Vec<
             Some((lo, hi)) => match (lo.parse::<u32>(), hi.parse::<u32>()) {
                 (Ok(lo), Ok(hi)) if lo <= hi => out.extend(lo..=hi),
                 _ => {
-                    eprintln!("{cmd}: {name}: invalid range {token:?} (expected LO-HI with LO <= HI)");
+                    eprintln!(
+                        "{cmd}: {name}: invalid range {token:?} (expected LO-HI with LO <= HI)"
+                    );
                     std::process::exit(2);
                 }
             },
@@ -182,7 +188,9 @@ fn parse_scale_list(args: &[String], i: &mut usize) -> Vec<u64> {
 fn print_usage() {
     eprintln!("usage: xtask conformance [--blocks <u64>] [--addresses <usize>] [--seed <u64>] [--lwe-dim <u32>]");
     eprintln!("       xtask bench [--write] [--scales <n,n,...>] [--mid-scale <u64>]");
-    eprintln!("       xtask web                 (build the browser client's wasm into web/client.wasm)");
+    eprintln!(
+        "       xtask web                 (build the browser client's wasm into web/client.wasm)"
+    );
     eprintln!(
         "       xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] \
          [--fingerprint-bits <u32>] [--fill-check] [--fill-accounts <u64>]"
@@ -216,7 +224,9 @@ fn run_bench(rest: &[String]) {
                 i += 1;
             }
             "--scales" => scales = Some(parse_scale_list(rest, &mut i)),
-            "--mid-scale" => mid_scale = Some(parse_value("xtask bench", rest, &mut i, "--mid-scale")),
+            "--mid-scale" => {
+                mid_scale = Some(parse_value("xtask bench", rest, &mut i, "--mid-scale"))
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -242,7 +252,10 @@ fn run_bench(rest: &[String]) {
             if cfg.scales.contains(&cfg.mid_scale) {
                 cfg.mid_scale
             } else {
-                *cfg.scales.iter().min().expect("--scales rejects an empty list")
+                *cfg.scales
+                    .iter()
+                    .min()
+                    .expect("--scales rejects an empty list")
             }
         });
     } else if let Some(mid) = mid_scale {
@@ -273,10 +286,14 @@ fn run_bench(rest: &[String]) {
     // casual run against the current `main`-based local path-dep cannot silently
     // clobber the reference with slower single-threaded numbers.
     if write {
-        let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/numbers.md");
+        let out_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/numbers.md");
         std::fs::write(&out_path, &markdown)
             .unwrap_or_else(|e| panic!("xtask bench: failed to write {}: {e}", out_path.display()));
-        println!("Wrote {} — ensure this build was against the pinned IKPIR rev (root Cargo.toml).", out_path.display());
+        println!(
+            "Wrote {} — ensure this build was against the pinned IKPIR rev (root Cargo.toml).",
+            out_path.display()
+        );
     } else {
         println!("(printed only; pass `--write` to overwrite docs/numbers.md — only from a build against the pinned IKPIR rev)");
     }
@@ -299,8 +316,12 @@ fn run_geometry(rest: &[String]) {
         match rest[i].as_str() {
             "--accounts" => cfg.accounts = parse_value(CMD, rest, &mut i, "--accounts"),
             "--arity" => cfg.arities = parse_u32_list(CMD, rest, &mut i, "--arity"),
-            "--bucket-size" => cfg.bucket_sizes = parse_u32_list(CMD, rest, &mut i, "--bucket-size"),
-            "--fingerprint-bits" => cfg.fingerprint_bits = parse_value(CMD, rest, &mut i, "--fingerprint-bits"),
+            "--bucket-size" => {
+                cfg.bucket_sizes = parse_u32_list(CMD, rest, &mut i, "--bucket-size")
+            }
+            "--fingerprint-bits" => {
+                cfg.fingerprint_bits = parse_value(CMD, rest, &mut i, "--fingerprint-bits")
+            }
             "--fill-accounts" => fill_accounts = parse_value(CMD, rest, &mut i, "--fill-accounts"),
             "--fill-check" => {
                 do_fill_check = true;
@@ -344,7 +365,11 @@ fn run_geometry(rest: &[String]) {
             fill_accounts,
             xtask::geometry::DEFAULT_FILL_CANDIDATES.len()
         );
-        let results = xtask::geometry::fill_check(&xtask::geometry::DEFAULT_FILL_CANDIDATES, fill_accounts, cfg.fingerprint_bits);
+        let results = xtask::geometry::fill_check(
+            &xtask::geometry::DEFAULT_FILL_CANDIDATES,
+            fill_accounts,
+            cfg.fingerprint_bits,
+        );
         print!("{}", xtask::geometry::render_fill_check(&results));
     }
 }
@@ -367,7 +392,10 @@ fn machine_note() -> String {
 }
 
 fn sysctl_u64(name: &str) -> Option<u64> {
-    let output = std::process::Command::new("sysctl").args(["-n", name]).output().ok()?;
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", name])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

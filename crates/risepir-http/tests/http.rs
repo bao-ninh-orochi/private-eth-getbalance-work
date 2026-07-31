@@ -55,8 +55,15 @@ fn build_node() -> (Arc<NodeState>, MockFeed) {
     let feed = MockFeed::new(cfg.clone());
     let value_codec = codec();
 
-    let geom = Geometry::for_accounts(cfg.num_genesis_keys, ARITY, BUCKET_SIZE, FINGERPRINT_BITS, &value_codec, Backend::Simple)
-        .expect("geometry");
+    let geom = Geometry::for_accounts(
+        cfg.num_genesis_keys,
+        ARITY,
+        BUCKET_SIZE,
+        FINGERPRINT_BITS,
+        &value_codec,
+        Backend::Simple,
+    )
+    .expect("geometry");
     let mut store = Segmented2aryCuckooKVStore::new(
         geom.num_buckets,
         geom.bucket_size,
@@ -83,7 +90,10 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
         .await
         .unwrap();
     let status = resp.status();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     (status, body)
 }
 
@@ -100,7 +110,10 @@ async fn post_answer(app: &axum::Router, epoch: &str, body: Vec<u8>) -> (StatusC
         .await
         .unwrap();
     let status = resp.status();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     (status, body)
 }
 
@@ -118,7 +131,11 @@ async fn setup_head_and_answer_round_trip() {
     assert_eq!(bundle.params.arity(), ARITY as usize);
     assert_eq!(bundle.backend_params.len(), ARITY as usize);
     assert_eq!(bundle.hints.len(), ARITY as usize);
-    let expected_len_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let expected_len_per_seg: Vec<u32> = bundle
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_row_width)
+        .collect();
     let epoch = wire::lineage_epoch(&bundle.backend_params);
 
     // GET /head -> parse an 8-byte LE u64
@@ -136,7 +153,9 @@ async fn setup_head_and_answer_round_trip() {
 
     let (status, body) = post_answer(&app, &epoch, query_bytes).await;
     assert_eq!(status, StatusCode::OK);
-    let (responses, at_block) = wire::decode_response_bundle(&body, &expected_len_per_seg, ARITY as usize).expect("decode_response_bundle");
+    let (responses, at_block) =
+        wire::decode_response_bundle(&body, &expected_len_per_seg, ARITY as usize)
+            .expect("decode_response_bundle");
     assert_eq!(responses.len(), ARITY as usize);
     assert_eq!(at_block, 0);
 }
@@ -173,9 +192,16 @@ async fn healthz_reconcile_fields_present_and_explicit_when_unconfigured() {
     assert_eq!(lines.next(), Some("ok 0"));
 
     let fields: std::collections::HashMap<&str, &str> = lines
-        .map(|line| line.split_once('=').unwrap_or_else(|| panic!("line {line:?} is not a key=value pair")))
+        .map(|line| {
+            line.split_once('=')
+                .unwrap_or_else(|| panic!("line {line:?} is not a key=value pair"))
+        })
         .collect();
-    assert_eq!(fields.get("reconcile_configured"), Some(&"0"), "never configured ⇒ must say so explicitly");
+    assert_eq!(
+        fields.get("reconcile_configured"),
+        Some(&"0"),
+        "never configured ⇒ must say so explicitly"
+    );
     assert_eq!(fields.get("reconcile_halted"), Some(&"0"));
     assert_eq!(fields.get("reconcile_consecutive_dark"), Some(&"0"));
     assert_eq!(fields.get("reconcile_checkpoints_total"), Some(&"0"));
@@ -207,26 +233,47 @@ async fn healthz_reflects_recorded_reconcile_checkpoints() {
     // Two dark checkpoints in a row: attempted-and-failed, not success.
     let h1 = state.record_reconcile_checkpoint(10, 0, true, false);
     assert_eq!(h1.consecutive_dark, 1);
-    assert_eq!(h1.last_success_block, 0, "a dark checkpoint must never be reported as a success");
+    assert_eq!(
+        h1.last_success_block, 0,
+        "a dark checkpoint must never be reported as a success"
+    );
     assert_eq!(h1.last_success_unix, 0);
 
     let h2 = state.record_reconcile_checkpoint(20, 0, true, false);
-    assert_eq!(h2.consecutive_dark, 2, "consecutive dark checkpoints must accumulate");
+    assert_eq!(
+        h2.consecutive_dark, 2,
+        "consecutive dark checkpoints must accumulate"
+    );
 
     // An empty block (no candidates) must leave the dark streak exactly as
     // it was — neither reset nor incremented.
     let h3 = state.record_reconcile_checkpoint(25, 0, false, false);
-    assert_eq!(h3.consecutive_dark, 2, "an empty checkpoint must leave consecutive_dark unchanged");
-    assert_eq!(h3.checkpoints_total, 3, "an empty checkpoint still counts as a checkpoint that ran");
+    assert_eq!(
+        h3.consecutive_dark, 2,
+        "an empty checkpoint must leave consecutive_dark unchanged"
+    );
+    assert_eq!(
+        h3.checkpoints_total, 3,
+        "an empty checkpoint still counts as a checkpoint that ran"
+    );
 
     // A successful comparison clears the streak and records the success.
     let h4 = state.record_reconcile_checkpoint(30, 3, false, false);
-    assert_eq!(h4.consecutive_dark, 0, "a successful checkpoint must clear the dark streak");
+    assert_eq!(
+        h4.consecutive_dark, 0,
+        "a successful checkpoint must clear the dark streak"
+    );
     assert_eq!(h4.last_success_block, 30);
-    assert!(h4.last_success_unix > 0, "a real wall-clock timestamp must be recorded");
+    assert!(
+        h4.last_success_unix > 0,
+        "a real wall-clock timestamp must be recorded"
+    );
     assert_eq!(h4.comparisons_total, 3);
     assert_eq!(h4.checkpoints_total, 4);
-    assert_eq!(h4.deferred_total, 0, "none of these checkpoints were deferred");
+    assert_eq!(
+        h4.deferred_total, 0,
+        "none of these checkpoints were deferred"
+    );
 
     let (status, body) = get(&app, "/healthz").await;
     assert_eq!(status, StatusCode::OK);
@@ -254,7 +301,10 @@ async fn healthz_reflects_a_deferred_checkpoint_like_a_dark_one() {
     state.set_reconcile_configured(true);
 
     let h = state.record_reconcile_checkpoint(100, 0, true, true);
-    assert_eq!(h.consecutive_dark, 1, "a deferred checkpoint counts toward the dark streak");
+    assert_eq!(
+        h.consecutive_dark, 1,
+        "a deferred checkpoint counts toward the dark streak"
+    );
     assert_eq!(h.deferred_total, 1);
 
     let h2 = state.record_reconcile_checkpoint(130, 0, true, true);
@@ -314,11 +364,16 @@ async fn healthz_reports_snapshot_audit_unknown_by_default_then_whatever_is_set(
     assert!(text.contains("snapshot_audit=unknown"), "{text}");
     assert_eq!(state.snapshot_audit_line(), "unknown");
 
-    state.set_snapshot_audit_line("checked=512 disagreed=3 block=1 rate=0.59% ci=[0.16%,1.46%]".to_string());
+    state.set_snapshot_audit_line(
+        "checked=512 disagreed=3 block=1 rate=0.59% ci=[0.16%,1.46%]".to_string(),
+    );
     let (status, body) = get(&app, "/healthz").await;
     assert_eq!(status, StatusCode::OK);
     let text = String::from_utf8(body).unwrap();
-    assert!(text.contains("snapshot_audit=checked=512 disagreed=3 block=1 rate=0.59% ci=[0.16%,1.46%]"), "{text}");
+    assert!(
+        text.contains("snapshot_audit=checked=512 disagreed=3 block=1 rate=0.59% ci=[0.16%,1.46%]"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
@@ -342,7 +397,10 @@ async fn setup_concurrency_cap_is_invisible_to_sequential_clients() {
 async fn apply_block_returns_a_populated_patch_duration() {
     let (state, mut feed) = build_node();
 
-    let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+    let upd = feed
+        .next_block()
+        .expect("feed")
+        .expect("mock always has a next block");
     let (delta, duration) = state.apply_block(&upd).await.expect("apply_block");
 
     // `docs/numbers.md` §7's missing complete-set patch-time row depends
@@ -350,13 +408,19 @@ async fn apply_block_returns_a_populated_patch_duration() {
     // `RisePirServer::apply_block` call (see that method's own docs) —
     // never a placeholder default — so a block that does real store/hint
     // work must report back a nonzero duration.
-    assert!(duration.as_nanos() > 0, "apply_block must return a populated (nonzero) duration");
+    assert!(
+        duration.as_nanos() > 0,
+        "apply_block must return a populated (nonzero) duration"
+    );
 
     // The other half of the same return value, pinned here so the two
     // cannot drift apart: the delta handed back is this block's own, which
     // is what the follow loop appends to the state journal (ADR-0026)
     // instead of re-deriving it.
-    assert_eq!(delta.block, upd.block, "apply_block must return the delta for the block it applied");
+    assert_eq!(
+        delta.block, upd.block,
+        "apply_block must return the delta for the block it applied"
+    );
 }
 
 // ── (b) malformed body -> 400, never a panic ────────────────────────────
@@ -409,8 +473,16 @@ async fn end_to_end_matches_ground_truth() {
     let bundle = wire::decode_setup(&body).expect("decode_setup");
     let params = bundle.params;
     let arity = params.arity();
-    let reshape_rows_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_rows).collect();
-    let reshape_row_width_per_seg: Vec<u32> = bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+    let reshape_rows_per_seg: Vec<u32> = bundle
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_rows)
+        .collect();
+    let reshape_row_width_per_seg: Vec<u32> = bundle
+        .backend_params
+        .iter()
+        .map(|sp| sp.reshape_row_width)
+        .collect();
     let epoch = wire::lineage_epoch(&bundle.backend_params);
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
 
@@ -418,7 +490,10 @@ async fn end_to_end_matches_ground_truth() {
     // that went to zero (a real delete, ADR-0015) along the way.
     let mut deleted: Vec<AddressHash> = Vec::new();
     for _ in 0..20 {
-        let upd = feed.next_block().expect("feed").expect("mock always has a next block");
+        let upd = feed
+            .next_block()
+            .expect("feed")
+            .expect("mock always has a next block");
         for (addr, bal) in &upd.changes {
             if *bal == 0 {
                 deleted.push(*addr);
@@ -435,16 +510,26 @@ async fn end_to_end_matches_ground_truth() {
 
     let (status, body) = get(&app, &format!("/sync?from=0&to={head}&epoch={epoch}")).await;
     assert_eq!(status, StatusCode::OK);
-    let delta = risepir_proto::codec::decode_block_delta(&body, params.plaintext_bits, arity as u32).expect("decode_block_delta");
+    let delta =
+        risepir_proto::codec::decode_block_delta(&body, params.plaintext_bits, arity as u32)
+            .expect("decode_block_delta");
     client.ingest_delta(&delta).expect("ingest_delta");
 
     // Build the category samples (after the block-driving loop, so
     // `feed.live_keys()` reflects the post-run live set).
     let mut samples: Vec<(AddressHash, Category)> = Vec::new();
-    samples.extend(feed.live_keys().iter().take(6).map(|a| (*a, Category::Live)));
+    samples.extend(
+        feed.live_keys()
+            .iter()
+            .take(6)
+            .map(|a| (*a, Category::Live)),
+    );
     samples.extend(deleted.iter().take(6).map(|a| (*a, Category::Deleted)));
     samples.extend((0..6u64).map(|i| (MockFeed::address_for(50_000_000 + i), Category::Never)));
-    assert!(!deleted.is_empty(), "sanity: the run must have produced at least one delete");
+    assert!(
+        !deleted.is_empty(),
+        "sanity: the run must have produced at least one delete"
+    );
 
     for (addr, category) in &samples {
         let (queries, ctx) = client.build_query(addr);
@@ -452,22 +537,40 @@ async fn end_to_end_matches_ground_truth() {
         let (status, body) = post_answer(&app, &epoch, query_bytes).await;
         assert_eq!(status, StatusCode::OK, "addr {addr:?}");
         let (responses, at_block) =
-            wire::decode_response_bundle(&body, &reshape_row_width_per_seg, arity).expect("decode_response_bundle");
+            wire::decode_response_bundle(&body, &reshape_row_width_per_seg, arity)
+                .expect("decode_response_bundle");
         assert_eq!(responses.len(), reshape_rows_per_seg.len());
-        let result = client.finish(addr, &ctx, responses, at_block).expect("finish");
+        let result = client
+            .finish(addr, &ctx, responses, at_block)
+            .expect("finish");
 
         let expected = feed.balance_of(addr);
         match category {
             // Deleted must be exactly NotFound (a real slot removal, not
             // merely "coincidentally decodes to a zero-looking balance") —
             // mirrors risepir-feed's pipeline test's own load-bearing check.
-            Category::Deleted => assert_eq!(result, Lookup::NotFound, "deleted addr {addr:?} must be exactly NotFound"),
-            Category::Never => assert_eq!(result, Lookup::NotFound, "never-existed addr {addr:?} must be NotFound"),
+            Category::Deleted => assert_eq!(
+                result,
+                Lookup::NotFound,
+                "deleted addr {addr:?} must be exactly NotFound"
+            ),
+            Category::Never => assert_eq!(
+                result,
+                Lookup::NotFound,
+                "never-existed addr {addr:?} must be NotFound"
+            ),
             Category::Live => {
-                assert_ne!(expected, 0, "sanity: a live key has a nonzero ground-truth balance");
+                assert_ne!(
+                    expected, 0,
+                    "sanity: a live key has a nonzero ground-truth balance"
+                );
                 match result {
-                    Lookup::Found(b) => assert_eq!(b, expected, "live addr {addr:?} balance mismatch"),
-                    other => panic!("live addr {addr:?} resolved to {other:?}, expected Found({expected})"),
+                    Lookup::Found(b) => {
+                        assert_eq!(b, expected, "live addr {addr:?} balance mismatch")
+                    }
+                    other => panic!(
+                        "live addr {addr:?} resolved to {other:?}, expected Found({expected})"
+                    ),
                 }
             }
         }
@@ -512,13 +615,31 @@ async fn seed_history_makes_seeded_blocks_immediately_servable() {
     let epoch = state.epoch().to_string();
     for d in &deltas {
         let (status, body) = get(&app, &format!("/delta/{}?epoch={epoch}", d.block)).await;
-        assert_eq!(status, StatusCode::OK, "seeded block {} must be servable", d.block);
-        let decoded = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY).expect("decode_block_delta");
-        assert_eq!(&decoded, d, "seeded block {} must round-trip byte-exact", d.block);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "seeded block {} must be servable",
+            d.block
+        );
+        let decoded = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY)
+            .expect("decode_block_delta");
+        assert_eq!(
+            &decoded, d,
+            "seeded block {} must round-trip byte-exact",
+            d.block
+        );
     }
 
     let (status, body) = get(&app, &format!("/sync?from=0&to=3&epoch={epoch}")).await;
-    assert_eq!(status, StatusCode::OK, "a seeded range must be servable via /sync");
-    let coalesced = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY).expect("decode_block_delta");
-    assert_eq!(coalesced, BlockDelta::coalesce(&deltas).expect("contiguous by construction"));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a seeded range must be servable via /sync"
+    );
+    let coalesced = risepir_proto::codec::decode_block_delta(&body, plaintext_bits, ARITY)
+        .expect("decode_block_delta");
+    assert_eq!(
+        coalesced,
+        BlockDelta::coalesce(&deltas).expect("contiguous by construction")
+    );
 }

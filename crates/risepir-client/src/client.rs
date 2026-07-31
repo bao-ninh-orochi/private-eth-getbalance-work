@@ -668,7 +668,13 @@ mod tests {
             if block == TARGET_BLOCK {
                 changes.push((target, target_balance));
             }
-            let delta = srv.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let delta = srv
+                .apply_block(&BlockUpdate {
+                    block,
+                    changes,
+                    credits: vec![],
+                })
+                .unwrap();
             client.ingest_delta(&delta).unwrap();
         }
         assert!(
@@ -811,7 +817,13 @@ mod tests {
                 }
             }
 
-            let delta = srv.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let delta = srv
+                .apply_block(&BlockUpdate {
+                    block,
+                    changes,
+                    credits: vec![],
+                })
+                .unwrap();
             client.ingest_delta(&delta).unwrap();
         }
         assert_eq!(client.pinned_block(), 1, "never GC'd");
@@ -870,7 +882,13 @@ mod tests {
                     (addr(i), u128::from(rng.next() % (1u64 << 40)))
                 })
                 .collect();
-            let delta = srv.apply_block(&BlockUpdate { block, changes, credits: vec![] }).unwrap();
+            let delta = srv
+                .apply_block(&BlockUpdate {
+                    block,
+                    changes,
+                    credits: vec![],
+                })
+                .unwrap();
             client.ingest_delta(&delta).unwrap();
         }
 
@@ -1068,9 +1086,14 @@ mod tests {
             value_bits,
             SimpleParams::DEFAULT_SIGMA,
         );
-        let mut store: Segmented2aryCuckooKVStore =
-            Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, WEAK_FP_BITS, value_bits, plaintext_bits)
-                .unwrap();
+        let mut store: Segmented2aryCuckooKVStore = Segmented2aryCuckooKVStore::new(
+            NUM_BUCKETS,
+            BUCKET_SIZE,
+            WEAK_FP_BITS,
+            value_bits,
+            plaintext_bits,
+        )
+        .unwrap();
 
         // ~60% load: a genuinely full store (so candidate buckets are
         // densely occupied, maximising the chance of an fp collision)

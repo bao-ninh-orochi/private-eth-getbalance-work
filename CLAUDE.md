@@ -68,8 +68,11 @@ today** and there is a **live GCP deployment** (below).
   browser gate (mock mode, real headless Chromium) on PRs, and runs the live
   gate plus the `fuzz/` targets nightly. It fetches the private IKPIR dep via
   the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR only, Contents read-only —
-  deploy keys are disabled on that repo). `cargo fmt` is not yet a gate — no
-  mass reformat until the in-flight branches land.
+  deploy keys are disabled on that repo). **`cargo fmt --all -- --check` is a
+  gate** as of 2026-07-31, running first in the `clippy + tests` job — the
+  one-off mechanical reformat it was waiting on has landed, and that commit is
+  in `.git-blame-ignore-revs` (run `git config blame.ignoreRevsFile
+  .git-blame-ignore-revs` once per clone; GitHub honours it automatically).
 
 ## Git conventions
 

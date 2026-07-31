@@ -21,7 +21,11 @@ fn small_conformance_run_passes_with_full_category_coverage() {
     let report = run(&cfg);
 
     assert!(report.passed, "conformance run must pass:\n{report}");
-    assert_eq!(report.mismatches.len(), 0, "must be zero mismatches:\n{report}");
+    assert_eq!(
+        report.mismatches.len(),
+        0,
+        "must be zero mismatches:\n{report}"
+    );
     assert!(
         report.sample_size >= cfg.min_addresses,
         "final sample must reach min_addresses:\n{report}"

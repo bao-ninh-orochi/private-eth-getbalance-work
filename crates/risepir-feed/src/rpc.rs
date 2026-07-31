@@ -296,7 +296,9 @@ impl RpcFeed {
     /// chain; whatever the primary's `eth_chainId` failed with, if it did.
     pub async fn new_multi(urls: Vec<String>, expected_chain_id: u64) -> Result<Self, FeedError> {
         if urls.is_empty() {
-            return Err(FeedError::Internal("feed needs at least one endpoint URL".to_string()));
+            return Err(FeedError::Internal(
+                "feed needs at least one endpoint URL".to_string(),
+            ));
         }
         let mut endpoints = Vec::with_capacity(urls.len());
         for (i, url) in urls.into_iter().enumerate() {
@@ -382,8 +384,14 @@ impl RpcFeed {
             .get("number")
             .and_then(Value::as_str)
             .ok_or_else(|| parse_err("eth_getBlockByNumber(finalized)", "missing number"))?;
-        let num = parse_hex_u128(num).map_err(|e| parse_err("eth_getBlockByNumber(finalized)", &e))?;
-        u64::try_from(num).map_err(|_| parse_err("eth_getBlockByNumber(finalized)", "block number does not fit u64"))
+        let num =
+            parse_hex_u128(num).map_err(|e| parse_err("eth_getBlockByNumber(finalized)", &e))?;
+        u64::try_from(num).map_err(|_| {
+            parse_err(
+                "eth_getBlockByNumber(finalized)",
+                "block number does not fit u64",
+            )
+        })
     }
 
     /// One finalized block's complete [`BlockUpdate`]: traced transaction
@@ -484,7 +492,10 @@ pub fn changes_from_trace(trace: &Value) -> Result<Vec<(Address, Balance)>, Feed
         if let Some(err) = result.get("error").and_then(Value::as_str) {
             // A tracer-level failure for one tx means the block's change
             // set is unknowable — never "skip and hope".
-            return Err(parse_err("debug_traceBlockByNumber", &ctx(&format!("tracer error: {err}"))));
+            return Err(parse_err(
+                "debug_traceBlockByNumber",
+                &ctx(&format!("tracer error: {err}")),
+            ));
         }
         let pre = result
             .get("pre")
@@ -500,9 +511,12 @@ pub fn changes_from_trace(trace: &Value) -> Result<Vec<(Address, Balance)>, Feed
                 .ok_or_else(|| parse_err("debug_traceBlockByNumber", &ctx("bad post address")))?;
             match acct.get("balance") {
                 Some(b) => {
-                    let b = b
-                        .as_str()
-                        .ok_or_else(|| parse_err("debug_traceBlockByNumber", &ctx("post balance not a string")))?;
+                    let b = b.as_str().ok_or_else(|| {
+                        parse_err(
+                            "debug_traceBlockByNumber",
+                            &ctx("post balance not a string"),
+                        )
+                    })?;
                     let wei = parse_hex_u128(b)
                         .map_err(|e| parse_err("debug_traceBlockByNumber", &ctx(&e)))?;
                     map.insert(addr, wei);
@@ -513,8 +527,9 @@ pub fn changes_from_trace(trace: &Value) -> Result<Vec<(Address, Balance)>, Feed
         for (addr_str, _) in pre {
             if !post.contains_key(addr_str) {
                 // In pre, absent from post: destroyed this tx.
-                let addr = parse_address(addr_str)
-                    .ok_or_else(|| parse_err("debug_traceBlockByNumber", &ctx("bad pre address")))?;
+                let addr = parse_address(addr_str).ok_or_else(|| {
+                    parse_err("debug_traceBlockByNumber", &ctx("bad pre address"))
+                })?;
                 map.insert(addr, 0);
             }
         }
@@ -607,7 +622,11 @@ fn extract_json_rpc_code_message(bytes: &[u8]) -> (Option<i64>, String) {
     };
     let obj = value.get("error").unwrap_or(&value);
     let code = obj.get("code").and_then(Value::as_i64);
-    let message = obj.get("message").and_then(Value::as_str).unwrap_or("").to_string();
+    let message = obj
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     (code, message)
 }
 
@@ -641,7 +660,11 @@ async fn verify_chain(rpc: &RpcClient, expected: u64) -> Result<(), FeedError> {
 fn all_failed(method: &str, failures: &[String]) -> FeedError {
     FeedError::Rpc {
         method: method.to_string(),
-        detail: format!("all {} endpoint(s) failed — {}", failures.len(), failures.join(" | ")),
+        detail: format!(
+            "all {} endpoint(s) failed — {}",
+            failures.len(),
+            failures.join(" | ")
+        ),
     }
 }
 
@@ -712,7 +735,10 @@ mod tests {
     /// removes a fallback from service while `curl` checks keep passing.
     #[test]
     fn rpc_client_sends_a_user_agent() {
-        assert!(USER_AGENT.starts_with("risepir-rpc/"), "unexpected UA: {USER_AGENT}");
+        assert!(
+            USER_AGENT.starts_with("risepir-rpc/"),
+            "unexpected UA: {USER_AGENT}"
+        );
         assert!(
             USER_AGENT.len() > "risepir-rpc/".len(),
             "UA must carry a version, got {USER_AGENT}"
@@ -732,7 +758,9 @@ mod tests {
                 "https://eth.merkle.io: HTTP 429".to_string(),
             ],
         );
-        let FeedError::Rpc { method, detail } = e else { panic!("expected Rpc") };
+        let FeedError::Rpc { method, detail } = e else {
+            panic!("expected Rpc")
+        };
         assert_eq!(method, "block_update(25613828)");
         assert!(detail.contains("all 2 endpoint(s) failed"), "{detail}");
         assert!(detail.contains("eth.drpc.org"), "{detail}");
@@ -815,12 +843,15 @@ mod tests {
     fn malformed_balance_or_address_fails_loudly() {
         for bad in [
             serde_json::json!([{"result": {"pre": {}, "post": {a_hex(0x11): {"balance": "123"}}}}]), // no 0x
-            serde_json::json!([{"result": {"pre": {}, "post": {a_hex(0x11): {"balance": 123}}}}]),   // not a string
-            serde_json::json!([{"result": {"pre": {}, "post": {"0x1234": {"balance": "0x1"}}}}]),    // short addr
-            serde_json::json!([{"result": {"post": {}}}]),                                            // missing pre
+            serde_json::json!([{"result": {"pre": {}, "post": {a_hex(0x11): {"balance": 123}}}}]), // not a string
+            serde_json::json!([{"result": {"pre": {}, "post": {"0x1234": {"balance": "0x1"}}}}]), // short addr
+            serde_json::json!([{"result": {"post": {}}}]), // missing pre
             serde_json::json!("not an array"),
         ] {
-            assert!(changes_from_trace(&bad).is_err(), "accepted malformed trace: {bad}");
+            assert!(
+                changes_from_trace(&bad).is_err(),
+                "accepted malformed trace: {bad}"
+            );
         }
     }
 
@@ -849,18 +880,24 @@ mod tests {
 
     #[test]
     fn pre_shanghai_block_without_withdrawals_is_empty() {
-        assert_eq!(credits_from_block(&serde_json::json!({"number": "0x1"})).unwrap(), vec![]);
+        assert_eq!(
+            credits_from_block(&serde_json::json!({"number": "0x1"})).unwrap(),
+            vec![]
+        );
     }
 
     #[test]
     fn malformed_withdrawals_fail_loudly() {
         for bad in [
-            serde_json::json!({"withdrawals": [{"address": a_hex(0x11)}]}),                    // no amount
-            serde_json::json!({"withdrawals": [{"address": "0xzz", "amount": "0x1"}]}),        // bad addr
-            serde_json::json!({"withdrawals": [{"address": a_hex(0x11), "amount": "1"}]}),     // no 0x
+            serde_json::json!({"withdrawals": [{"address": a_hex(0x11)}]}), // no amount
+            serde_json::json!({"withdrawals": [{"address": "0xzz", "amount": "0x1"}]}), // bad addr
+            serde_json::json!({"withdrawals": [{"address": a_hex(0x11), "amount": "1"}]}), // no 0x
             serde_json::json!({"withdrawals": "nope"}),
         ] {
-            assert!(credits_from_block(&bad).is_err(), "accepted malformed block: {bad}");
+            assert!(
+                credits_from_block(&bad).is_err(),
+                "accepted malformed block: {bad}"
+            );
         }
     }
 
@@ -869,7 +906,10 @@ mod tests {
     #[test]
     fn hex_u128_rejects_garbage_and_accepts_bounds() {
         assert_eq!(parse_hex_u128("0x0").unwrap(), 0);
-        assert_eq!(parse_hex_u128("0xffffffffffffffffffffffffffffffff").unwrap(), u128::MAX);
+        assert_eq!(
+            parse_hex_u128("0xffffffffffffffffffffffffffffffff").unwrap(),
+            u128::MAX
+        );
         for bad in ["", "0x", "12", "0xg", "0x100000000000000000000000000000000"] {
             assert!(parse_hex_u128(bad).is_err(), "accepted {bad:?}");
         }
@@ -898,9 +938,21 @@ mod tests {
     /// `403` -- the code+message branch must catch these too.
     #[test]
     fn full_node_pruning_errors_classify_without_a_403() {
-        assert!(looks_like_depth_refusal(200, Some(-32000), "missing trie node abcd1234 (archive node needed?)"));
-        assert!(looks_like_depth_refusal(200, Some(-32000), "PRUNED: state not retained for this block"));
-        assert!(looks_like_depth_refusal(200, Some(-32602), "state is not available for the requested block"));
+        assert!(looks_like_depth_refusal(
+            200,
+            Some(-32000),
+            "missing trie node abcd1234 (archive node needed?)"
+        ));
+        assert!(looks_like_depth_refusal(
+            200,
+            Some(-32000),
+            "PRUNED: state not retained for this block"
+        ));
+        assert!(looks_like_depth_refusal(
+            200,
+            Some(-32602),
+            "state is not available for the requested block"
+        ));
     }
 
     /// A transport failure never reaches the classifier at all (no HTTP
@@ -922,16 +974,32 @@ mod tests {
     #[test]
     fn rate_limit_is_not_a_depth_refusal() {
         assert!(!looks_like_depth_refusal(429, None, "Too Many Requests"));
-        assert!(!looks_like_depth_refusal(429, Some(-32005), "limit exceeded, please retry later"));
-        assert!(!looks_like_depth_refusal(200, Some(-32005), "rate limit exceeded"));
+        assert!(!looks_like_depth_refusal(
+            429,
+            Some(-32005),
+            "limit exceeded, please retry later"
+        ));
+        assert!(!looks_like_depth_refusal(
+            200,
+            Some(-32005),
+            "rate limit exceeded"
+        ));
     }
 
     /// The right message with the wrong code, or no code at all, must not
     /// classify -- the rule is a conjunction, not just a keyword search.
     #[test]
     fn keyword_without_the_right_code_does_not_classify() {
-        assert!(!looks_like_depth_refusal(200, Some(-32601), "archive node required"));
-        assert!(!looks_like_depth_refusal(200, None, "archive node required"));
+        assert!(!looks_like_depth_refusal(
+            200,
+            Some(-32601),
+            "archive node required"
+        ));
+        assert!(!looks_like_depth_refusal(
+            200,
+            None,
+            "archive node required"
+        ));
     }
 
     /// The right code with an unrelated message must not classify either --
@@ -939,7 +1007,11 @@ mod tests {
     /// reverted call), not just depth refusals.
     #[test]
     fn right_code_without_a_keyword_does_not_classify() {
-        assert!(!looks_like_depth_refusal(200, Some(-32000), "execution reverted"));
+        assert!(!looks_like_depth_refusal(
+            200,
+            Some(-32000),
+            "execution reverted"
+        ));
     }
 
     /// `extract_json_rpc_code_message` must also read the standard envelope
@@ -957,7 +1029,10 @@ mod tests {
     /// panicking or erroring -- this only ever feeds a heuristic.
     #[test]
     fn extract_degrades_quietly_on_non_json() {
-        assert_eq!(extract_json_rpc_code_message(b"not json at all"), (None, String::new()));
+        assert_eq!(
+            extract_json_rpc_code_message(b"not json at all"),
+            (None, String::new())
+        );
     }
 }
 
@@ -978,11 +1053,17 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "live network: dRPC + publicnode"]
     async fn live_block_update_matches_independent_provider() {
-        let feed = RpcFeed::new(FEED_URL, 1).await.expect("connect + chain id 1");
+        let feed = RpcFeed::new(FEED_URL, 1)
+            .await
+            .expect("connect + chain id 1");
         let confirm = RpcClient::new(CONFIRM_URL);
 
         let n = feed.finalized().await.expect("finalized");
-        let FetchedBlock { update, changed: raw_changes, .. } = feed.block_update(n).await.expect("block_update");
+        let FetchedBlock {
+            update,
+            changed: raw_changes,
+            ..
+        } = feed.block_update(n).await.expect("block_update");
         assert_eq!(update.block, n);
         assert!(
             !update.changes.is_empty(),
@@ -1012,7 +1093,10 @@ mod live_tests {
             if withdrawal_recipients.contains(addr) {
                 continue;
             }
-            let reference = confirm.balance_at(addr, n).await.expect("confirm balance_at");
+            let reference = confirm
+                .balance_at(addr, n)
+                .await
+                .expect("confirm balance_at");
             assert_eq!(
                 *our_balance,
                 reference,
@@ -1021,17 +1105,33 @@ mod live_tests {
             );
             checked += 1;
         }
-        assert!(checked >= 5, "too few non-withdrawal addresses sampled ({checked}) to be meaningful");
-        println!("live conformance: {checked} addresses byte-exact vs independent provider at block {n}");
+        assert!(
+            checked >= 5,
+            "too few non-withdrawal addresses sampled ({checked}) to be meaningful"
+        );
+        println!(
+            "live conformance: {checked} addresses byte-exact vs independent provider at block {n}"
+        );
     }
 
     #[tokio::test]
     #[ignore = "live network: dRPC"]
     async fn live_chain_id_mismatch_rejected() {
         let err = match RpcFeed::new(FEED_URL, 11155111).await {
-            Ok(_) => panic!("a mainnet endpoint must be rejected when Sepolia's chain id is expected"),
+            Ok(_) => {
+                panic!("a mainnet endpoint must be rejected when Sepolia's chain id is expected")
+            }
             Err(e) => e,
         };
-        assert!(matches!(err, FeedError::ChainIdMismatch { expected: 11155111, got: 1 }), "{err}");
+        assert!(
+            matches!(
+                err,
+                FeedError::ChainIdMismatch {
+                    expected: 11155111,
+                    got: 1
+                }
+            ),
+            "{err}"
+        );
     }
 }

@@ -21,7 +21,10 @@ use std::process::Command;
 
 /// Repo root, derived from this crate's manifest directory.
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("canonicalize repo root")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonicalize repo root")
 }
 
 /// Build `risepir-wasm` for wasm32 and copy the artifact to

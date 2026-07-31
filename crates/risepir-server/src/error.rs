@@ -108,7 +108,10 @@ impl fmt::Display for ServerError {
                 "block must be strictly increasing: server is at {current}, got {attempted}"
             ),
             Self::MalformedQuery { expected, got } => {
-                write!(f, "malformed query: expected {expected} segments, got {got}")
+                write!(
+                    f,
+                    "malformed query: expected {expected} segments, got {got}"
+                )
             }
             Self::FingerprintAmbiguity { shadowed: true } => write!(
                 f,

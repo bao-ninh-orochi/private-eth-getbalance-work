@@ -190,12 +190,16 @@ const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(5
 fn backoff_delay(attempt: u32, addr: &[u8; 20]) -> std::time::Duration {
     // Saturating, so an (unreachable) large `attempt` cannot overflow into
     // a tiny or absurd delay.
-    let factor = 1u32.checked_shl(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    let factor = 1u32
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u32::MAX);
     let base = RETRY_BASE_DELAY.saturating_mul(factor);
     // SplitMix64's finalizer over the address plus the attempt number, so
     // the same address jitters differently on each of its own retries.
-    let mut z = u64::from_le_bytes([addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7]])
-        .wrapping_add(u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut z = u64::from_le_bytes([
+        addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7],
+    ])
+    .wrapping_add(u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
@@ -243,7 +247,8 @@ impl std::error::Error for AddressFileError {}
 /// [`AddressFileError::Malformed`] on the first line that fails
 /// validation — this loader never skips a bad line and continues.
 pub fn parse_address_file(path: &Path) -> Result<Vec<[u8; 20]>, AddressFileError> {
-    let text = std::fs::read_to_string(path).map_err(|e| AddressFileError::Io(format!("{}: {e}", path.display())))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| AddressFileError::Io(format!("{}: {e}", path.display())))?;
     parse_addresses(&text)
 }
 
@@ -276,7 +281,11 @@ pub fn parse_addresses(text: &str) -> Result<Vec<[u8; 20]>, AddressFileError> {
 /// `0x` (lowercase only) + exactly 40 lowercase-hex digits.
 fn parse_lowercase_address(s: &str) -> Option<[u8; 20]> {
     let hex = s.strip_prefix("0x")?;
-    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if hex.len() != 40
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     let mut out = [0u8; 20];
@@ -474,7 +483,10 @@ impl CorrectionQueue {
     /// How many corrections are currently queued — used to log progress as
     /// a large set drains across blocks.
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("CorrectionQueue mutex poisoned").len()
+        self.inner
+            .lock()
+            .expect("CorrectionQueue mutex poisoned")
+            .len()
     }
 
     /// Whether the queue currently holds no corrections.
@@ -492,8 +504,12 @@ impl CorrectionQueue {
 /// [`CorrectionQueue`]; keeping this as a standalone function is what
 /// makes "the feed always wins" a fact pinned by a plain-`Vec` test
 /// instead of something only checkable by running the whole follow loop.
-pub fn prepend_corrections(corrections: Vec<Correction>, mut changes: Vec<(AddressHash, Balance)>) -> Vec<(AddressHash, Balance)> {
-    let mut out: Vec<(AddressHash, Balance)> = Vec::with_capacity(corrections.len() + changes.len());
+pub fn prepend_corrections(
+    corrections: Vec<Correction>,
+    mut changes: Vec<(AddressHash, Balance)>,
+) -> Vec<(AddressHash, Balance)> {
+    let mut out: Vec<(AddressHash, Balance)> =
+        Vec::with_capacity(corrections.len() + changes.len());
     out.extend(corrections.into_iter().map(|c| (c.key, c.balance)));
     out.append(&mut changes);
     out
@@ -570,11 +586,19 @@ pub async fn filter_stale_corrections(
 /// Assumes `refresh_urls` has already passed [`validate_refresh_urls`] —
 /// the one caller (`crate::mainnet::spawn`) checks that before spawning
 /// this at all, so it is not re-checked here.
-pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBuf, refresh_urls: Vec<String>) {
+pub async fn run(
+    node: Arc<NodeState>,
+    queue: Arc<CorrectionQueue>,
+    path: PathBuf,
+    refresh_urls: Vec<String>,
+) {
     let addresses = match parse_address_file(&path) {
         Ok(a) => a,
         Err(e) => {
-            logln!("risepir-rpc mainnet: fatal: --hard-refresh {}: {e}", path.display());
+            logln!(
+                "risepir-rpc mainnet: fatal: --hard-refresh {}: {e}",
+                path.display()
+            );
             std::process::exit(1);
         }
     };
@@ -596,7 +620,10 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
         refresh_urls.join(", "),
     );
 
-    let clients: Vec<Arc<RpcClient>> = refresh_urls.into_iter().map(|u| Arc::new(RpcClient::new(u))).collect();
+    let clients: Vec<Arc<RpcClient>> = refresh_urls
+        .into_iter()
+        .map(|u| Arc::new(RpcClient::new(u)))
+        .collect();
 
     let mut checked = 0u64;
     let mut agreed = 0u64;
@@ -650,13 +677,21 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
                 );
             }
             CheckOutcome::AlreadyCorrect => already_correct += 1,
-            CheckOutcome::Correct { new_balance, old_balance } => {
+            CheckOutcome::Correct {
+                new_balance,
+                old_balance,
+            } => {
                 corrected += 1;
-                total_wei_corrected = total_wei_corrected.saturating_add(old_balance.abs_diff(new_balance));
+                total_wei_corrected =
+                    total_wei_corrected.saturating_add(old_balance.abs_diff(new_balance));
                 // Pushed immediately, not accumulated — see the module docs.
                 // baseline: old_balance — what `filter_stale_corrections`
                 // re-checks against right before this is actually applied.
-                queue.push_one(Correction { key, balance: new_balance, baseline: old_balance });
+                queue.push_one(Correction {
+                    key,
+                    balance: new_balance,
+                    baseline: old_balance,
+                });
             }
         }
 
@@ -682,7 +717,12 @@ pub async fn run(node: Arc<NodeState>, queue: Arc<CorrectionQueue>, path: PathBu
 /// `Vec<Arc<RpcClient>>` — cheap, refcount bumps only) so the task is
 /// `'static`, as `tokio::spawn` (which `JoinSet::spawn` uses internally)
 /// requires.
-fn spawn_check(join_set: &mut tokio::task::JoinSet<([u8; 20], Quorum)>, clients: &[Arc<RpcClient>], addr: [u8; 20], height: u64) {
+fn spawn_check(
+    join_set: &mut tokio::task::JoinSet<([u8; 20], Quorum)>,
+    clients: &[Arc<RpcClient>],
+    addr: [u8; 20],
+    height: u64,
+) {
     let clients = clients.to_vec();
     join_set.spawn(async move {
         let mut results = Vec::with_capacity(clients.len());
@@ -773,7 +813,10 @@ mod tests {
     #[test]
     fn empty_text_yields_no_addresses() {
         assert_eq!(parse_addresses("").unwrap(), Vec::<[u8; 20]>::new());
-        assert_eq!(parse_addresses("\n\n# only comments\n").unwrap(), Vec::<[u8; 20]>::new());
+        assert_eq!(
+            parse_addresses("\n\n# only comments\n").unwrap(),
+            Vec::<[u8; 20]>::new()
+        );
     }
 
     #[test]
@@ -792,21 +835,30 @@ mod tests {
     #[test]
     fn missing_0x_prefix_is_rejected() {
         let err = parse_addresses("1111111111111111111111111111111111111111\n").unwrap_err();
-        assert!(matches!(err, AddressFileError::Malformed { line: 1, .. }), "{err:?}");
+        assert!(
+            matches!(err, AddressFileError::Malformed { line: 1, .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
     fn wrong_length_is_rejected_both_directions() {
         for bad in ["0x1234", "0x11111111111111111111111111111111111111111111"] {
             let err = parse_addresses(&format!("{bad}\n")).unwrap_err();
-            assert!(matches!(err, AddressFileError::Malformed { line: 1, .. }), "{bad}: {err:?}");
+            assert!(
+                matches!(err, AddressFileError::Malformed { line: 1, .. }),
+                "{bad}: {err:?}"
+            );
         }
     }
 
     #[test]
     fn non_hex_character_is_rejected() {
         let err = parse_addresses("0x111111111111111111111111111111111111111g\n").unwrap_err();
-        assert!(matches!(err, AddressFileError::Malformed { line: 1, .. }), "{err:?}");
+        assert!(
+            matches!(err, AddressFileError::Malformed { line: 1, .. }),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -816,7 +868,15 @@ mod tests {
                      0x2222222222222222222222222222222222222222\n\
                      also-not-one\n";
         let err = parse_addresses(text).unwrap_err();
-        assert_eq!(err, AddressFileError::Malformed { line: 2, reason: "expected a lowercase 0x-prefixed 40-hex-digit address, got \"not-an-address\"".to_string() });
+        assert_eq!(
+            err,
+            AddressFileError::Malformed {
+                line: 2,
+                reason:
+                    "expected a lowercase 0x-prefixed 40-hex-digit address, got \"not-an-address\""
+                        .to_string()
+            }
+        );
     }
 
     #[test]
@@ -837,9 +897,18 @@ mod tests {
         // Each attempt's floor is the previous one's, doubled. Jitter is
         // bounded by one base delay, so compare against the floors rather
         // than against each other.
-        assert!(d1 >= RETRY_BASE_DELAY && d1 < RETRY_BASE_DELAY * 2, "{d1:?}");
-        assert!(d2 >= RETRY_BASE_DELAY * 2 && d2 < RETRY_BASE_DELAY * 3, "{d2:?}");
-        assert!(d3 >= RETRY_BASE_DELAY * 4 && d3 < RETRY_BASE_DELAY * 5, "{d3:?}");
+        assert!(
+            d1 >= RETRY_BASE_DELAY && d1 < RETRY_BASE_DELAY * 2,
+            "{d1:?}"
+        );
+        assert!(
+            d2 >= RETRY_BASE_DELAY * 2 && d2 < RETRY_BASE_DELAY * 3,
+            "{d2:?}"
+        );
+        assert!(
+            d3 >= RETRY_BASE_DELAY * 4 && d3 < RETRY_BASE_DELAY * 5,
+            "{d3:?}"
+        );
     }
 
     #[test]
@@ -847,9 +916,8 @@ mod tests {
         // The property that matters: a burst of concurrent checks refused
         // at the same instant must not all wake at the same instant. Over
         // a realistic fan-out, the delays must actually differ.
-        let delays: std::collections::BTreeSet<_> = (0u8..64)
-            .map(|i| backoff_delay(1, &[i; 20]))
-            .collect();
+        let delays: std::collections::BTreeSet<_> =
+            (0u8..64).map(|i| backoff_delay(1, &[i; 20])).collect();
         assert!(
             delays.len() > 32,
             "64 distinct addresses collapsed to {} distinct delays — the burst would re-synchronize",
@@ -863,7 +931,10 @@ mod tests {
         // Strip the exponential floor to compare the jitter component alone.
         let j1 = backoff_delay(1, &addr) - RETRY_BASE_DELAY;
         let j2 = backoff_delay(2, &addr) - RETRY_BASE_DELAY * 2;
-        assert_ne!(j1, j2, "attempt number must feed the jitter, not just the floor");
+        assert_ne!(
+            j1, j2,
+            "attempt number must feed the jitter, not just the floor"
+        );
     }
 
     #[test]
@@ -879,7 +950,9 @@ mod tests {
         // MAX_FETCH_ATTEMPTS cannot quietly turn a 35-minute run into an
         // overnight one.
         let addr = [0xffu8; 20];
-        let total: std::time::Duration = (1..MAX_FETCH_ATTEMPTS).map(|a| backoff_delay(a, &addr)).sum();
+        let total: std::time::Duration = (1..MAX_FETCH_ATTEMPTS)
+            .map(|a| backoff_delay(a, &addr))
+            .sum();
         assert!(
             total < std::time::Duration::from_secs(10),
             "worst-case wait per address is {total:?}"
@@ -934,7 +1007,11 @@ mod tests {
 
     #[test]
     fn two_distinct_urls_pass() {
-        assert!(validate_refresh_urls(&["https://a.test".to_string(), "https://b.test".to_string()]).is_ok());
+        assert!(validate_refresh_urls(&[
+            "https://a.test".to_string(),
+            "https://b.test".to_string()
+        ])
+        .is_ok());
     }
 
     #[test]
@@ -950,9 +1027,19 @@ mod tests {
     #[test]
     fn duplicate_urls_do_not_count_twice() {
         let urls = vec!["https://a.test".to_string(), "https://a.test".to_string()];
-        assert!(validate_refresh_urls(&urls).is_err(), "two copies of one URL is only 1 distinct provider");
-        let urls = vec!["https://a.test".to_string(), "https://a.test".to_string(), "https://b.test".to_string()];
-        assert!(validate_refresh_urls(&urls).is_ok(), "a duplicate plus a genuinely different URL is 2 distinct");
+        assert!(
+            validate_refresh_urls(&urls).is_err(),
+            "two copies of one URL is only 1 distinct provider"
+        );
+        let urls = vec![
+            "https://a.test".to_string(),
+            "https://a.test".to_string(),
+            "https://b.test".to_string(),
+        ];
+        assert!(
+            validate_refresh_urls(&urls).is_ok(),
+            "a duplicate plus a genuinely different URL is 2 distinct"
+        );
     }
 
     // ── decide_correction: the one gate on ever producing a Correction ──
@@ -960,25 +1047,40 @@ mod tests {
     #[test]
     fn errored_is_always_skipped_regardless_of_current_value() {
         assert_eq!(decide_correction(Quorum::Errored, 0), CheckOutcome::Skipped);
-        assert_eq!(decide_correction(Quorum::Errored, 999), CheckOutcome::Skipped);
+        assert_eq!(
+            decide_correction(Quorum::Errored, 999),
+            CheckOutcome::Skipped
+        );
     }
 
     #[test]
     fn disagreed_is_always_skipped_regardless_of_current_value() {
-        assert_eq!(decide_correction(Quorum::Disagreed, 0), CheckOutcome::SkippedDisagreement);
-        assert_eq!(decide_correction(Quorum::Disagreed, 999), CheckOutcome::SkippedDisagreement);
+        assert_eq!(
+            decide_correction(Quorum::Disagreed, 0),
+            CheckOutcome::SkippedDisagreement
+        );
+        assert_eq!(
+            decide_correction(Quorum::Disagreed, 999),
+            CheckOutcome::SkippedDisagreement
+        );
     }
 
     #[test]
     fn agreed_matching_current_is_already_correct_never_a_write() {
-        assert_eq!(decide_correction(Quorum::Agreed(500), 500), CheckOutcome::AlreadyCorrect);
+        assert_eq!(
+            decide_correction(Quorum::Agreed(500), 500),
+            CheckOutcome::AlreadyCorrect
+        );
     }
 
     #[test]
     fn agreed_differing_from_current_is_the_only_correct_producing_case() {
         assert_eq!(
             decide_correction(Quorum::Agreed(500), 400),
-            CheckOutcome::Correct { new_balance: 500, old_balance: 400 }
+            CheckOutcome::Correct {
+                new_balance: 500,
+                old_balance: 400
+            }
         );
     }
 
@@ -987,8 +1089,14 @@ mod tests {
         // Exhaustive over every non-Agreed Quorum value at every plausible
         // current balance: never Correct.
         for current in [0u128, 1, 500, u128::MAX] {
-            assert!(!matches!(decide_correction(Quorum::Errored, current), CheckOutcome::Correct { .. }));
-            assert!(!matches!(decide_correction(Quorum::Disagreed, current), CheckOutcome::Correct { .. }));
+            assert!(!matches!(
+                decide_correction(Quorum::Errored, current),
+                CheckOutcome::Correct { .. }
+            ));
+            assert!(!matches!(
+                decide_correction(Quorum::Disagreed, current),
+                CheckOutcome::Correct { .. }
+            ));
         }
     }
 
@@ -997,7 +1105,11 @@ mod tests {
     fn correction(i: u32) -> Correction {
         let mut key = [0u8; 32];
         key[..4].copy_from_slice(&i.to_le_bytes());
-        Correction { key, balance: u128::from(i), baseline: 0 }
+        Correction {
+            key,
+            balance: u128::from(i),
+            baseline: 0,
+        }
     }
 
     #[test]
@@ -1013,13 +1125,20 @@ mod tests {
             if batch.is_empty() {
                 break;
             }
-            assert!(batch.len() <= MAX_CORRECTIONS_PER_BLOCK, "one drain must never exceed the per-block cap");
+            assert!(
+                batch.len() <= MAX_CORRECTIONS_PER_BLOCK,
+                "one drain must never exceed the per-block cap"
+            );
             drained.extend(batch);
         }
 
         assert!(queue.is_empty());
         assert_eq!(drained.len(), total as usize, "none lost, none duplicated");
-        assert_eq!(drained, (0..total).map(correction).collect::<Vec<_>>(), "FIFO order preserved across chunk boundaries");
+        assert_eq!(
+            drained,
+            (0..total).map(correction).collect::<Vec<_>>(),
+            "FIFO order preserved across chunk boundaries"
+        );
         // 5000 / 2000 = 3 drains (2000, 2000, 1000) — pin the actual chunking, not just the totals.
     }
 
@@ -1039,7 +1158,10 @@ mod tests {
         queue.push_one(correction(1));
         queue.push_many(vec![correction(2), correction(3)]);
         queue.push_one(correction(4));
-        assert_eq!(queue.drain_up_to(10), vec![correction(1), correction(2), correction(3), correction(4)]);
+        assert_eq!(
+            queue.drain_up_to(10),
+            vec![correction(1), correction(2), correction(3), correction(4)]
+        );
     }
 
     // ── prepend_corrections: ordering, and a real apply_block proof ─────
@@ -1075,10 +1197,22 @@ mod tests {
         use risepir_server::RisePirServer;
         use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-        let codec = ValueCodec { key_tag_bits: 32, balance_bits: 96, checksum_bits: 16 };
+        let codec = ValueCodec {
+            key_tag_bits: 32,
+            balance_bits: 96,
+            checksum_bits: 16,
+        };
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+        let pb = simple_max_plaintext_bits(
+            2,
+            num_buckets / 2,
+            4,
+            32,
+            codec.value_bits(),
+            SimpleParams::DEFAULT_SIGMA,
+        );
+        let store =
+            Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         let mut server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0);
 
@@ -1086,7 +1220,11 @@ mod tests {
         // Seed the store with an initial balance so there is a "before" to
         // overwrite either way.
         server
-            .apply_block(&BlockUpdate { block: 1, changes: vec![(key, 111)], credits: vec![] })
+            .apply_block(&BlockUpdate {
+                block: 1,
+                changes: vec![(key, 111)],
+                credits: vec![],
+            })
             .unwrap();
         assert_eq!(server.balance_of(&key).unwrap(), Some(111));
 
@@ -1094,12 +1232,20 @@ mod tests {
         // hard-refresh check ran, against a baseline of 111 — the store's
         // balance at that same moment); the feed's own change for this same
         // block says the account is actually 333 now.
-        let stale_correction = vec![Correction { key, balance: 222, baseline: 111 }];
+        let stale_correction = vec![Correction {
+            key,
+            balance: 222,
+            baseline: 111,
+        }];
         let feed_changes = vec![(key, 333u128)];
         let composed = prepend_corrections(stale_correction, feed_changes);
 
         server
-            .apply_block(&BlockUpdate { block: 2, changes: composed, credits: vec![] })
+            .apply_block(&BlockUpdate {
+                block: 2,
+                changes: composed,
+                credits: vec![],
+            })
             .unwrap();
 
         assert_eq!(
@@ -1130,10 +1276,22 @@ mod tests {
         use risepir_server::{DeltaRing, RisePirServer};
         use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
-        let codec = ValueCodec { key_tag_bits: 32, balance_bits: 96, checksum_bits: 16 };
+        let codec = ValueCodec {
+            key_tag_bits: 32,
+            balance_bits: 96,
+            checksum_bits: 16,
+        };
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+        let pb = simple_max_plaintext_bits(
+            2,
+            num_buckets / 2,
+            4,
+            32,
+            codec.value_bits(),
+            SimpleParams::DEFAULT_SIGMA,
+        );
+        let store =
+            Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0);
         let node = NodeState::new(server, DeltaRing::new(64), true);
@@ -1154,20 +1312,39 @@ mod tests {
         // behind a large backlog, say), an ordinary block legitimately
         // moves key_moved_on to 999 — a real transaction, nothing to do
         // with hard-refresh. key_untouched is not touched by anything.
-        node.apply_block(&BlockUpdate { block: 2, changes: vec![(key_moved_on, 999)], credits: vec![] })
-            .await
-            .unwrap();
+        node.apply_block(&BlockUpdate {
+            block: 2,
+            changes: vec![(key_moved_on, 999)],
+            credits: vec![],
+        })
+        .await
+        .unwrap();
 
         let drained = vec![
-            Correction { key: key_untouched, balance: 150, baseline: 100 },
-            Correction { key: key_moved_on, balance: 150, baseline: 100 },
+            Correction {
+                key: key_untouched,
+                balance: 150,
+                baseline: 100,
+            },
+            Correction {
+                key: key_moved_on,
+                balance: 150,
+                baseline: 100,
+            },
         ];
         let (still_valid, stale) = filter_stale_corrections(&node, drained).await.unwrap();
 
-        assert_eq!(stale, 1, "exactly the moved-on account's correction must be dropped as stale");
+        assert_eq!(
+            stale, 1,
+            "exactly the moved-on account's correction must be dropped as stale"
+        );
         assert_eq!(
             still_valid,
-            vec![Correction { key: key_untouched, balance: 150, baseline: 100 }],
+            vec![Correction {
+                key: key_untouched,
+                balance: 150,
+                baseline: 100
+            }],
             "the untouched account's correction must survive unchanged"
         );
 

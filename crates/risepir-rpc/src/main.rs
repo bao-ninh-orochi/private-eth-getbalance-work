@@ -26,9 +26,9 @@
 //! snapshot/state/partial bootstrap, live `finalized` follow over public
 //! RPC, cross-provider reconciliation, default LWE parameters.
 
-use risepir_rpc::logln;
 use risepir_rpc::demo::{self, DemoConfig};
 use risepir_rpc::front::{self, FrontConfig};
+use risepir_rpc::logln;
 use risepir_rpc::mainnet::{self, MainnetConfig};
 
 #[tokio::main]
@@ -69,7 +69,10 @@ async fn run_mock(cfg: DemoConfig) {
     println!("  PIR HTTP transport: http://{}", handle.pir_addr);
     println!("  JSON-RPC:           http://{}", handle.rpc_addr);
     if handle.web_served {
-        println!("  Web front end:      http://{}/   <- open this in a browser", handle.pir_addr);
+        println!(
+            "  Web front end:      http://{}/   <- open this in a browser",
+            handle.pir_addr
+        );
     }
     println!();
     println!("Demo accounts (deterministic, wei-exact — query any of them):");
@@ -79,7 +82,11 @@ async fn run_mock(cfg: DemoConfig) {
     println!();
     println!("Try:");
     if let Some((addr, _)) = handle.demo_accounts.first() {
-        println!("  cast balance 0x{} --rpc-url http://{}", hex(addr), handle.rpc_addr);
+        println!(
+            "  cast balance 0x{} --rpc-url http://{}",
+            hex(addr),
+            handle.rpc_addr
+        );
     }
     println!("  cast chain-id --rpc-url http://{}", handle.rpc_addr);
     println!("  cast block-number --rpc-url http://{}", handle.rpc_addr);
@@ -110,13 +117,22 @@ async fn run_mainnet(cfg: MainnetConfig) {
             "PARTIAL (only accounts touched since bootstrap; not-found ERRORS, never 0x0)"
         }
     );
-    println!("  serving from block: {} (follows finalized, ~13 min behind head)", handle.head_at_start);
+    println!(
+        "  serving from block: {} (follows finalized, ~13 min behind head)",
+        handle.head_at_start
+    );
     if handle.web_served {
-        println!("  Web front end:      http://{}/   <- open this in a browser", handle.pir_addr);
+        println!(
+            "  Web front end:      http://{}/   <- open this in a browser",
+            handle.pir_addr
+        );
     }
     println!();
     println!("Try:");
-    println!("  cast balance <address> --rpc-url http://{}", handle.rpc_addr);
+    println!(
+        "  cast balance <address> --rpc-url http://{}",
+        handle.rpc_addr
+    );
     println!("  cast block-number --rpc-url http://{}", handle.rpc_addr);
     if state_path.is_some() {
         println!();
@@ -180,7 +196,9 @@ async fn shutdown_signal() {
         }
     }
     #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await.expect("install Ctrl-C handler");
+    tokio::signal::ctrl_c()
+        .await
+        .expect("install Ctrl-C handler");
 }
 
 async fn run_client(cfg: FrontConfig) {
@@ -192,7 +210,10 @@ async fn run_client(cfg: FrontConfig) {
 
     println!("RisePIR private eth_getBalance — remote front end");
     println!("  PIR server:  {pir_url}");
-    println!("  JSON-RPC:    http://{}   (local — point your wallet here)", handle.rpc_addr);
+    println!(
+        "  JSON-RPC:    http://{}   (local — point your wallet here)",
+        handle.rpc_addr
+    );
     println!(
         "  data set:    {}",
         if handle.complete {
@@ -201,11 +222,19 @@ async fn run_client(cfg: FrontConfig) {
             "PARTIAL (only accounts touched since the server's bootstrap; not-found ERRORS)"
         }
     );
-    println!("  hint pinned: block {} (the rewind serves the server's head regardless)", handle.pinned_block);
+    println!(
+        "  hint pinned: block {} (the rewind serves the server's head regardless)",
+        handle.pinned_block
+    );
     println!();
-    println!("The queried address NEVER leaves this machine — the server sees only LWE query vectors.");
+    println!(
+        "The queried address NEVER leaves this machine — the server sees only LWE query vectors."
+    );
     println!();
-    println!("Try:  cast balance <address> --rpc-url http://{}", handle.rpc_addr);
+    println!(
+        "Try:  cast balance <address> --rpc-url http://{}",
+        handle.rpc_addr
+    );
 
     std::future::pending::<()>().await;
 }
@@ -221,7 +250,9 @@ fn parse_mock(args: &[String]) -> DemoConfig {
             "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
             "--pir-port" => cfg.pir_port = parse_next(args, &mut i, "--pir-port"),
             "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
-            "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
+            "--proxy-upstream" => {
+                cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
+            }
             "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
             "--help" | "-h" => {
                 print_usage();
@@ -242,7 +273,9 @@ fn parse_client(args: &[String]) -> FrontConfig {
             "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
             "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
             "--chain-id" => cfg.chain_id = parse_next(args, &mut i, "--chain-id"),
-            "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
+            "--proxy-upstream" => {
+                cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -274,12 +307,24 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--snapshot" => cfg.snapshot.push(next_value(args, &mut i, "--snapshot").into()),
-            "--snapshot-block" => cfg.snapshot_block = Some(parse_next(args, &mut i, "--snapshot-block")),
-            "--snapshot-accounts" => cfg.snapshot_accounts = Some(parse_next(args, &mut i, "--snapshot-accounts")),
-            "--snapshot-rewind" => cfg.snapshot_rewind = parse_next(args, &mut i, "--snapshot-rewind"),
-            "--snapshot-audit-samples" => cfg.snapshot_audit_samples = parse_next(args, &mut i, "--snapshot-audit-samples"),
-            "--hard-refresh" => cfg.hard_refresh = Some(next_value(args, &mut i, "--hard-refresh").into()),
+            "--snapshot" => cfg
+                .snapshot
+                .push(next_value(args, &mut i, "--snapshot").into()),
+            "--snapshot-block" => {
+                cfg.snapshot_block = Some(parse_next(args, &mut i, "--snapshot-block"))
+            }
+            "--snapshot-accounts" => {
+                cfg.snapshot_accounts = Some(parse_next(args, &mut i, "--snapshot-accounts"))
+            }
+            "--snapshot-rewind" => {
+                cfg.snapshot_rewind = parse_next(args, &mut i, "--snapshot-rewind")
+            }
+            "--snapshot-audit-samples" => {
+                cfg.snapshot_audit_samples = parse_next(args, &mut i, "--snapshot-audit-samples")
+            }
+            "--hard-refresh" => {
+                cfg.hard_refresh = Some(next_value(args, &mut i, "--hard-refresh").into())
+            }
             "--refresh-url" => {
                 let url = next_value(args, &mut i, "--refresh-url");
                 if !refresh_url_seen {
@@ -308,7 +353,9 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
                 cfg.partial = true;
                 i += 1;
             }
-            "--partial-capacity" => cfg.partial_capacity = parse_next(args, &mut i, "--partial-capacity"),
+            "--partial-capacity" => {
+                cfg.partial_capacity = parse_next(args, &mut i, "--partial-capacity")
+            }
             "--feed-url" => {
                 let url = next_value(args, &mut i, "--feed-url");
                 if !feed_url_seen {
@@ -321,8 +368,12 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--rpc-port" => cfg.rpc_port = parse_next(args, &mut i, "--rpc-port"),
             "--pir-port" => cfg.pir_port = parse_next(args, &mut i, "--pir-port"),
             "--bind" => cfg.bind = parse_next(args, &mut i, "--bind"),
-            "--proxy-upstream" => cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream")),
-            "--reconcile-every" => cfg.reconcile_every = parse_next(args, &mut i, "--reconcile-every"),
+            "--proxy-upstream" => {
+                cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
+            }
+            "--reconcile-every" => {
+                cfg.reconcile_every = parse_next(args, &mut i, "--reconcile-every")
+            }
             "--reconcile-samples" => {
                 cfg.reconcile_samples = parse_next(args, &mut i, "--reconcile-samples");
                 // 0 would make every non-empty block a zero-attempt "Dark"
@@ -397,37 +448,81 @@ fn print_usage() {
     eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
-    eprintln!("  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]");
+    eprintln!(
+        "  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]"
+    );
     eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
     eprintln!();
-    eprintln!("mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial.");
-    eprintln!("--state also always writes a <state>.journal delta sidecar once a first full save exists");
+    eprintln!(
+        "mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial."
+    );
+    eprintln!(
+        "--state also always writes a <state>.journal delta sidecar once a first full save exists"
+    );
     eprintln!("(ADR-0026): one small per-block delta, appended and fsynced as each block applies.");
-    eprintln!("--journal-restore (default ON, ADR-0037) replays it at startup, resuming above the last");
-    eprintln!("full save instead of at it; --no-journal-restore turns that off, falling back to only");
-    eprintln!("*scanning* and reporting the journal (`journal intact: N records ...`, the original");
-    eprintln!("ADR-0026 soak signal) without replaying it. --journal-restore itself stays accepted as a");
+    eprintln!(
+        "--journal-restore (default ON, ADR-0037) replays it at startup, resuming above the last"
+    );
+    eprintln!(
+        "full save instead of at it; --no-journal-restore turns that off, falling back to only"
+    );
+    eprintln!(
+        "*scanning* and reporting the journal (`journal intact: N records ...`, the original"
+    );
+    eprintln!(
+        "ADR-0026 soak signal) without replaying it. --journal-restore itself stays accepted as a"
+    );
     eprintln!("bare flag — a no-op now that it is the default — for scripts and explicitness.");
-    eprintln!("--save-interval (0 = off) bounds how far the --state file can fall behind the running");
-    eprintln!("server: the follow loop rewrites it that many seconds after the previous save finished.");
-    eprintln!("Its default is coupled to --journal-restore (ADR-0037): 21600 (6h) when restore is on,");
-    eprintln!("since the journal then bounds an ungraceful kill's replay cost, not the full save; 1800");
-    eprintln!("(30 min, ADR-0025) when restore is off, since the full save is what bounds it there. An");
+    eprintln!(
+        "--save-interval (0 = off) bounds how far the --state file can fall behind the running"
+    );
+    eprintln!(
+        "server: the follow loop rewrites it that many seconds after the previous save finished."
+    );
+    eprintln!(
+        "Its default is coupled to --journal-restore (ADR-0037): 21600 (6h) when restore is on,"
+    );
+    eprintln!(
+        "since the journal then bounds an ungraceful kill's replay cost, not the full save; 1800"
+    );
+    eprintln!(
+        "(30 min, ADR-0025) when restore is off, since the full save is what bounds it there. An"
+    );
     eprintln!("explicit --save-interval always wins over either default.");
-    eprintln!("--snapshot-rewind (default 2000, 0 disables) treats the snapshot as exact N blocks before");
-    eprintln!("--snapshot-block instead of exactly at it, so the ordinary replay re-derives the rewind");
-    eprintln!("window from the chain's own absolute post-state (ADR-0040) — narrows the boundary error,");
-    eprintln!("does not close it, and does not fix relative withdrawal credits (--hard-refresh does).");
-    eprintln!("--snapshot-audit-samples (default 512, 0 disables) reservoir-samples that many addresses");
-    eprintln!("during ingest and verifies them against --refresh-url's quorum after setup, reporting a");
+    eprintln!(
+        "--snapshot-rewind (default 2000, 0 disables) treats the snapshot as exact N blocks before"
+    );
+    eprintln!(
+        "--snapshot-block instead of exactly at it, so the ordinary replay re-derives the rewind"
+    );
+    eprintln!(
+        "window from the chain's own absolute post-state (ADR-0040) — narrows the boundary error,"
+    );
+    eprintln!(
+        "does not close it, and does not fix relative withdrawal credits (--hard-refresh does)."
+    );
+    eprintln!(
+        "--snapshot-audit-samples (default 512, 0 disables) reservoir-samples that many addresses"
+    );
+    eprintln!(
+        "during ingest and verifies them against --refresh-url's quorum after setup, reporting a"
+    );
     eprintln!("measured disagreement rate (with a Wilson 95% CI) instead of assuming the export is exact.");
     eprintln!("--hard-refresh <file> quorum-verifies a newline-delimited address list against --refresh-url");
-    eprintln!("(repeatable; default two independent providers) and corrects the store only where every");
+    eprintln!(
+        "(repeatable; default two independent providers) and corrects the store only where every"
+    );
     eprintln!("configured provider agrees on a value differing from what is stored — runs in the background,");
     eprintln!("never blocking serving or following; corrections drain into blocks 2000 at a time (ADR-0040).");
-    eprintln!("client runs the JSON-RPC front end + rewind client on THIS machine against a remote");
-    eprintln!("PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine.");
-    eprintln!("--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind");
+    eprintln!(
+        "client runs the JSON-RPC front end + rewind client on THIS machine against a remote"
+    );
+    eprintln!(
+        "PIR server (started with --bind 0.0.0.0) — the queried address never leaves this machine."
+    );
+    eprintln!(
+        "--web <dir> serves the browser front end (ADR-0019) on the PIR port: the same rewind"
+    );
     eprintln!("client, compiled to wasm and running in the page, so the address never leaves the browser.");
     eprintln!("Build its wasm first: cargo run -p xtask --release -- web");
     eprintln!("See docs/deploy.md for the full runbook.");
@@ -478,7 +573,10 @@ mod tests {
             cfg.feed_urls.len() >= 2,
             "a single default endpoint is a permanent single point of failure"
         );
-        assert_eq!(cfg.feed_urls[0], "https://eth.drpc.org", "primary must stay dRPC");
+        assert_eq!(
+            cfg.feed_urls[0], "https://eth.drpc.org",
+            "primary must stay dRPC"
+        );
     }
 
     /// One `--feed-url` must *replace* the built-ins, not prepend to or
@@ -486,7 +584,11 @@ mod tests {
     /// endpoint, with no surprise third party still in the chain.
     #[test]
     fn one_feed_url_replaces_the_defaults() {
-        let cfg = parse_mainnet(&args(&["--partial", "--feed-url", "https://example.test/rpc"]));
+        let cfg = parse_mainnet(&args(&[
+            "--partial",
+            "--feed-url",
+            "https://example.test/rpc",
+        ]));
         assert_eq!(cfg.feed_urls, vec!["https://example.test/rpc".to_string()]);
     }
 
@@ -583,14 +685,24 @@ mod tests {
         assert_eq!(cfg.save_interval_secs, 300);
 
         // 4. journal-restore OFF + explicit --save-interval -> explicit wins.
-        let cfg = parse_mainnet(&args(&["--partial", "--no-journal-restore", "--save-interval", "300"]));
+        let cfg = parse_mainnet(&args(&[
+            "--partial",
+            "--no-journal-restore",
+            "--save-interval",
+            "300",
+        ]));
         assert!(!cfg.journal_restore);
         assert!(cfg.save_interval_explicit);
         assert_eq!(cfg.save_interval_secs, 300);
 
         // Order must not matter: --save-interval given *before*
         // --no-journal-restore must resolve identically to combination 4.
-        let cfg = parse_mainnet(&args(&["--partial", "--save-interval", "300", "--no-journal-restore"]));
+        let cfg = parse_mainnet(&args(&[
+            "--partial",
+            "--save-interval",
+            "300",
+            "--no-journal-restore",
+        ]));
         assert!(!cfg.journal_restore);
         assert!(cfg.save_interval_explicit);
         assert_eq!(cfg.save_interval_secs, 300);
@@ -619,7 +731,10 @@ mod tests {
     fn hard_refresh_defaults_off_and_parses_a_path() {
         assert!(parse_mainnet(&args(&["--partial"])).hard_refresh.is_none());
         let cfg = parse_mainnet(&args(&["--partial", "--hard-refresh", "addresses.txt"]));
-        assert_eq!(cfg.hard_refresh, Some(std::path::PathBuf::from("addresses.txt")));
+        assert_eq!(
+            cfg.hard_refresh,
+            Some(std::path::PathBuf::from("addresses.txt"))
+        );
     }
 
     /// The built-in default is two distinct providers — the floor
@@ -647,7 +762,10 @@ mod tests {
             "--refresh-url",
             "https://b.test",
         ]));
-        assert_eq!(cfg.refresh_urls, vec!["https://a.test".to_string(), "https://b.test".to_string()]);
+        assert_eq!(
+            cfg.refresh_urls,
+            vec!["https://a.test".to_string(), "https://b.test".to_string()]
+        );
     }
 
     /// `--snapshot-rewind` parses and defaults to 2000 (ADR-0040) — an
@@ -668,13 +786,18 @@ mod tests {
     /// `--snapshot-audit-samples` parses and defaults to 512 (ADR-0040).
     #[test]
     fn snapshot_audit_samples_parses_and_defaults_to_512() {
-        assert_eq!(parse_mainnet(&args(&["--partial"])).snapshot_audit_samples, 512);
         assert_eq!(
-            parse_mainnet(&args(&["--partial", "--snapshot-audit-samples", "1000"])).snapshot_audit_samples,
+            parse_mainnet(&args(&["--partial"])).snapshot_audit_samples,
+            512
+        );
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--snapshot-audit-samples", "1000"]))
+                .snapshot_audit_samples,
             1_000
         );
         assert_eq!(
-            parse_mainnet(&args(&["--partial", "--snapshot-audit-samples", "0"])).snapshot_audit_samples,
+            parse_mainnet(&args(&["--partial", "--snapshot-audit-samples", "0"]))
+                .snapshot_audit_samples,
             0
         );
     }

@@ -35,7 +35,7 @@ pub mod types;
 pub mod value;
 
 pub use codec::CodecError;
-pub use keccak::{keccak256, keccak256_bytes};
 pub use geometry::{Backend, GeomError, Geometry, Sizes};
+pub use keccak::{keccak256, keccak256_bytes};
 pub use types::{AddressHash, Balance, BlockDelta, BlockUpdate, CoalesceError, SegmentRowDeltas};
 pub use value::{Lookup, ValueCodec, ValueError};

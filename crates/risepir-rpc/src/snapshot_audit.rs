@@ -419,12 +419,23 @@ fn parse_sidecar(text: &str) -> Result<AuditRecord, String> {
     }
     let (checked, disagreed, block, seed) = match (checked, disagreed, block, seed) {
         (Some(c), Some(d), Some(b), Some(s)) => (c, d, b, s),
-        _ => return Err("missing one or more required keys (checked, disagreed, block, seed)".to_string()),
+        _ => {
+            return Err(
+                "missing one or more required keys (checked, disagreed, block, seed)".to_string(),
+            )
+        }
     };
     if disagreed > checked {
-        return Err(format!("disagreed ({disagreed}) exceeds checked ({checked})"));
+        return Err(format!(
+            "disagreed ({disagreed}) exceeds checked ({checked})"
+        ));
     }
-    Ok(AuditRecord { checked, disagreed, block, seed })
+    Ok(AuditRecord {
+        checked,
+        disagreed,
+        block,
+        seed,
+    })
 }
 
 // ─── The background verification task ────────────────────────────────────
@@ -471,7 +482,10 @@ pub async fn verify(
         refresh_urls.len()
     );
 
-    let clients: Vec<Arc<RpcClient>> = refresh_urls.into_iter().map(|u| Arc::new(RpcClient::new(u))).collect();
+    let clients: Vec<Arc<RpcClient>> = refresh_urls
+        .into_iter()
+        .map(|u| Arc::new(RpcClient::new(u)))
+        .collect();
 
     let mut checked = 0u64;
     let mut disagreed = 0u64;
@@ -485,7 +499,13 @@ pub async fn verify(
     while let Some(res) = join_set.join_next().await {
         let (ingested, q) = res.expect("snapshot-audit check task panicked");
         if let Some((next_addr, next_ingested)) = remaining.next() {
-            spawn_audit_check(&mut join_set, &clients, next_addr, next_ingested, snapshot_block);
+            spawn_audit_check(
+                &mut join_set,
+                &clients,
+                next_addr,
+                next_ingested,
+                snapshot_block,
+            );
         }
         if let Quorum::Agreed(chain_value) = q {
             checked += 1;
@@ -503,7 +523,10 @@ pub async fn verify(
         block: snapshot_block,
         seed,
     };
-    logln!("risepir-rpc mainnet: {}", report_line(&record, total_ingested));
+    logln!(
+        "risepir-rpc mainnet: {}",
+        report_line(&record, total_ingested)
+    );
     if is_alarming(&record) {
         logln!(
             "risepir-rpc mainnet: WARNING: the snapshot audit is 95% confident the true disagreement rate \
@@ -594,7 +617,9 @@ mod tests {
 
     #[test]
     fn same_seed_same_stream_reproduces_the_identical_sample() {
-        let stream: Vec<([u8; 20], Balance)> = (0u32..5000).map(|i| ([(i % 256) as u8; 20], u128::from(i))).collect();
+        let stream: Vec<([u8; 20], Balance)> = (0u32..5000)
+            .map(|i| ([(i % 256) as u8; 20], u128::from(i)))
+            .collect();
 
         let mut a = ReservoirSampler::new(50, 0xC0FFEE);
         let mut b = ReservoirSampler::new(50, 0xC0FFEE);
@@ -602,12 +627,18 @@ mod tests {
             a.observe(addr, bal);
             b.observe(addr, bal);
         }
-        assert_eq!(a.into_sample(), b.into_sample(), "identical seed + identical stream must reproduce identically");
+        assert_eq!(
+            a.into_sample(),
+            b.into_sample(),
+            "identical seed + identical stream must reproduce identically"
+        );
     }
 
     #[test]
     fn every_sampled_item_actually_came_from_the_stream() {
-        let stream: Vec<([u8; 20], Balance)> = (0u32..300).map(|i| ([(i % 256) as u8; 20], u128::from(i) * 7)).collect();
+        let stream: Vec<([u8; 20], Balance)> = (0u32..300)
+            .map(|i| ([(i % 256) as u8; 20], u128::from(i) * 7))
+            .collect();
         let mut s = ReservoirSampler::new(20, 999);
         for &(addr, bal) in &stream {
             s.observe(addr, bal);
@@ -615,7 +646,10 @@ mod tests {
         let sample = s.into_sample();
         assert_eq!(sample.len(), 20);
         for item in &sample {
-            assert!(stream.contains(item), "{item:?} was never offered to the sampler");
+            assert!(
+                stream.contains(item),
+                "{item:?} was never offered to the sampler"
+            );
         }
     }
 
@@ -626,8 +660,16 @@ mod tests {
     #[test]
     fn known_value_2_of_600() {
         let (lo, hi) = wilson_interval(2, 600);
-        assert!((lo * 100.0 - 0.09).abs() < 0.02, "lo = {}%, want ~0.09%", lo * 100.0);
-        assert!((hi * 100.0 - 1.21).abs() < 0.02, "hi = {}%, want ~1.21%", hi * 100.0);
+        assert!(
+            (lo * 100.0 - 0.09).abs() < 0.02,
+            "lo = {}%, want ~0.09%",
+            lo * 100.0
+        );
+        assert!(
+            (hi * 100.0 - 1.21).abs() < 0.02,
+            "hi = {}%, want ~1.21%",
+            hi * 100.0
+        );
     }
 
     /// A textbook known value: 0 successes in 10 trials gives a Wilson
@@ -649,8 +691,14 @@ mod tests {
         for n in [1u64, 2, 10, 100, 512, 10_000] {
             for x in [0u64, 1, n / 2, n] {
                 let (lo, hi) = wilson_interval(x, n);
-                assert!((0.0..=1.0).contains(&lo), "lo out of bounds at x={x} n={n}: {lo}");
-                assert!((0.0..=1.0).contains(&hi), "hi out of bounds at x={x} n={n}: {hi}");
+                assert!(
+                    (0.0..=1.0).contains(&lo),
+                    "lo out of bounds at x={x} n={n}: {lo}"
+                );
+                assert!(
+                    (0.0..=1.0).contains(&hi),
+                    "hi out of bounds at x={x} n={n}: {hi}"
+                );
                 assert!(lo <= hi, "lo > hi at x={x} n={n}: {lo} > {hi}");
             }
         }
@@ -660,7 +708,12 @@ mod tests {
 
     #[test]
     fn a_single_disagreement_in_hundreds_of_samples_is_not_alarming() {
-        let r = AuditRecord { checked: 512, disagreed: 1, block: 1, seed: 0 };
+        let r = AuditRecord {
+            checked: 512,
+            disagreed: 1,
+            block: 1,
+            seed: 0,
+        };
         // Wilson lower bound for 1/512 is ~0.034% — comfortably below
         // ALARM_THRESHOLD (1%), even though it is (as the Wilson score
         // interval always is for any disagreed >= 1) strictly above zero.
@@ -669,7 +722,12 @@ mod tests {
 
     #[test]
     fn zero_disagreements_is_never_alarming() {
-        let r = AuditRecord { checked: 512, disagreed: 0, block: 1, seed: 0 };
+        let r = AuditRecord {
+            checked: 512,
+            disagreed: 0,
+            block: 1,
+            seed: 0,
+        };
         assert!(!is_alarming(&r));
     }
 
@@ -679,19 +737,34 @@ mod tests {
     /// this snapshot generation, not a fresh anomaly.
     #[test]
     fn the_disclosed_population_baseline_rate_is_not_itself_alarming() {
-        let r = AuditRecord { checked: 600, disagreed: 2, block: 1, seed: 0 };
+        let r = AuditRecord {
+            checked: 600,
+            disagreed: 2,
+            block: 1,
+            seed: 0,
+        };
         assert!(!is_alarming(&r));
     }
 
     #[test]
     fn a_clear_majority_disagreeing_is_alarming() {
-        let r = AuditRecord { checked: 100, disagreed: 40, block: 1, seed: 0 };
+        let r = AuditRecord {
+            checked: 100,
+            disagreed: 40,
+            block: 1,
+            seed: 0,
+        };
         assert!(is_alarming(&r));
     }
 
     #[test]
     fn report_line_and_healthz_value_contain_the_expected_numbers() {
-        let r = AuditRecord { checked: 512, disagreed: 3, block: 25_613_233, seed: 123 };
+        let r = AuditRecord {
+            checked: 512,
+            disagreed: 3,
+            block: 25_613_233,
+            seed: 123,
+        };
         let report = report_line(&r, 200_503_969);
         assert!(report.contains("512 checked"), "{report}");
         assert!(report.contains("3 disagreed"), "{report}");
@@ -711,19 +784,35 @@ mod tests {
         let text = "checked=512\ndisagreed=3\nblock=25613233\nseed=123456789\n";
         assert_eq!(
             parse_sidecar(text).unwrap(),
-            AuditRecord { checked: 512, disagreed: 3, block: 25_613_233, seed: 123_456_789 }
+            AuditRecord {
+                checked: 512,
+                disagreed: 3,
+                block: 25_613_233,
+                seed: 123_456_789
+            }
         );
     }
 
     #[test]
     fn parse_sidecar_ignores_comments_and_blank_lines() {
         let text = "# a comment\n\nchecked=1\n\ndisagreed=0\nblock=5\nseed=9\n# trailing\n";
-        assert_eq!(parse_sidecar(text).unwrap(), AuditRecord { checked: 1, disagreed: 0, block: 5, seed: 9 });
+        assert_eq!(
+            parse_sidecar(text).unwrap(),
+            AuditRecord {
+                checked: 1,
+                disagreed: 0,
+                block: 5,
+                seed: 9
+            }
+        );
     }
 
     #[test]
     fn parse_sidecar_rejects_missing_keys() {
-        assert!(parse_sidecar("checked=1\ndisagreed=0\nblock=5\n").is_err(), "missing seed");
+        assert!(
+            parse_sidecar("checked=1\ndisagreed=0\nblock=5\n").is_err(),
+            "missing seed"
+        );
         assert!(parse_sidecar("").is_err(), "nothing at all");
     }
 
@@ -760,13 +849,21 @@ mod tests {
     // ── sidecar: read/write round trip, corrupt/absent handling ─────────
 
     fn tmp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("risepir-snapshot-audit-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "risepir-snapshot-audit-{}-{name}",
+            std::process::id()
+        ))
     }
 
     #[test]
     fn write_then_read_round_trips_exactly() {
         let path = tmp_path("roundtrip.audit");
-        let record = AuditRecord { checked: 512, disagreed: 3, block: 25_613_233, seed: 42 };
+        let record = AuditRecord {
+            checked: 512,
+            disagreed: 3,
+            block: 25_613_233,
+            seed: 42,
+        };
         write_sidecar(&path, &record).unwrap();
 
         match read_sidecar(&path) {
@@ -797,10 +894,22 @@ mod tests {
         // staging file must be "<state>.audit.tmp", never "<state>.tmp"
         // (which is what `crate::state::save` stages into).
         let path = tmp_path("collision.audit");
-        write_sidecar(&path, &AuditRecord { checked: 1, disagreed: 0, block: 1, seed: 1 }).unwrap();
+        write_sidecar(
+            &path,
+            &AuditRecord {
+                checked: 1,
+                disagreed: 0,
+                block: 1,
+                seed: 1,
+            },
+        )
+        .unwrap();
         let mut expected_tmp = path.as_os_str().to_os_string();
         expected_tmp.push(".tmp");
-        assert!(!std::path::Path::new(&expected_tmp).exists(), "the tmp file must be renamed away, not left behind");
+        assert!(
+            !std::path::Path::new(&expected_tmp).exists(),
+            "the tmp file must be renamed away, not left behind"
+        );
         // sibling `<state>.tmp` (one extension shorter) must never have been touched.
         let state_tmp = path.with_extension("tmp");
         assert!(!state_tmp.exists());
@@ -810,6 +919,9 @@ mod tests {
     #[test]
     fn sidecar_path_replaces_the_state_extension() {
         let state = PathBuf::from("/tmp/risepir-state.bin");
-        assert_eq!(sidecar_path(&state), PathBuf::from("/tmp/risepir-state.audit"));
+        assert_eq!(
+            sidecar_path(&state),
+            PathBuf::from("/tmp/risepir-state.audit")
+        );
     }
 }

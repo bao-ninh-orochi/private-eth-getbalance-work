@@ -172,8 +172,14 @@ mod tests {
     fn leap_day_and_its_neighbours() {
         // 2024 is a leap year: Feb 29 exists.
         assert_eq!(format_unix_secs(1_709_164_800), "2024-02-29T00:00:00Z");
-        assert_eq!(format_unix_secs(1_709_164_800 - 86_400), "2024-02-28T00:00:00Z");
-        assert_eq!(format_unix_secs(1_709_164_800 + 86_400), "2024-03-01T00:00:00Z");
+        assert_eq!(
+            format_unix_secs(1_709_164_800 - 86_400),
+            "2024-02-28T00:00:00Z"
+        );
+        assert_eq!(
+            format_unix_secs(1_709_164_800 + 86_400),
+            "2024-03-01T00:00:00Z"
+        );
     }
 
     /// 2000 was a leap year (divisible by 400) but 1900 and 2100 are not.
@@ -184,7 +190,10 @@ mod tests {
         assert_eq!(format_unix_secs(951_782_400), "2000-02-29T00:00:00Z");
         // 2100-02-28 + 1 day must be March, not a nonexistent Feb 29.
         assert_eq!(format_unix_secs(4_107_456_000), "2100-02-28T00:00:00Z");
-        assert_eq!(format_unix_secs(4_107_456_000 + 86_400), "2100-03-01T00:00:00Z");
+        assert_eq!(
+            format_unix_secs(4_107_456_000 + 86_400),
+            "2100-03-01T00:00:00Z"
+        );
     }
 
     /// Every rendered line must be exactly 20 characters, so the messages
@@ -202,7 +211,11 @@ mod tests {
     #[test]
     fn the_macro_preserves_the_message_verbatim() {
         let stamp = utc_now_rfc3339();
-        let msg = format!("{} {}", stamp, format_args!("risepir-rpc mainnet: block {} applied", 25_638_894u64));
+        let msg = format!(
+            "{} {}",
+            stamp,
+            format_args!("risepir-rpc mainnet: block {} applied", 25_638_894u64)
+        );
         assert!(msg.starts_with(&stamp));
         assert!(msg.ends_with("risepir-rpc mainnet: block 25638894 applied"));
         assert_eq!(msg.as_bytes()[stamp.len()], b' ');

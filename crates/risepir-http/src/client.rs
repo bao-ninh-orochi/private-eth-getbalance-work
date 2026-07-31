@@ -233,12 +233,17 @@ impl PirHttpClient {
     /// value is [`ClientError::Wire`] — the completeness flag decides the
     /// `NotFound` policy, so a garbled one must never be defaulted or
     /// ignored (`docs/plan.md`'s "never guessed" invariant).
-    pub async fn setup_with_mode(&self) -> Result<(SetupBundle<SimplePirBackend>, Option<bool>), ClientError> {
+    pub async fn setup_with_mode(
+        &self,
+    ) -> Result<(SetupBundle<SimplePirBackend>, Option<bool>), ClientError> {
         let resp = self.http.get(format!("{}/setup", self.base)).send().await?;
         // Captured before `ok_body` consumes the response, but only
         // *interpreted* after it has vouched for a `200` — a non-`200`
         // must surface as its status error, not as a header complaint.
-        let raw_mode = resp.headers().get("x-risepir-mode").map(|v| v.as_bytes().to_vec());
+        let raw_mode = resp
+            .headers()
+            .get("x-risepir-mode")
+            .map(|v| v.as_bytes().to_vec());
         let bytes = ok_body(resp, MAX_SETUP_BODY_BYTES).await?;
         let mode = match raw_mode.as_deref() {
             None => None,
@@ -265,10 +270,12 @@ impl PirHttpClient {
     pub async fn head(&self) -> Result<u64, ClientError> {
         let resp = self.http.get(format!("{}/head", self.base)).send().await?;
         let bytes = ok_body(resp, MAX_TINY_BODY_BYTES).await?;
-        let arr: [u8; 8] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Wire(format!("/head returned {} bytes, expected exactly 8", bytes.len())))?;
+        let arr: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+            ClientError::Wire(format!(
+                "/head returned {} bytes, expected exactly 8",
+                bytes.len()
+            ))
+        })?;
         Ok(u64::from_le_bytes(arr))
     }
 
@@ -329,7 +336,10 @@ impl PirHttpClient {
     ) -> Result<Option<BlockDelta>, ClientError> {
         let resp = self
             .http
-            .get(format!("{}/sync?from={from}&to={to}&epoch={epoch}", self.base))
+            .get(format!(
+                "{}/sync?from={from}&to={to}&epoch={epoch}",
+                self.base
+            ))
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
@@ -371,7 +381,11 @@ impl PirHttpClient {
             .send()
             .await?;
         let bytes = ok_body(resp, MAX_ANSWER_BODY_BYTES).await?;
-        Ok(wire::decode_response_bundle(&bytes, reshape_row_width_per_seg, arity)?)
+        Ok(wire::decode_response_bundle(
+            &bytes,
+            reshape_row_width_per_seg,
+            arity,
+        )?)
     }
 }
 
@@ -389,9 +403,16 @@ async fn ok_body(resp: reqwest::Response, max_len: usize) -> Result<Vec<u8>, Cli
     let status = resp.status();
     if status != reqwest::StatusCode::OK {
         let status_code = status.as_u16();
-        let body = String::from_utf8_lossy(&read_capped(resp, MAX_ERROR_BODY_BYTES).await.unwrap_or_default())
-            .into_owned();
-        return Err(ClientError::Status { status: status_code, body });
+        let body = String::from_utf8_lossy(
+            &read_capped(resp, MAX_ERROR_BODY_BYTES)
+                .await
+                .unwrap_or_default(),
+        )
+        .into_owned();
+        return Err(ClientError::Status {
+            status: status_code,
+            body,
+        });
     }
     if let Some(declared) = resp.content_length() {
         if declared > max_len as u64 {
@@ -433,7 +454,10 @@ mod tests {
 
     #[test]
     fn client_error_display_is_human_readable() {
-        let e = ClientError::Status { status: 404, body: "nope".to_string() };
+        let e = ClientError::Status {
+            status: 404,
+            body: "nope".to_string(),
+        };
         assert_eq!(e.to_string(), "unexpected HTTP status 404: nope");
         let e2 = ClientError::Wire("bad magic".to_string());
         assert_eq!(e2.to_string(), "wire decode error: bad magic");

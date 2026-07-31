@@ -338,7 +338,11 @@ impl StateSaver {
     /// save to finish first (serialization, see the type docs), then
     /// writes the current state even if the height is unchanged (the
     /// operator asked for a save; honoring it is cheaper than arguing).
-    pub async fn save_now(&self, node: &NodeState, reason: &str) -> Result<SaveOutcome, StateError> {
+    pub async fn save_now(
+        &self,
+        node: &NodeState,
+        reason: &str,
+    ) -> Result<SaveOutcome, StateError> {
         let mut guard = self.inner.lock().await;
         self.save_with(&mut guard, node, true, reason).await
     }
@@ -369,8 +373,15 @@ impl StateSaver {
                 );
                 // block_in_place keeps the minutes-long file write from
                 // starving the runtime worker this task occupies.
-                let report = run_blocking(|| state::save(server, &self.codec, self.complete, &self.path))?;
-                Ok((SaveOutcome::Saved { block, bytes: report.bytes }, Some(report.digest)))
+                let report =
+                    run_blocking(|| state::save(server, &self.codec, self.complete, &self.path))?;
+                Ok((
+                    SaveOutcome::Saved {
+                        block,
+                        bytes: report.bytes,
+                    },
+                    Some(report.digest),
+                ))
             })
             .await;
 
@@ -390,7 +401,12 @@ impl StateSaver {
                 // permanently disabled by a continuity gap is never
                 // resurrected here — see `journal_broken`'s docs.
                 if !guard.journal_broken {
-                    match JournalWriter::create(&self.journal_path, *digest, *block, self.plaintext_bits) {
+                    match JournalWriter::create(
+                        &self.journal_path,
+                        *digest,
+                        *block,
+                        self.plaintext_bits,
+                    ) {
                         Ok(w) => {
                             guard.journal = Some(w);
                             // A fresh journal starts empty — see

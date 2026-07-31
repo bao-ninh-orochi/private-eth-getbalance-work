@@ -55,7 +55,10 @@ extern "C" {
 #[cfg(target_arch = "wasm32")]
 #[allow(unsafe_code)]
 #[no_mangle]
-unsafe extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
+unsafe extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom::Error> {
     unsafe { risepir_fill_random(dest, len) };
     Ok(())
 }

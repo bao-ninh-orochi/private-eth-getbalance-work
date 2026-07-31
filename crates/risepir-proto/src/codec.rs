@@ -87,7 +87,10 @@ impl std::fmt::Display for CodecError {
             Self::UnexpectedEof => write!(f, "unexpected end of input"),
             Self::MalformedVarint => write!(f, "malformed varint"),
             Self::ArityMismatch { expected, found } => {
-                write!(f, "arity mismatch: expected {expected}, header declared {found}")
+                write!(
+                    f,
+                    "arity mismatch: expected {expected}, header declared {found}"
+                )
             }
             Self::CountExceedsInput => write!(f, "declared count exceeds remaining input length"),
             Self::IndexOverflow => write!(f, "reconstructed row/offset index overflowed"),
@@ -254,7 +257,11 @@ pub fn encode_block_delta(delta: &BlockDelta, plaintext_bits: u32) -> Vec<u8> {
 /// Never panics, regardless of input content: every count is validated
 /// against the remaining input length before it is used to size an
 /// allocation, and every arithmetic reconstruction is checked.
-pub fn decode_block_delta(bytes: &[u8], plaintext_bits: u32, arity: u32) -> Result<BlockDelta, CodecError> {
+pub fn decode_block_delta(
+    bytes: &[u8],
+    plaintext_bits: u32,
+    arity: u32,
+) -> Result<BlockDelta, CodecError> {
     if !(1..=31).contains(&plaintext_bits) {
         return Err(CodecError::DeltaOutOfRange);
     }
@@ -295,7 +302,9 @@ pub fn decode_block_delta(bytes: &[u8], plaintext_bits: u32, arity: u32) -> Resu
         let mut prev_row: u64 = 0;
         for _ in 0..row_count {
             let row_gap = read_uvarint(bytes, &mut pos)?;
-            let row = prev_row.checked_add(row_gap).ok_or(CodecError::IndexOverflow)?;
+            let row = prev_row
+                .checked_add(row_gap)
+                .ok_or(CodecError::IndexOverflow)?;
             let row_u32 = u32::try_from(row).map_err(|_| CodecError::IndexOverflow)?;
             prev_row = row;
 
@@ -306,7 +315,9 @@ pub fn decode_block_delta(bytes: &[u8], plaintext_bits: u32, arity: u32) -> Resu
             let mut prev_off: u64 = 0;
             for _ in 0..cell_count {
                 let off_gap = read_uvarint(bytes, &mut pos)?;
-                let offset = prev_off.checked_add(off_gap).ok_or(CodecError::IndexOverflow)?;
+                let offset = prev_off
+                    .checked_add(off_gap)
+                    .ok_or(CodecError::IndexOverflow)?;
                 let offset_u16 = u16::try_from(offset).map_err(|_| CodecError::IndexOverflow)?;
                 prev_off = offset;
 
@@ -519,7 +530,10 @@ mod tests {
     #[test]
     fn decode_rejects_short_input() {
         assert_eq!(decode_block_delta(&[], 14, 3), Err(CodecError::BadMagic));
-        assert_eq!(decode_block_delta(b"RPD1", 14, 3), Err(CodecError::UnexpectedEof));
+        assert_eq!(
+            decode_block_delta(b"RPD1", 14, 3),
+            Err(CodecError::UnexpectedEof)
+        );
     }
 
     #[test]
@@ -527,7 +541,10 @@ mod tests {
         let bytes = encode_block_delta(&sample_delta(), 14);
         assert_eq!(
             decode_block_delta(&bytes, 14, 4),
-            Err(CodecError::ArityMismatch { expected: 4, found: 3 })
+            Err(CodecError::ArityMismatch {
+                expected: 4,
+                found: 3
+            })
         );
     }
 
@@ -535,21 +552,33 @@ mod tests {
     fn decode_rejects_delta_out_of_range() {
         // plaintext_bits = 4 => bound = 16; sample_delta has a delta of -100.
         let bytes = encode_block_delta(&sample_delta(), 30);
-        assert_eq!(decode_block_delta(&bytes, 4, 3), Err(CodecError::DeltaOutOfRange));
+        assert_eq!(
+            decode_block_delta(&bytes, 4, 3),
+            Err(CodecError::DeltaOutOfRange)
+        );
     }
 
     #[test]
     fn decode_rejects_invalid_plaintext_bits() {
         let bytes = encode_block_delta(&sample_delta(), 14);
-        assert_eq!(decode_block_delta(&bytes, 0, 3), Err(CodecError::DeltaOutOfRange));
-        assert_eq!(decode_block_delta(&bytes, 32, 3), Err(CodecError::DeltaOutOfRange));
+        assert_eq!(
+            decode_block_delta(&bytes, 0, 3),
+            Err(CodecError::DeltaOutOfRange)
+        );
+        assert_eq!(
+            decode_block_delta(&bytes, 32, 3),
+            Err(CodecError::DeltaOutOfRange)
+        );
     }
 
     #[test]
     fn decode_rejects_trailing_bytes() {
         let mut bytes = encode_block_delta(&sample_delta(), 14);
         bytes.push(0xff);
-        assert_eq!(decode_block_delta(&bytes, 14, 3), Err(CodecError::TrailingBytes));
+        assert_eq!(
+            decode_block_delta(&bytes, 14, 3),
+            Err(CodecError::TrailingBytes)
+        );
     }
 
     #[test]
@@ -589,7 +618,10 @@ mod tests {
         for len in 0..300usize {
             let bytes: Vec<u8> = (0..len).map(|_| (next() % 256) as u8).collect();
             let result = panic::catch_unwind(|| decode_block_delta(&bytes, 14, 3));
-            assert!(result.is_ok(), "panicked on random input of length {len}: {bytes:?}");
+            assert!(
+                result.is_ok(),
+                "panicked on random input of length {len}: {bytes:?}"
+            );
         }
     }
 
@@ -607,7 +639,10 @@ mod tests {
                 let mut corrupted = valid.clone();
                 corrupted[byte_idx] ^= 1 << bit;
                 let result = panic::catch_unwind(|| decode_block_delta(&corrupted, 14, 3));
-                assert!(result.is_ok(), "panicked corrupting byte {byte_idx} bit {bit}");
+                assert!(
+                    result.is_ok(),
+                    "panicked corrupting byte {byte_idx} bit {bit}"
+                );
             }
         }
     }
@@ -668,7 +703,11 @@ mod tests {
         assert_eq!(read_u32s(&bytes, &mut pos, 10).unwrap(), a);
         assert_eq!(read_u32s(&bytes, &mut pos, 10).unwrap(), b);
         assert_eq!(read_u32s(&bytes, &mut pos, 10).unwrap(), c);
-        assert_eq!(pos, bytes.len() - 1, "pos must stop right after the third vector, before the trailing byte");
+        assert_eq!(
+            pos,
+            bytes.len() - 1,
+            "pos must stop right after the third vector, before the trailing byte"
+        );
     }
 
     #[test]

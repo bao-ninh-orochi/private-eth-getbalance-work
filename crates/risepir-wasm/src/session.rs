@@ -25,8 +25,8 @@
 use ikpir_common::backend::simple::SimpleResponse;
 use ikpir_common::SimplePirBackend;
 use risepir_client::{ClientError, Lookup, QueryCtx, RisePirClient};
-use risepir_proto::{codec::CodecError, keccak256, AddressHash, ValueCodec};
 use risepir_http::wire::{self, WireError};
+use risepir_proto::{codec::CodecError, keccak256, AddressHash, ValueCodec};
 use risepir_server::SetupBundle;
 
 /// Parses a `GET /mode` body (or the equivalent single header byte the
@@ -242,8 +242,11 @@ impl Session {
     pub fn from_bundle(bundle: SetupBundle<SimplePirBackend>, complete: bool) -> Self {
         let arity = bundle.params.arity();
         let plaintext_bits = bundle.params.plaintext_bits;
-        let reshape_row_width_per_seg: Vec<u32> =
-            bundle.backend_params.iter().map(|sp| sp.reshape_row_width).collect();
+        let reshape_row_width_per_seg: Vec<u32> = bundle
+            .backend_params
+            .iter()
+            .map(|sp| sp.reshape_row_width)
+            .collect();
         let epoch = wire::lineage_epoch(&bundle.backend_params);
         let pinned_block = bundle.block;
 
@@ -301,7 +304,11 @@ impl Session {
     /// accumulator strictly forward — a stale, duplicated, or
     /// out-of-order delta is rejected rather than applied twice.
     pub fn ingest(&mut self, delta_bytes: &[u8]) -> Result<u64, SessionError> {
-        let delta = risepir_proto::codec::decode_block_delta(delta_bytes, self.plaintext_bits, self.arity as u32)?;
+        let delta = risepir_proto::codec::decode_block_delta(
+            delta_bytes,
+            self.plaintext_bits,
+            self.arity as u32,
+        )?;
         let head = delta.block;
         self.client.ingest_delta(&delta)?;
         self.pending_head = head;
@@ -325,11 +332,17 @@ impl Session {
         if self.in_flight.is_some() {
             return Err(SessionError::QueryAlreadyInFlight);
         }
-        let addr20: [u8; 20] = addr.try_into().map_err(|_| SessionError::BadAddressLen(addr.len()))?;
+        let addr20: [u8; 20] = addr
+            .try_into()
+            .map_err(|_| SessionError::BadAddressLen(addr.len()))?;
         let key = keccak256(&addr20);
         let (queries, ctx) = self.client.build_query(&key);
         let body = wire::encode_query_bundle(&queries);
-        self.in_flight = Some(InFlight { key, ctx, answer: None });
+        self.in_flight = Some(InFlight {
+            key,
+            ctx,
+            answer: None,
+        });
         Ok(body)
     }
 
@@ -343,9 +356,13 @@ impl Session {
     /// [`SessionError::NoQueryInFlight`], or [`SessionError::Wire`] for
     /// any malformed or wrong-length body.
     pub fn accept_answer(&mut self, resp_bytes: &[u8]) -> Result<u64, SessionError> {
-        let decoded = wire::decode_response_bundle(resp_bytes, &self.reshape_row_width_per_seg, self.arity)?;
+        let decoded =
+            wire::decode_response_bundle(resp_bytes, &self.reshape_row_width_per_seg, self.arity)?;
         let at_block = decoded.1;
-        let slot = self.in_flight.as_mut().ok_or(SessionError::NoQueryInFlight)?;
+        let slot = self
+            .in_flight
+            .as_mut()
+            .ok_or(SessionError::NoQueryInFlight)?;
         slot.answer = Some(decoded);
         Ok(at_block)
     }
@@ -363,7 +380,10 @@ impl Session {
     /// out-of-order use, [`SessionError::SyncRequired`] as above, and
     /// [`SessionError::Client`] if the rewind itself rejects the inputs.
     pub fn finish(&mut self) -> Result<Outcome, SessionError> {
-        let slot = self.in_flight.as_ref().ok_or(SessionError::NoQueryInFlight)?;
+        let slot = self
+            .in_flight
+            .as_ref()
+            .ok_or(SessionError::NoQueryInFlight)?;
         let (_, at_block) = slot.answer.as_ref().ok_or(SessionError::NoAnswer)?;
 
         // Checked *before* taking the slot, so this error is recoverable:

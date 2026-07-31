@@ -210,7 +210,14 @@ mod tests {
 
     fn store() -> Segmented2aryCuckooKVStore {
         let value_bits = codec().value_bits();
-        let pb = simple_max_plaintext_bits(2, NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, value_bits, SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(
+            2,
+            NUM_BUCKETS / 2,
+            BUCKET_SIZE,
+            FP_BITS,
+            value_bits,
+            SimpleParams::DEFAULT_SIGMA,
+        );
         Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, value_bits, pb).unwrap()
     }
 
@@ -252,7 +259,10 @@ mod tests {
         let (fp_a, idx_a) = params.candidate_buckets(&a);
         let (fp_b, idx_b) = params.candidate_buckets(&b);
         assert_eq!(fp_a, fp_b, "search invariant: same fingerprint");
-        assert_eq!(idx_a[0], idx_b[0], "search invariant: same first candidate bucket");
+        assert_eq!(
+            idx_a[0], idx_b[0],
+            "search invariant: same first candidate bucket"
+        );
         assert_ne!(a, b);
 
         let b_balance: Balance = 42_000_000_000_000_000_000u128;
@@ -269,7 +279,12 @@ mod tests {
 
         // Verified read/locate: A is absent, with exactly one foreign match.
         assert_eq!(get(&st, &codec, &a), Ok(None));
-        assert_eq!(locate(&st, &codec, &a), Located::Absent { foreign_fp_matches: 1 });
+        assert_eq!(
+            locate(&st, &codec, &a),
+            Located::Absent {
+                foreign_fp_matches: 1
+            }
+        );
         assert_eq!(get(&st, &codec, &b), Ok(Some(b_balance)));
 
         // Upstream delete(A) — what apply_block used to do on (A, 0) —
@@ -320,7 +335,12 @@ mod tests {
         let codec = codec();
         let mut st = store();
         let k = addr(1);
-        assert_eq!(locate(&st, &codec, &k), Located::Absent { foreign_fp_matches: 0 });
+        assert_eq!(
+            locate(&st, &codec, &k),
+            Located::Absent {
+                foreign_fp_matches: 0
+            }
+        );
         assert_eq!(get(&st, &codec, &k), Ok(None));
 
         st.insert(k, &codec.encode(&k, 5u128).unwrap()).unwrap();

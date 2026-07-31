@@ -202,7 +202,12 @@ pub struct SaveReport {
 /// power cut cannot replace the previous good file with one whose bytes
 /// never reached the disk). Always writes the current (`RPST2`,
 /// checksummed) format.
-pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) -> Result<SaveReport, StateError> {
+pub fn save(
+    server: &Server,
+    codec: &ValueCodec,
+    complete: bool,
+    path: &Path,
+) -> Result<SaveReport, StateError> {
     let tmp = path.with_extension("tmp");
     let (total, digest) = {
         let file = File::create(&tmp).map_err(io_err)?;
@@ -217,17 +222,20 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
         for width in [codec.key_tag_bits, codec.balance_bits, codec.checksum_bits] {
             w.write_all(&width.to_le_bytes()).map_err(io_err)?;
         }
-        w.write_all(&server.num_items().to_le_bytes()).map_err(io_err)?;
+        w.write_all(&server.num_items().to_le_bytes())
+            .map_err(io_err)?;
 
         let setup_bytes = wire::encode_setup(&server.setup());
-        w.write_all(&(setup_bytes.len() as u64).to_le_bytes()).map_err(io_err)?;
+        w.write_all(&(setup_bytes.len() as u64).to_le_bytes())
+            .map_err(io_err)?;
         w.write_all(&setup_bytes).map_err(io_err)?;
 
         // Borrowed, never `snapshot_cells()`: at the complete mainnet set
         // the cell array is ~35 GB, so copying it here would double peak
         // RSS at exactly the moment the process is already at its largest.
         let cells = server.cells();
-        w.write_all(&(cells.len() as u64).to_le_bytes()).map_err(io_err)?;
+        w.write_all(&(cells.len() as u64).to_le_bytes())
+            .map_err(io_err)?;
         let mut chunk = Vec::with_capacity(CHUNK_CELLS * 4);
         for block in cells.chunks(CHUNK_CELLS) {
             chunk.clear();
@@ -254,7 +262,10 @@ pub fn save(server: &Server, codec: &ValueCodec, complete: bool, path: &Path) ->
     };
     std::fs::rename(&tmp, path).map_err(io_err)?;
     fsync_parent_dir(path);
-    Ok(SaveReport { bytes: total, digest })
+    Ok(SaveReport {
+        bytes: total,
+        digest,
+    })
 }
 
 /// Best-effort fsync of `path`'s parent directory, for after a rename:
@@ -355,7 +366,11 @@ pub(crate) struct RawState {
 /// file — a mismatch means the operator changed the value encoding
 /// between runs, which silently breaks every stored slot, so it is
 /// rejected loudly instead.
-pub fn load(path: &Path, config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+pub fn load(
+    path: &Path,
+    config: ikpir_common::SimpleConfig,
+    codec: &ValueCodec,
+) -> Result<LoadedState, StateError> {
     let file = File::open(path).map_err(io_err)?;
     let total_len = file.metadata().map_err(io_err)?.len();
     load_from(BufReader::new(file), total_len, config, codec)
@@ -363,7 +378,11 @@ pub fn load(path: &Path, config: ikpir_common::SimpleConfig, codec: &ValueCodec)
 
 /// [`load`] over an in-memory byte slice — what the state-file fuzz
 /// target drives, and handy in tests. Identical validation to [`load`].
-pub fn load_bytes(bytes: &[u8], config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+pub fn load_bytes(
+    bytes: &[u8],
+    config: ikpir_common::SimpleConfig,
+    codec: &ValueCodec,
+) -> Result<LoadedState, StateError> {
     load_from(bytes, bytes.len() as u64, config, codec)
 }
 
@@ -455,7 +474,11 @@ fn check_geometry_lineage(params: &CuckooParams, codec: &ValueCodec) -> Result<(
 /// [`check_geometry_lineage`]) right after the header decodes, before the
 /// cells section is even read, let alone allocated. Stops short of store
 /// reconstruction — see [`RawState`] and [`assemble`].
-fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<RawState, StateError> {
+fn parse_raw(
+    reader: impl Read,
+    total_len: u64,
+    codec: &ValueCodec,
+) -> Result<RawState, StateError> {
     let mut r = HashingReader {
         inner: reader,
         hasher: xxhash_rust::xxh3::Xxh3::new(),
@@ -502,7 +525,11 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
     let complete = match flag[0] {
         0 => false,
         1 => true,
-        other => return Err(StateError::Corrupt(format!("bad completeness flag {other}"))),
+        other => {
+            return Err(StateError::Corrupt(format!(
+                "bad completeness flag {other}"
+            )))
+        }
     };
 
     let mut widths = [0u32; 3];
@@ -518,7 +545,12 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
         return Err(StateError::Corrupt(format!(
             "value codec mismatch: file has key_tag/balance/checksum = {}/{}/{} bits, \
              deployment configured {}/{}/{}",
-            widths[0], widths[1], widths[2], codec.key_tag_bits, codec.balance_bits, codec.checksum_bits
+            widths[0],
+            widths[1],
+            widths[2],
+            codec.key_tag_bits,
+            codec.balance_bits,
+            codec.checksum_bits
         )));
     }
 
@@ -532,10 +564,12 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
             "setup_len {setup_len} exceeds the file's own size ({total_len} bytes)"
         )));
     }
-    let setup_len = usize::try_from(setup_len).map_err(|_| StateError::Corrupt("setup_len overflow".to_string()))?;
+    let setup_len = usize::try_from(setup_len)
+        .map_err(|_| StateError::Corrupt("setup_len overflow".to_string()))?;
     let mut setup_bytes = vec![0u8; setup_len];
     r.read_exact(&mut setup_bytes).map_err(io_err)?;
-    let setup = wire::decode_setup(&setup_bytes).map_err(|e| StateError::Corrupt(format!("setup section: {e}")))?;
+    let setup = wire::decode_setup(&setup_bytes)
+        .map_err(|e| StateError::Corrupt(format!("setup section: {e}")))?;
     let params = setup.params;
     if params.arity() != STORE_ARITY {
         return Err(StateError::Corrupt(format!(
@@ -549,9 +583,11 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
     check_geometry_lineage(&params, codec)?;
 
     let cells_len = read_u64(&mut r)?;
-    let cells_len = usize::try_from(cells_len).map_err(|_| StateError::Corrupt("cells_len overflow".to_string()))?;
-    let expected =
-        params.num_buckets as usize * params.bucket_size as usize * params.cells_per_slot() as usize;
+    let cells_len = usize::try_from(cells_len)
+        .map_err(|_| StateError::Corrupt("cells_len overflow".to_string()))?;
+    let expected = params.num_buckets as usize
+        * params.bucket_size as usize
+        * params.cells_per_slot() as usize;
     if cells_len != expected {
         return Err(StateError::Corrupt(format!(
             "cells_len {cells_len} does not match the setup section's geometry ({expected} cells)"
@@ -594,7 +630,11 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
     let mut probe = [0u8; 1];
     match r.read(&mut probe) {
         Ok(0) => {}
-        Ok(_) => return Err(StateError::Corrupt("trailing bytes after cells section".to_string())),
+        Ok(_) => {
+            return Err(StateError::Corrupt(
+                "trailing bytes after cells section".to_string(),
+            ))
+        }
         Err(e) => return Err(io_err(e)),
     }
 
@@ -621,10 +661,21 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
 /// [`parse_raw`]'s [`STORE_ARITY`] check has already refused a mismatched
 /// state file, in milliseconds and before the cells array was even
 /// allocated. This is defense in depth, not the primary guard (ADR-0034).
-pub(crate) fn assemble(raw: RawState, config: ikpir_common::SimpleConfig, codec: ValueCodec) -> Result<LoadedState, StateError> {
+pub(crate) fn assemble(
+    raw: RawState,
+    config: ikpir_common::SimpleConfig,
+    codec: ValueCodec,
+) -> Result<LoadedState, StateError> {
     let store = Segmented2aryCuckooKVStore::from_cells(raw.cells, raw.setup.params, raw.num_items)
         .map_err(|e| StateError::Corrupt(format!("store reconstruction: {e:?}")))?;
-    let server = Server::from_parts(store, config, codec, raw.setup.backend_params, raw.setup.hints, raw.setup.block);
+    let server = Server::from_parts(
+        store,
+        config,
+        codec,
+        raw.setup.backend_params,
+        raw.setup.hints,
+        raw.setup.block,
+    );
     Ok(LoadedState {
         server,
         complete: raw.complete,
@@ -632,7 +683,12 @@ pub(crate) fn assemble(raw: RawState, config: ikpir_common::SimpleConfig, codec:
     })
 }
 
-fn load_from(reader: impl Read, total_len: u64, config: ikpir_common::SimpleConfig, codec: &ValueCodec) -> Result<LoadedState, StateError> {
+fn load_from(
+    reader: impl Read,
+    total_len: u64,
+    config: ikpir_common::SimpleConfig,
+    codec: &ValueCodec,
+) -> Result<LoadedState, StateError> {
     let raw = parse_raw(reader, total_len, codec)?;
     assemble(raw, config, *codec)
 }
@@ -736,7 +792,11 @@ pub struct RestoredState {
 /// — the same bound `docs/adr/README.md` ADR-0005 licenses for the wire
 /// codec, checked here because replay mutates cells directly rather than
 /// going through the store's own key-addressed ops.
-fn apply_delta_in_place(cells: &mut [u32], params: &CuckooParams, delta: &BlockDelta) -> Result<(), String> {
+fn apply_delta_in_place(
+    cells: &mut [u32],
+    params: &CuckooParams,
+    delta: &BlockDelta,
+) -> Result<(), String> {
     let segment_size = params.segment_size();
     let row_width = params.bucket_size * params.cells_per_slot();
     let seg_cells = segment_size as usize * row_width as usize;
@@ -749,7 +809,9 @@ fn apply_delta_in_place(cells: &mut [u32], params: &CuckooParams, delta: &BlockD
         let start = j * seg_cells;
         let end = start + seg_cells;
         let Some(slice) = cells.get_mut(start..end) else {
-            return Err(format!("segment {j} is out of bounds for this base's geometry"));
+            return Err(format!(
+                "segment {j} is out of bounds for this base's geometry"
+            ));
         };
         for (row, edits) in seg_deltas {
             let row_base = *row as usize * row_width as usize;
@@ -770,7 +832,9 @@ fn apply_delta_in_place(cells: &mut [u32], params: &CuckooParams, delta: &BlockD
                 }
                 let idx = row_base + *offset as usize;
                 let Some(cell) = slice.get_mut(idx) else {
-                    return Err(format!("cell index {idx} is out of bounds within segment {j}"));
+                    return Err(format!(
+                        "cell index {idx} is out of bounds within segment {j}"
+                    ));
                 };
                 let updated = i64::from(*cell) + *cell_delta;
                 if updated < 0 || updated >= modulus {
@@ -824,7 +888,8 @@ pub fn load_with_journal_restore(
     let opened = (|| {
         let file = File::open(&journal_path).ok()?;
         let total_len = file.metadata().ok()?.len();
-        let (header, reader) = JournalReader::open(BufReader::new(file), total_len, plaintext_bits, arity).ok()?;
+        let (header, reader) =
+            JournalReader::open(BufReader::new(file), total_len, plaintext_bits, arity).ok()?;
         if header.base_digest != raw.digest {
             return None;
         }
@@ -881,7 +946,8 @@ pub fn load_with_journal_restore(
     let replay_started = Instant::now();
 
     for rec in reader.by_ref() {
-        apply_delta_in_place(&mut raw.cells, &raw.setup.params, &rec.delta).map_err(RestoreError::ApplyFailure)?;
+        apply_delta_in_place(&mut raw.cells, &raw.setup.params, &rec.delta)
+            .map_err(RestoreError::ApplyFailure)?;
         for (j, seg_deltas) in rec.delta.per_segment.iter().enumerate() {
             if !seg_deltas.is_empty() {
                 SimplePirBackend::server_patch_hint(
@@ -932,8 +998,8 @@ fn read_u64(r: &mut impl Read) -> Result<u64, StateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ikpir_common::pir_params::simple_max_plaintext_bits;
     use ikpir_common::backend::simple::SimpleParams;
+    use ikpir_common::pir_params::simple_max_plaintext_bits;
     use ikpir_common::{IndexPirBackend, SimpleConfig};
     use risepir_proto::keccak256;
     use risepir_proto::BlockUpdate;
@@ -949,8 +1015,16 @@ mod tests {
     fn small_server() -> Server {
         let codec = codec();
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+        let pb = simple_max_plaintext_bits(
+            2,
+            num_buckets / 2,
+            4,
+            32,
+            codec.value_bits(),
+            SimpleParams::DEFAULT_SIGMA,
+        );
+        let store =
+            Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
     }
 
@@ -969,7 +1043,11 @@ mod tests {
         server
             .apply_block(&BlockUpdate {
                 block: 7,
-                changes: addrs.iter().enumerate().map(|(i, a)| (*a, 1_000u128 + i as u128)).collect(),
+                changes: addrs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (*a, 1_000u128 + i as u128))
+                    .collect(),
                 credits: vec![(addrs[0], 5u128)],
             })
             .unwrap();
@@ -977,7 +1055,11 @@ mod tests {
         let before = server.setup();
         let path = tmp("roundtrip.bin");
         save(&server, &codec(), true, &path).unwrap();
-        let LoadedState { server: mut reloaded, complete, .. } = load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
+        let LoadedState {
+            server: mut reloaded,
+            complete,
+            ..
+        } = load(&path, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
         std::fs::remove_file(&path).unwrap();
 
         assert!(complete);
@@ -985,9 +1067,17 @@ mod tests {
         assert_eq!(reloaded.num_items(), 50);
         let after = reloaded.setup();
         for (j, (b, a)) in before.hints.iter().zip(&after.hints).enumerate() {
-            assert_eq!(b.data, a.data, "segment {j}: hint bytes must survive the round trip");
+            assert_eq!(
+                b.data, a.data,
+                "segment {j}: hint bytes must survive the round trip"
+            );
         }
-        for (j, (b, a)) in before.backend_params.iter().zip(&after.backend_params).enumerate() {
+        for (j, (b, a)) in before
+            .backend_params
+            .iter()
+            .zip(&after.backend_params)
+            .enumerate()
+        {
             // A is expanded deterministically from ServerParams; equal
             // expanded material ⇒ equal A. (SimpleServerParams has no
             // PartialEq; the expanded hint material is the observable.)
@@ -1035,7 +1125,9 @@ mod tests {
         let mid = bytes.len() / 2; // well inside the cells section
         bytes[mid] ^= 0x01;
         match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()) {
-            Err(StateError::Corrupt(msg)) => assert!(msg.contains("checksum"), "unexpected rejection: {msg}"),
+            Err(StateError::Corrupt(msg)) => {
+                assert!(msg.contains("checksum"), "unexpected rejection: {msg}")
+            }
             Err(other) => panic!("bit flip must be a checksum rejection, got {other}"),
             Ok(_) => panic!("bit flip must not load"),
         }
@@ -1063,7 +1155,11 @@ mod tests {
         let mut server = small_server();
         let addr = keccak256(&[9u8; 20]);
         server
-            .apply_block(&BlockUpdate { block: 3, changes: vec![(addr, 777u128)], credits: vec![] })
+            .apply_block(&BlockUpdate {
+                block: 3,
+                changes: vec![(addr, 777u128)],
+                credits: vec![],
+            })
             .unwrap();
         let path = tmp("legacy.bin");
         save(&server, &codec(), false, &path).unwrap();
@@ -1083,7 +1179,10 @@ mod tests {
         for (version, bytes) in [("RPST1", v1), ("RPST2", v2)] {
             match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()) {
                 Err(StateError::Corrupt(msg)) => {
-                    assert!(msg.contains(version), "must name the version it found: {msg}");
+                    assert!(
+                        msg.contains(version),
+                        "must name the version it found: {msg}"
+                    );
                     assert!(msg.contains("xxh3_128"), "must name the cause: {msg}");
                     assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
                     assert!(
@@ -1095,8 +1194,12 @@ mod tests {
                         "must be refused for its lineage, not misreported as corruption: {msg}"
                     );
                 }
-                Err(StateError::Io(msg)) => panic!("{version} must be rejected as Corrupt, not Io: {msg}"),
-                Ok(_) => panic!("a {version} state file predates the xxh3_128 switch and must not load"),
+                Err(StateError::Io(msg)) => {
+                    panic!("{version} must be rejected as Corrupt, not Io: {msg}")
+                }
+                Ok(_) => {
+                    panic!("a {version} state file predates the xxh3_128 switch and must not load")
+                }
             }
         }
     }
@@ -1115,7 +1218,9 @@ mod tests {
         let off = 5 + 1 + 12 + 8;
         bytes[off..off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()) {
-            Err(StateError::Corrupt(msg)) => assert!(msg.contains("exceeds"), "unexpected rejection: {msg}"),
+            Err(StateError::Corrupt(msg)) => {
+                assert!(msg.contains("exceeds"), "unexpected rejection: {msg}")
+            }
             Err(other) => panic!("oversized setup_len must be rejected, got {other}"),
             Ok(_) => panic!("oversized setup_len must not load"),
         }
@@ -1165,21 +1270,30 @@ mod tests {
     #[test]
     fn acquire_state_path_refuses_sibling_suffixed_paths() {
         for reserved in ["journal", "tmp", "lock", "audit"] {
-            let path = std::env::temp_dir()
-                .join(format!("risepir-state-{}-selfclobber.{reserved}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "risepir-state-{}-selfclobber.{reserved}",
+                std::process::id()
+            ));
             match acquire_state_path(&path) {
                 Err(StateError::Io(msg)) => {
-                    assert!(msg.contains(&format!(".{reserved}")), "must name the collision: {msg}")
+                    assert!(
+                        msg.contains(&format!(".{reserved}")),
+                        "must name the collision: {msg}"
+                    )
                 }
                 other => panic!("a .{reserved} --state path must be refused, got {other:?}"),
             }
-            assert!(!path.exists(), "the refusal must not have created (or truncated) anything at the path");
+            assert!(
+                !path.exists(),
+                "the refusal must not have created (or truncated) anything at the path"
+            );
         }
     }
 
     #[test]
     fn acquire_state_path_locks_out_a_second_claimant() {
-        let path = std::env::temp_dir().join(format!("risepir-state-{}-locked.bin", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("risepir-state-{}-locked.bin", std::process::id()));
         let lock_path = path.with_extension("lock");
 
         let held = acquire_state_path(&path).expect("first claim succeeds");
@@ -1188,7 +1302,10 @@ mod tests {
         // second process would.
         match acquire_state_path(&path) {
             Err(StateError::Io(msg)) => {
-                assert!(msg.contains("another process"), "must explain the conflict: {msg}");
+                assert!(
+                    msg.contains("another process"),
+                    "must explain the conflict: {msg}"
+                );
             }
             other => panic!("a second claim on a held path must fail, got {other:?}"),
         }
@@ -1210,8 +1327,16 @@ mod tests {
     fn store_arity_matches_the_compiled_store_type() {
         let codec = codec();
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
-        let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
+        let pb = simple_max_plaintext_bits(
+            2,
+            num_buckets / 2,
+            4,
+            32,
+            codec.value_bits(),
+            SimpleParams::DEFAULT_SIGMA,
+        );
+        let store =
+            Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         assert_eq!(store.params().arity(), STORE_ARITY);
     }
 
@@ -1242,7 +1367,11 @@ mod tests {
             value_bits: 96,
             plaintext_bits: 8,
         };
-        assert_eq!(params.arity(), arity, "sanity: this fixture must actually be 3-ary");
+        assert_eq!(
+            params.arity(),
+            arity,
+            "sanity: this fixture must actually be 3-ary"
+        );
 
         let backend_params: Vec<SimpleServerParams> = (0..arity)
             .map(|i| SimpleServerParams {
@@ -1256,23 +1385,40 @@ mod tests {
             .collect();
         let hints: Vec<SimpleHint> = (0..arity)
             .map(|i| SimpleHint {
-                data: (0..lwe_dim * reshape_row_width).map(|j| (i as u32) * 1_000 + j).collect(),
+                data: (0..lwe_dim * reshape_row_width)
+                    .map(|j| (i as u32) * 1_000 + j)
+                    .collect(),
             })
             .collect();
-        let setup_bytes = wire::encode_setup(&SetupBundle { params, backend_params, hints, block: 0 });
+        let setup_bytes = wire::encode_setup(&SetupBundle {
+            params,
+            backend_params,
+            hints,
+            block: 0,
+        });
 
-        let cells_len = params.num_buckets as usize * params.bucket_size as usize * params.cells_per_slot() as usize;
+        let cells_len = params.num_buckets as usize
+            * params.bucket_size as usize
+            * params.cells_per_slot() as usize;
         let cells = vec![0u32; cells_len];
 
         // key_tag(32) + balance(64) + checksum(0) = 96, matching
         // `params.value_bits` above.
-        let three_ary_codec = ValueCodec { key_tag_bits: 32, balance_bits: 64, checksum_bits: 0 };
+        let three_ary_codec = ValueCodec {
+            key_tag_bits: 32,
+            balance_bits: 64,
+            checksum_bits: 0,
+        };
         assert_eq!(three_ary_codec.value_bits(), params.value_bits);
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.push(1); // complete
-        for w in [three_ary_codec.key_tag_bits, three_ary_codec.balance_bits, three_ary_codec.checksum_bits] {
+        for w in [
+            three_ary_codec.key_tag_bits,
+            three_ary_codec.balance_bits,
+            three_ary_codec.checksum_bits,
+        ] {
             bytes.extend_from_slice(&w.to_le_bytes());
         }
         bytes.extend_from_slice(&0u64.to_le_bytes()); // num_items
@@ -1309,7 +1455,9 @@ mod tests {
             // `LoadedState` has no `Debug` impl (not needed anywhere else),
             // so the success case is just named directly rather than
             // formatted.
-            Ok(_) => panic!("a state file from a different arity lineage must not load successfully"),
+            Ok(_) => {
+                panic!("a state file from a different arity lineage must not load successfully")
+            }
         }
     }
 
@@ -1324,7 +1472,11 @@ mod tests {
     fn state_bytes_at(params: CuckooParams, codec: &ValueCodec) -> Vec<u8> {
         use ikpir_common::backend::simple::{SimpleHint, SimpleServerParams};
 
-        assert_eq!(codec.value_bits(), params.value_bits, "fixture: codec must match params");
+        assert_eq!(
+            codec.value_bits(),
+            params.value_bits,
+            "fixture: codec must match params"
+        );
         let arity = params.arity();
         let lwe_dim = 4u32;
         let reshape_row_width = 6u32;
@@ -1345,12 +1497,20 @@ mod tests {
             .collect();
         let hints: Vec<SimpleHint> = (0..arity)
             .map(|i| SimpleHint {
-                data: (0..lwe_dim * reshape_row_width).map(|j| (i as u32) * 1_000 + j).collect(),
+                data: (0..lwe_dim * reshape_row_width)
+                    .map(|j| (i as u32) * 1_000 + j)
+                    .collect(),
             })
             .collect();
-        let setup_bytes = wire::encode_setup(&SetupBundle { params, backend_params, hints, block: 0 });
-        let cells_len =
-            params.num_buckets as usize * params.bucket_size as usize * params.cells_per_slot() as usize;
+        let setup_bytes = wire::encode_setup(&SetupBundle {
+            params,
+            backend_params,
+            hints,
+            block: 0,
+        });
+        let cells_len = params.num_buckets as usize
+            * params.bucket_size as usize
+            * params.cells_per_slot() as usize;
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -1424,9 +1584,15 @@ mod tests {
     #[test]
     fn wrong_fingerprint_bits_state_file_rejected_by_name() {
         let codec = codec();
-        let geom =
-            Geometry::for_num_buckets(128, STORE_ARITY as u32, crate::mainnet::BUCKET_SIZE, 64, &codec, Backend::Simple)
-                .unwrap();
+        let geom = Geometry::for_num_buckets(
+            128,
+            STORE_ARITY as u32,
+            crate::mainnet::BUCKET_SIZE,
+            64,
+            &codec,
+            Backend::Simple,
+        )
+        .unwrap();
         assert_ne!(
             geom.fingerprint_bits,
             crate::mainnet::FINGERPRINT_BITS,
@@ -1444,7 +1610,10 @@ mod tests {
 
         match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec) {
             Err(StateError::Corrupt(msg)) => {
-                assert!(msg.contains("fingerprint_bits"), "must name the mismatched field: {msg}");
+                assert!(
+                    msg.contains("fingerprint_bits"),
+                    "must name the mismatched field: {msg}"
+                );
                 assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
                 assert!(
                     msg.contains("do not restore from backup"),
@@ -1475,7 +1644,10 @@ mod tests {
 
         match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec) {
             Err(StateError::Corrupt(msg)) => {
-                assert!(msg.contains("plaintext_bits"), "must name the mismatched field: {msg}");
+                assert!(
+                    msg.contains("plaintext_bits"),
+                    "must name the mismatched field: {msg}"
+                );
                 assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
                 assert!(
                     !msg.contains("store reconstruction"),

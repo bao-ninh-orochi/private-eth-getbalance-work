@@ -97,14 +97,14 @@ pub struct LoadedState {
     pub server: Server,
     /// Whether the persisted set was complete (snapshot-bootstrapped).
     pub complete: bool,
-    /// The file's trailing whole-file xxh3 digest — always `Some` now that
-    /// only `RPST3` loads (the verified checksum every current save
-    /// produces); the `None` case existed for legacy `RPST1` files, which
-    /// are refused outright since the `xxh3_128` switch. A delta
+    /// The file's trailing whole-file xxh3 digest. Every file this binary
+    /// accepts carries one: the checksum became mandatory when `RPST1`
+    /// (its only optional case) stopped loading at the `xxh3_128` switch.
+    /// A delta
     /// journal (`docs/adr/README.md` ADR-0026) binds itself to this
     /// digest, so `None` here means any journal sitting beside this file
     /// is unusable until the next save upgrades it to `RPST2`.
-    pub digest: Option<u64>,
+    pub digest: u64,
 }
 
 /// Errors from [`save`] / [`load`]. Strings carry enough context to
@@ -346,7 +346,7 @@ pub(crate) struct RawState {
     pub(crate) setup: SetupBundle<SimplePirBackend>,
     pub(crate) num_items: u64,
     pub(crate) complete: bool,
-    pub(crate) digest: Option<u64>,
+    pub(crate) digest: u64,
 }
 
 /// Read a state file back into a running server. `config` must be the
@@ -574,11 +574,7 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
     // digest *unhashed* (it cannot cover itself) and compare.
     //
     // Unconditional since `RPST1`/`RPST2` stopped loading (see the magic
-    // match): every file this binary accepts carries the checksum, so the
-    // `None` arm this used to have is unreachable. `digest` stays an
-    // `Option<u64>` rather than a `u64` only to keep the journal's existing
-    // "no digest to bind to" handling compiling; that arm is now dead and
-    // can be collapsed whenever someone wants the wider change.
+    // match): every file this binary accepts carries the checksum.
     let digest = {
         let computed = r.hasher.digest();
         let mut stored = [0u8; 8];
@@ -590,7 +586,7 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
                  the file is corrupt; restore from backup or re-bootstrap"
             )));
         }
-        Some(computed)
+        computed
     };
 
     // Anything after the cells (+ v2 checksum) is corruption, same
@@ -820,14 +816,16 @@ pub fn load_with_journal_restore(
 
     let plaintext_bits = raw.setup.params.plaintext_bits;
     let arity = raw.setup.params.arity() as u32;
-    // Collapses every "nothing to replay" case (legacy digest-less base,
-    // missing journal, corrupt header, or a header that names a
-    // different base) into one `None` — all handled identically below.
-    let opened = raw.digest.and_then(|base_digest| {
+    // Collapses every "nothing to replay" case (missing journal, corrupt
+    // header, or a header that names a different base) into one `None` —
+    // all handled identically below. The base is always digest-bearing
+    // now: the digest-less case was `RPST1`, which stopped loading at the
+    // `xxh3_128` switch.
+    let opened = (|| {
         let file = File::open(&journal_path).ok()?;
         let total_len = file.metadata().ok()?.len();
         let (header, reader) = JournalReader::open(BufReader::new(file), total_len, plaintext_bits, arity).ok()?;
-        if header.base_digest != base_digest {
+        if header.base_digest != raw.digest {
             return None;
         }
         // Belt to the digest's braces, on the one field replay continuity
@@ -850,7 +848,7 @@ pub fn load_with_journal_restore(
             return None;
         }
         Some(reader)
-    });
+    })();
 
     let Some(mut reader) = opened else {
         let loaded = assemble(raw, config, *codec)?;

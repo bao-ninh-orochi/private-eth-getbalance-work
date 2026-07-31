@@ -622,86 +622,83 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             let plaintext_bits = server.params().plaintext_bits;
             let arity = server.params().arity() as u32;
             let b = server.block();
-            let initial_journal = match digest {
-                None => {
+            // Every loadable state file carries a digest now — the
+            // digest-less case was `RPST1`, which stopped loading at the
+            // `xxh3_128` switch — so the old "journal present but this base
+            // has no digest to bind it to" arm is gone rather than left
+            // unreachable. It could not fire, and if it somehow did its
+            // advice ("ignoring it until the next save upgrades the state
+            // file") would now be wrong: an RPST1 file never gets a next
+            // save, because it is refused at load.
+            let initial_journal = match journal::scan_report_only(&journal_path, digest, plaintext_bits, arity) {
+                Ok(Some(report)) => {
+                    // This whole branch only runs with journal-restore
+                    // OFF, which since ADR-0037 means the operator
+                    // passed --no-journal-restore explicitly (it is no
+                    // longer reachable by omission) — so the remedy is
+                    // "drop that flag", not "pass --journal-restore"
+                    // (a no-op now that it is the default).
+                    match &report.stop {
+                        ScanStop::Eof => logln!(
+                            "risepir-rpc mainnet: journal intact: {} records to block {} (drop \
+                             --no-journal-restore to use it)",
+                            report.count, report.end_height
+                        ),
+                        ScanStop::Invalid { offset, reason } => logln!(
+                            "risepir-rpc mainnet: journal corrupt at byte {offset} ({reason}); usable prefix: \
+                             {} records to block {} (drop --no-journal-restore to use it)",
+                            report.count, report.end_height
+                        ),
+                    }
+                    // Measurable, not asserted (ADR-0037): one line,
+                    // regardless of whether this journal is ahead of
+                    // or matches the loaded base — either way its
+                    // on-disk size against the base file's is real,
+                    // reportable evidence.
+                    report_journal_savings(path, &journal_path, report.count);
+                    // Adopt ONLY if the journal exactly matches this
+                    // base and ends at height B — i.e. it was never
+                    // ahead. Ahead means appending now would gap
+                    // (the next real append is B+1, which the
+                    // journal already has a record for); leave that
+                    // file untouched (it is someone's recovery data)
+                    // and let the next save's rotation start fresh.
+                    if report.end_height == b {
+                        match JournalWriter::adopt(&journal_path, plaintext_bits, report.end_offset, report.end_height) {
+                            Ok(w) => Some(w),
+                            Err(e) => {
+                                logln!("risepir-rpc mainnet: WARNING: could not adopt journal: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        logln!(
+                            "risepir-rpc mainnet: journal is ahead of the loaded base (block {b}) — leaving it \
+                             untouched; journaling starts fresh at the next save"
+                        );
+                        None
+                    }
+                }
+                Ok(None) => {
+                    // Absent is the normal quiet case; present-but-
+                    // unusable (corrupt header, or bound to a
+                    // different save — e.g. a crash landed between a
+                    // base save and its journal rotation) deserves a
+                    // line: silently ignoring a file the operator may
+                    // be counting on is how soak evidence gets lost.
                     if journal_path.exists() {
                         logln!(
-                            "risepir-rpc mainnet: journal present but this is a legacy RPST1 state file \
-                             (no digest to bind it to) — ignoring it until the next save upgrades the state file"
+                            "risepir-rpc mainnet: journal present but unusable for this base (corrupt \
+                             header, or bound to a different save) — ignoring it; the next save starts \
+                             a fresh one"
                         );
                     }
                     None
                 }
-                Some(digest) => match journal::scan_report_only(&journal_path, digest, plaintext_bits, arity) {
-                    Ok(Some(report)) => {
-                        // This whole branch only runs with journal-restore
-                        // OFF, which since ADR-0037 means the operator
-                        // passed --no-journal-restore explicitly (it is no
-                        // longer reachable by omission) — so the remedy is
-                        // "drop that flag", not "pass --journal-restore"
-                        // (a no-op now that it is the default).
-                        match &report.stop {
-                            ScanStop::Eof => logln!(
-                                "risepir-rpc mainnet: journal intact: {} records to block {} (drop \
-                                 --no-journal-restore to use it)",
-                                report.count, report.end_height
-                            ),
-                            ScanStop::Invalid { offset, reason } => logln!(
-                                "risepir-rpc mainnet: journal corrupt at byte {offset} ({reason}); usable prefix: \
-                                 {} records to block {} (drop --no-journal-restore to use it)",
-                                report.count, report.end_height
-                            ),
-                        }
-                        // Measurable, not asserted (ADR-0037): one line,
-                        // regardless of whether this journal is ahead of
-                        // or matches the loaded base — either way its
-                        // on-disk size against the base file's is real,
-                        // reportable evidence.
-                        report_journal_savings(path, &journal_path, report.count);
-                        // Adopt ONLY if the journal exactly matches this
-                        // base and ends at height B — i.e. it was never
-                        // ahead. Ahead means appending now would gap
-                        // (the next real append is B+1, which the
-                        // journal already has a record for); leave that
-                        // file untouched (it is someone's recovery data)
-                        // and let the next save's rotation start fresh.
-                        if report.end_height == b {
-                            match JournalWriter::adopt(&journal_path, plaintext_bits, report.end_offset, report.end_height) {
-                                Ok(w) => Some(w),
-                                Err(e) => {
-                                    logln!("risepir-rpc mainnet: WARNING: could not adopt journal: {e}");
-                                    None
-                                }
-                            }
-                        } else {
-                            logln!(
-                                "risepir-rpc mainnet: journal is ahead of the loaded base (block {b}) — leaving it \
-                                 untouched; journaling starts fresh at the next save"
-                            );
-                            None
-                        }
-                    }
-                    Ok(None) => {
-                        // Absent is the normal quiet case; present-but-
-                        // unusable (corrupt header, or bound to a
-                        // different save — e.g. a crash landed between a
-                        // base save and its journal rotation) deserves a
-                        // line: silently ignoring a file the operator may
-                        // be counting on is how soak evidence gets lost.
-                        if journal_path.exists() {
-                            logln!(
-                                "risepir-rpc mainnet: journal present but unusable for this base (corrupt \
-                                 header, or bound to a different save) — ignoring it; the next save starts \
-                                 a fresh one"
-                            );
-                        }
-                        None
-                    }
-                    Err(e) => {
-                        logln!("risepir-rpc mainnet: WARNING: could not scan journal {}: {e}", journal_path.display());
-                        None
-                    }
-                },
+                Err(e) => {
+                    logln!("risepir-rpc mainnet: WARNING: could not scan journal {}: {e}", journal_path.display());
+                    None
+                }
             };
 
             Bootstrap {

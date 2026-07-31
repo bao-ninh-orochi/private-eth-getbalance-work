@@ -119,20 +119,25 @@ the superseded `(3,4)` lineage is stale.
   `--hard-refresh` run past what the audit samples is still an operator
   judgment call. See ADR-0040 for the full measurement and
   `docs/deploy.md` §2.1/§2.2 for the procedure.
-- **`--hard-refresh` has no rate-limit backoff, and it matters** *(new,
-  found by running it against the live deployment 2026-07-28 — deploy.md
-  §5.6)*. It issues two reads per address at a fixed concurrency of 8 with
-  no backoff. Against the keyless public endpoints it *defaults to*, that
-  gets refused: a 57,646-address run logged **67,791 fetch failures**
-  (essentially all `HTTP 429`) and skipped **50,813 of 57,646 addresses**,
-  correcting 2,633 accounts (3,105.08 ETH of absolute error) out of the
-  6,833 it managed to get a quorum on. It fails safely — no quorum means no
-  write, never a wrong value — and it is idempotent, so re-running picks up
-  the skipped remainder. But an 88% skip rate means one pass does not finish
-  the job, and the fix is small: adaptive backoff on 429, a
-  `--refresh-concurrency` flag, or batched JSON-RPC (most providers accept
-  batches, which would cut the request count ~100×). Do this before the next
-  correction run rather than re-running the storm.
+- **~~`--hard-refresh` has no rate-limit backoff~~ — the backoff SHIPPED
+  (ADR-0041, PR #39, 2026-07-29). What is still open is the correction *run*
+  itself.** The original diagnosis held exactly: a 57,646-address pass logged
+  **67,791 fetch failures, all HTTP 429**, and **zero** `providers disagree`
+  warnings — every one of the 50,813 skips was a fetch that never landed, so
+  the binding constraint was rate limiting, not disagreement. Each fetch is
+  now retried 4× with per-address-jittered exponential backoff
+  (`MAX_FETCH_ATTEMPTS`, `backoff_delay`); `CONCURRENT_ADDRESS_CHECKS` stayed
+  at 8 deliberately, since fan-out is the wrong knob for a limit nobody
+  knows. Measured (deploy.md §5.7): skip rate **88.1% → 8.0%**.
+
+  **But that "after" was a 1,000-address sample, not a full pass** — so the
+  57,646-address correction run has still never completed, and ADR-0040's
+  population-wide finding (the export is wrong for ~0.33% of *all* accounts,
+  ~668k, not just near the snapshot boundary) is still only partly
+  corrected. `--hard-refresh` fails safe and is idempotent, so the remaining
+  work is simply to run it to completion against the live box and record the
+  result — which needs the deployment up, and after the `xxh3_128` pin bump
+  that means a re-bootstrap first (deploy.md §4).
 - **Withdrawal-recipient hard refresh** (deploy.md §4): a one-time absolute
   re-read of the ~32 k withdrawal recipient addresses vs an archive RPC, to
   clear any credit ambiguity at the snapshot join. Partly superseded:

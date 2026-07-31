@@ -416,9 +416,20 @@ impl Geometry {
         }
         let segment_rows = num_buckets / arity;
 
+        // Both selectors target a per-cell decode-failure budget derived from
+        // `arity` and `row_width` (upstream's corrected Lemma 2: `δ_cell ≤
+        // 2^−(κ+1)/(arity·row_width)`, `pir_params::KAPPA` = 40), so `arity`
+        // leads both argument lists and `frodo_*` — previously blind to
+        // everything but `segment_rows` — now sees the full slot geometry.
+        // ADR-0042 re-derived this repo's operating point against that rule
+        // and found it unchanged; `plaintext_bits_is_unchanged_by_the_
+        // delta_cell_targeted_selector` below is what keeps that true.
         let plaintext_bits = match backend {
-            Backend::Frodo => frodo_max_plaintext_bits(segment_rows),
+            Backend::Frodo => {
+                frodo_max_plaintext_bits(arity, segment_rows, bucket_size, fingerprint_bits, value_bits)
+            }
             Backend::Simple => simple_max_plaintext_bits(
+                arity,
                 segment_rows,
                 bucket_size,
                 fingerprint_bits,
@@ -566,8 +577,16 @@ mod tests {
         let segment_rows = 65536 / 4;
         assert_eq!(segment_rows, 16384);
 
-        let frodo_pb = frodo_max_plaintext_bits(segment_rows);
-        assert_eq!(frodo_pb, 11);
+        // Frodo dropped 11 -> 10 when the pinned primitive replaced
+        // FrodoPIR's Eq. 8 rule (`q >= 8p^2*sqrt(m)`, whose "w.h.p." tail is
+        // ~6.7e-4 per cell — far too weak for the delta_cell budgets the
+        // corrected Lemma 2 asks for) with an explicit Bernstein tail. It is
+        // a real tightening of the bound, not a regression: the old value
+        // was never justified at this error target. SimplePIR below is
+        // unaffected, which is why the deployment's geometry did not move
+        // (ADR-0042) — this repo runs `Backend::Simple` (ADR-0002).
+        let frodo_pb = frodo_max_plaintext_bits(4, segment_rows, 4, 32, 256);
+        assert_eq!(frodo_pb, 10);
         let frodo_geom = Geometry {
             arity: 4,
             num_buckets: 65536,
@@ -576,14 +595,18 @@ mod tests {
             value_bits: 256,
             plaintext_bits: frodo_pb,
         };
+        // Every value here follows from `frodo_pb` 11 -> 10:
+        // cells_per_slot = ceil(288/10) = 29 (was ceil(288/11) = 27),
+        // row_width = 4*29 = 116, hint = 1566 (DEFAULT_LWE_DIM) * 116 * 4.
+        // `segment_rows` is pb-independent and unchanged.
         let frodo_sizes = frodo_geom.sizes(Backend::Frodo, 0);
-        assert_eq!(frodo_sizes.cells_per_slot, 27);
-        assert_eq!(frodo_sizes.row_width, 108);
+        assert_eq!(frodo_sizes.cells_per_slot, 29);
+        assert_eq!(frodo_sizes.row_width, 116);
         assert_eq!(frodo_sizes.segment_rows, 16384);
-        assert_eq!(frodo_sizes.hint_per_segment, 676_512);
+        assert_eq!(frodo_sizes.hint_per_segment, 726_624);
 
         let simple_pb =
-            simple_max_plaintext_bits(segment_rows, 4, 32, 256, SimpleParams::DEFAULT_SIGMA);
+            simple_max_plaintext_bits(4, segment_rows, 4, 32, 256, SimpleParams::DEFAULT_SIGMA);
         assert_eq!(simple_pb, 10);
         let simple_geom = Geometry {
             plaintext_bits: simple_pb,
@@ -614,10 +637,13 @@ mod tests {
         let segment_rows = num_buckets / 3;
         assert_eq!(segment_rows, 1 << 25);
 
-        let frodo_pb = frodo_max_plaintext_bits(segment_rows);
+        let frodo_pb = frodo_max_plaintext_bits(3, segment_rows, 4, 32, 96);
         let simple_pb =
-            simple_max_plaintext_bits(segment_rows, 4, 32, 96, SimpleParams::DEFAULT_SIGMA);
-        assert_eq!(frodo_pb, 8);
+            simple_max_plaintext_bits(3, segment_rows, 4, 32, 96, SimpleParams::DEFAULT_SIGMA);
+        // Frodo 8 -> 7 for the same reason as `pinned_arity4_65536`: the
+        // Bernstein tail replaced Eq. 8. Simple holds at 8 — the value this
+        // repo actually deploys.
+        assert_eq!(frodo_pb, 7);
         assert_eq!(simple_pb, 8);
 
         let geom = Geometry {
@@ -639,9 +665,13 @@ mod tests {
             plaintext_bits: frodo_pb,
             ..geom
         };
+        // `frodo_pb` 8 -> 7: cells_per_slot = ceil(128/7) = 19 (was 16), so
+        // row_width = 4*19 = 76 and server_db = 100_663_296 * 4 * 19 * 4.
+        // Frodo and Simple no longer coincide here — they did only because
+        // both landed on pb = 8 under the old rule.
         let frodo_sizes = frodo_geom.sizes(Backend::Frodo, 0);
-        assert_eq!(frodo_sizes.row_width, 64);
-        assert_eq!(frodo_sizes.server_db, 25_769_803_776);
+        assert_eq!(frodo_sizes.row_width, 76);
+        assert_eq!(frodo_sizes.server_db, 30_601_641_984);
     }
 
     #[test]
@@ -718,7 +748,10 @@ mod tests {
         // any accounts in (98304, 196608]; pick the upper boundary.
         let g = Geometry::for_accounts(196_608, 4, 4, 32, &codec_256(), Backend::Frodo).unwrap();
         assert_eq!(g.num_buckets, 65536);
-        assert_eq!(g.plaintext_bits, 11);
+        // Tracks `pinned_arity4_65536`'s Frodo value (11 -> 10 under the
+        // Bernstein tail); `num_buckets` above is what this test is really
+        // about and is unaffected by the selector change.
+        assert_eq!(g.plaintext_bits, 10);
     }
 
     proptest::proptest! {

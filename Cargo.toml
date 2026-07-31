@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 # MSRV — the toolchain pin (rust-toolchain.toml) is also the support floor.
 rust-version = "1.96"
 
-# The IKPIR primitive, pinned at the `perf/optimized` tip (042d868) — the
+# The IKPIR primitive, pinned at the `perf/optimized` tip (0f3b99b) — the
 # build docs/numbers.md §7's headline was measured against. One place, not
 # seven: every crate says `{ workspace = true }`. The former path deps
 # pointed at ../../../CANS2026/Incremental-Keyword-PIR, a checkout that has
@@ -31,6 +31,6 @@ rust-version = "1.96"
 # default-on `parallel` forwarding feature — otherwise it silently builds
 # the scalar kernels the headline numbers were not measured against.
 [workspace.dependencies]
-ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "3d60fa7", default-features = false }
-segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "3d60fa7" }
-ikpir-server     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "3d60fa7" }
+ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "0f3b99b", default-features = false }
+segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "0f3b99b" }
+ikpir-server     = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "0f3b99b" }

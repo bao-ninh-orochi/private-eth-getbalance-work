@@ -1077,7 +1077,7 @@ mod tests {
 
         let codec = ValueCodec { key_tag_bits: 32, balance_bits: 96, checksum_bits: 16 };
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
         let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         let mut server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0);
@@ -1132,7 +1132,7 @@ mod tests {
 
         let codec = ValueCodec { key_tag_bits: 32, balance_bits: 96, checksum_bits: 16 };
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
         let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         let server: RisePirServer<Segmented2aryScheme, SimplePirBackend> =
             RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0);

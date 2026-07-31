@@ -210,7 +210,7 @@ mod tests {
 
     fn store() -> Segmented2aryCuckooKVStore {
         let value_bits = codec().value_bits();
-        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, value_bits, SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(2, NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, value_bits, SimpleParams::DEFAULT_SIGMA);
         Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, value_bits, pb).unwrap()
     }
 
@@ -226,7 +226,7 @@ mod tests {
     /// enumeration order, so every test that calls this gets the same
     /// pair — the collision scenario is pinned, not sampled.
     fn colliding_pair(params: &CuckooParams) -> (AddressHash, AddressHash) {
-        let mut seen: HashMap<(u32, u32), u64> = HashMap::new();
+        let mut seen: HashMap<(u64, u32), u64> = HashMap::new();
         for i in 0u64..30_000_000 {
             let a = addr(i);
             let (fp, idx) = params.candidate_buckets(&a);

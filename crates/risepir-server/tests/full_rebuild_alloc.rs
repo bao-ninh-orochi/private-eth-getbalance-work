@@ -86,6 +86,7 @@ fn geometry() -> Geometry {
     let value_bits = KEY_TAG_BITS + BALANCE_BITS + CHECKSUM_BITS;
     let segment_rows = NUM_BUCKETS / ARITY;
     let plaintext_bits = simple_max_plaintext_bits(
+        ARITY,
         segment_rows,
         BUCKET_SIZE,
         FINGERPRINT_BITS,

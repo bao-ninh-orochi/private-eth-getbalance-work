@@ -1014,6 +1014,81 @@ replay on the way back up.
 If you run the systemd unit (`ops/systemd/risepir.service`) instead, none of
 this applies: journald rotates on its own.
 
+### Migration: the `xxh3_128` pin bump — REQUIRED, and NOT YET RUN
+
+**Status: planned, not executed.** The VM has been `TERMINATED` since
+2026-07-29 (block 25,638,894) and was deliberately left alone while this
+landed. Nothing below has been run against it; every figure is a projection
+from measured local numbers and the §5.4 round, and is labelled as such.
+
+**Why a restart will not do.** The pin moved to `0f3b99b`, which changes the
+primitive's item hash from `xxh3_64` to `xxh3_128`. Every key now lands in a
+different bucket. The **geometry is unchanged** — ADR-0042 kept
+`fingerprint_bits = 32`, and `plaintext_bits` is still 8, `cells_per_slot`
+still 22, server DB still 23.62 GB — so the usual guards are blind to this by
+construction: they compare parameters, and the parameters are correct. The
+state file's format version is what carries the hash lineage now, so the
+existing `~/risepir-state.bin` (an **`RPST2`** file) is refused by name:
+
+```
+state file is RPST2, written before the primitive's item hash changed from
+xxh3_64 to xxh3_128 — every key hashes to a different bucket now, so these
+cells no longer describe a filter this binary can read, and loading them
+would miss on every lookup (answering 0x0 for accounts that exist). This is
+not disk corruption, and the geometry is unchanged, which is exactly why
+nothing cheaper catches it; move the --state file aside and re-bootstrap
+from a fresh snapshot (do not restore from backup, the file itself is fine)
+```
+
+That refusal is the whole point: without it the server would have come up
+clean and answered `0x0` for every account.
+
+**The sequence.** DNS first — the external IP moves across every stop/start:
+
+```bash
+gcloud compute instances start risepir
+gcloud --quiet compute ssh risepir --command='~/duckdns-update.sh'
+gcloud --quiet compute ssh risepir --command='cd ~/private-ETH-getBalance && \
+  git pull && cargo build --release -p risepir-rpc && \
+  cargo run -p xtask --release -- web'
+# The state file must move aside, or --snapshot is silently ignored:
+gcloud --quiet compute ssh risepir \
+  --command='mv ~/risepir-state.bin ~/risepir-state.bin.rpst2-20260731'
+gcloud --quiet compute ssh risepir --command='~/bootstrap-complete.sh'
+```
+
+**Projected cost** (PROJECTION — the only measured anchor is §5.4's own
+`(2,4)` bootstrap):
+
+| step | expectation | basis |
+|---|---|---|
+| bootstrap | **~16 min** (8 min ingest + ~6 min PIR setup + 2 min save) | §5.4, measured, same geometry |
+| server DB | **23.62 GB**, unchanged | `numbers.md` §4b, geometry did not move |
+| state file | **~24.18 GB**, unchanged | §5.4; only placements move, not sizes |
+| snapshot → head replay | **~1 s/block** — the expensive part | §5.4 |
+| replay depth | stopped at 25,638,894; **budget hours**, and growing daily | — |
+| meter | **~$8.60/day** while running | §2.3 |
+
+The replay dominates and grows with every day the box stays down; the
+snapshot's own age adds to it (deploy.md §2.1). Nothing about this is urgent
+— the deployment is *stopped*, not serving wrong answers — so the honest
+framing is that the cost rises slowly until someone chooses to spend it.
+
+**The rollback story, honestly.** There is none that is a restart. The
+superseded `RPST2` file cannot be loaded by any binary built from this tree —
+that is exactly what the version check guarantees — so "roll back" means
+reverting the pin to `3d60fa7` *and* re-bootstrapping anyway, since the
+`RPST2` file will by then be stale by however long the box ran. Keep the moved
+file only as evidence, not as a recovery path, and delete it once the new one
+is verified (the `(3,4)` file's 33.77 GB were reclaimed on the same reasoning,
+§5.4). Plan forward, not backward.
+
+**Verify after, before declaring it done**: `GET /mode` returns `1`
+(complete); a handful of `eth_getBalance` answers byte-match an independent
+provider at an explicit height (never `"latest"`-vs-`"latest"`, ADR-0007); the
+in-loop reconciler reports exact at its checkpoints; and only 80/443 are
+reachable from outside.
+
 ## 5. Recorded live evidence (2026-07-19, this repo at 64b8f9f)
 
 Partial-mode deployment on a laptop, keyless dRPC + publicnode, real LWE

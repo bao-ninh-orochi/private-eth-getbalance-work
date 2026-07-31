@@ -772,6 +772,7 @@ mod tests {
         let value_bits = KEY_TAG_BITS + BALANCE_BITS + CHECKSUM_BITS;
         let segment_rows = NUM_BUCKETS / ARITY;
         let plaintext_bits = simple_max_plaintext_bits(
+            ARITY,
             segment_rows,
             BUCKET_SIZE,
             FINGERPRINT_BITS,
@@ -1414,7 +1415,7 @@ mod verified_apply_tests {
 
     fn tiny_server() -> RisePirServer<Segmented2aryScheme, SimplePirBackend> {
         let codec = codec();
-        let pb = simple_max_plaintext_bits(NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(2, NUM_BUCKETS / 2, BUCKET_SIZE, FP_BITS, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
         let store = Segmented2aryCuckooKVStore::new(NUM_BUCKETS, BUCKET_SIZE, FP_BITS, codec.value_bits(), pb).unwrap();
         RisePirServer::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
     }
@@ -1427,7 +1428,7 @@ mod verified_apply_tests {
 
     /// Same deterministic search as `verified::tests::colliding_pair`.
     fn colliding_pair(params: &CuckooParams) -> (AddressHash, AddressHash) {
-        let mut seen: HashMap<(u32, u32), u64> = HashMap::new();
+        let mut seen: HashMap<(u64, u32), u64> = HashMap::new();
         for i in 0u64..30_000_000 {
             let a = addr(i);
             let (fp, idx) = params.candidate_buckets(&a);

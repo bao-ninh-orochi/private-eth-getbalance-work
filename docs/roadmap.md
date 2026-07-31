@@ -121,7 +121,8 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
 9. **D4 — ERC-20 (`balanceOf` is a storage slot; scope to one token, e.g.
    USDC).** Highest product upside on the list. **D5** multi-query batching
    couples to the IKPIR upstream thread (the `perf/optimized` refresh
-   landed 2026-07-22 — pin at `3d60fa7`, numbers re-measured; batching
+   landed 2026-07-22 at `3d60fa7`, and the f=64 / corrected-Lemma-2 refresh
+   landed 2026-07-31 at `0f3b99b` — numbers re-measured each time; batching
    still needs an upstream `answer_batch` API).
 10. **Hygiene tail:** flip the `cargo fmt --check` CI gate on in a
     formatting-only commit (rustfmt.toml is in place; ~296 files of drift);

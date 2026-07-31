@@ -7,7 +7,7 @@
 //! # Format (all integers little-endian)
 //!
 //! ```text
-//! magic  b"RPST2"
+//! magic  b"RPST3"
 //! u8     complete            (1 = complete nonzero set; 0 = partial)
 //! u32×3  key_tag_bits, balance_bits, checksum_bits
 //! u64    num_items
@@ -30,9 +30,15 @@
 //! miss and the account silently reads `0x0` — the exact failure class
 //! the repo's first rule forbids, delivered by a disk. The whole-file
 //! xxh3 turns any storage-layer corruption into a loud
-//! [`StateError::Corrupt`] at load. Legacy `RPST1` files still load
-//! (with a stderr warning) so existing deployments upgrade on their next
-//! save rather than re-bootstrapping.
+//! [`StateError::Corrupt`] at load.
+//!
+//! Legacy `RPST1`/`RPST2` files **no longer load**. They used to (with a
+//! stderr warning) so existing deployments upgraded on their next save,
+//! but the primitive's item hash has since moved `xxh3_64` -> `xxh3_128`,
+//! which re-places every key while leaving the entire header byte-identical
+//! — so an old file is not stale, it is *wrong*, in the one way no cheaper
+//! check can see. The format version carries that lineage now: see the
+//! magic match in `parse_raw`.
 //!
 //! # Scale note
 //!
@@ -54,7 +60,11 @@ use segmented_cuckoo::{CuckooParams, Segmented2aryCuckooKVStore, Segmented2arySc
 use crate::journal::{self, JournalReader, ScanStop};
 
 const MAGIC_V1: &[u8; 5] = b"RPST1";
-const MAGIC: &[u8; 5] = b"RPST2";
+/// Superseded by [`MAGIC`] when the pinned primitive's item hash changed
+/// from `xxh3_64` to `xxh3_128` — see [`parse_raw`]'s magic match for why
+/// that has to invalidate every previously written file.
+const MAGIC_V2: &[u8; 5] = b"RPST2";
+const MAGIC: &[u8; 5] = b"RPST3";
 /// Cells per streamed chunk (256 KiB of bytes at 4 B/cell).
 const CHUNK_CELLS: usize = 64 * 1024;
 
@@ -87,9 +97,10 @@ pub struct LoadedState {
     pub server: Server,
     /// Whether the persisted set was complete (snapshot-bootstrapped).
     pub complete: bool,
-    /// The file's trailing whole-file xxh3 digest — `Some` for `RPST2`
-    /// (the verified checksum every current save produces), `None` for a
-    /// legacy `RPST1` file (no such checksum exists to report). A delta
+    /// The file's trailing whole-file xxh3 digest — always `Some` now that
+    /// only `RPST3` loads (the verified checksum every current save
+    /// produces); the `None` case existed for legacy `RPST1` files, which
+    /// are refused outright since the `xxh3_128` switch. A delta
     /// journal (`docs/adr/README.md` ADR-0026) binds itself to this
     /// digest, so `None` here means any journal sitting beside this file
     /// is unusable until the next save upgrades it to `RPST2`.
@@ -452,16 +463,39 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
 
     let mut magic = [0u8; 5];
     r.read_exact(&mut magic).map_err(io_err)?;
-    let checksummed = match &magic {
-        m if m == MAGIC => true,
-        m if m == MAGIC_V1 => {
-            logln!(
-                "risepir-rpc: WARNING: legacy RPST1 state file (no whole-file checksum) — \
-                 loading with structural checks only; the next save upgrades it to RPST2"
-            );
-            false
+    match &magic {
+        m if m == MAGIC => {}
+        // The one geometry-invisible invalidation. When the primitive's item
+        // hash moved `xxh3_64` -> `xxh3_128` (IKPIR `0f3b99b`), the primary
+        // bucket index and the fingerprint started coming from a *different*
+        // digest, so every key now lands somewhere else. Nothing in the
+        // header changes: arity, `ValueCodec`, `bucket_size`,
+        // `fingerprint_bits`, `plaintext_bits` and `num_buckets` are all
+        // byte-identical across the switch, so neither `STORE_ARITY` nor
+        // `check_geometry_lineage` can see it — and an old file would load
+        // clean and then miss on every lookup, answering `0x0` for accounts
+        // that exist (a complete set treats absence as zero, ADR-0015). That
+        // is the silent wrong answer this repo forbids outright, so the file
+        // format's own version is what has to carry the lineage: `RPST3` is
+        // written only by `xxh3_128` builds, and `RPST1`/`RPST2` are refused
+        // here, before a single cell is read.
+        m if m == MAGIC_V1 || m == MAGIC_V2 => {
+            let version = if m == MAGIC_V1 { "RPST1" } else { "RPST2" };
+            return Err(StateError::Corrupt(format!(
+                "state file is {version}, written before the primitive's item hash changed from \
+                 xxh3_64 to xxh3_128 — every key hashes to a different bucket now, so these cells \
+                 no longer describe a filter this binary can read, and loading them would miss on \
+                 every lookup (answering 0x0 for accounts that exist). This is not disk \
+                 corruption, and the geometry is unchanged, which is exactly why nothing cheaper \
+                 catches it; move the --state file aside and re-bootstrap from a fresh snapshot \
+                 (do not restore from backup, the file itself is fine)"
+            )));
         }
-        _ => return Err(StateError::Corrupt("bad magic (not an RPST1/RPST2 state file)".to_string())),
+        _ => {
+            return Err(StateError::Corrupt(
+                "bad magic (not an RPST1/RPST2/RPST3 state file)".to_string(),
+            ));
+        }
     };
     let mut flag = [0u8; 1];
     r.read_exact(&mut flag).map_err(io_err)?;
@@ -536,9 +570,16 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
         filled += take;
     }
 
-    let digest = if checksummed {
-        // v2: the whole-file xxh3 covers every byte read so far. Read the
-        // stored digest *unhashed* (it cannot cover itself) and compare.
+    // The whole-file xxh3 covers every byte read so far. Read the stored
+    // digest *unhashed* (it cannot cover itself) and compare.
+    //
+    // Unconditional since `RPST1`/`RPST2` stopped loading (see the magic
+    // match): every file this binary accepts carries the checksum, so the
+    // `None` arm this used to have is unreachable. `digest` stays an
+    // `Option<u64>` rather than a `u64` only to keep the journal's existing
+    // "no digest to bind to" handling compiling; that arm is now dead and
+    // can be collapsed whenever someone wants the wider change.
+    let digest = {
         let computed = r.hasher.digest();
         let mut stored = [0u8; 8];
         r.read_unhashed(&mut stored).map_err(io_err)?;
@@ -550,8 +591,6 @@ fn parse_raw(reader: impl Read, total_len: u64, codec: &ValueCodec) -> Result<Ra
             )));
         }
         Some(computed)
-    } else {
-        None
     };
 
     // Anything after the cells (+ v2 checksum) is corruption, same
@@ -912,7 +951,7 @@ mod tests {
     fn small_server() -> Server {
         let codec = codec();
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
         let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
     }
@@ -1004,12 +1043,25 @@ mod tests {
         }
     }
 
-    /// A legacy RPST1 file (no trailing checksum) still loads — existing
-    /// deployments upgrade on their next save instead of re-bootstrapping.
-    /// Constructed from a real v2 file: strip the 8-byte trailer, patch
-    /// the magic — that *is* the v1 format.
+    /// Legacy `RPST1` and `RPST2` files are **refused**, by name.
+    ///
+    /// This test used to assert the opposite — that a legacy file still
+    /// loads, so a deployment upgraded on its next save instead of
+    /// re-bootstrapping. That was right while the only difference was the
+    /// trailing checksum. It stopped being right when the pinned
+    /// primitive's item hash moved `xxh3_64` -> `xxh3_128`: every key now
+    /// hashes to a different bucket, so an old file's cells describe a
+    /// filter this binary cannot read, and *nothing in the header says so*
+    /// — arity, codec, `bucket_size`, `fingerprint_bits`, `plaintext_bits`
+    /// and `num_buckets` all match. Loading one would miss on every lookup
+    /// and answer `0x0` for accounts that exist.
+    ///
+    /// Both fixtures are byte-valid at their own version (the `RPST2` one
+    /// is a real saved file, untouched apart from its magic; the `RPST1`
+    /// one additionally has the 8-byte trailer stripped, which *is* the v1
+    /// format), so what rejects them is the version, not their shape.
     #[test]
-    fn legacy_rpst1_still_loads() {
+    fn legacy_rpst1_and_rpst2_are_refused_by_name() {
         let mut server = small_server();
         let addr = keccak256(&[9u8; 20]);
         server
@@ -1017,16 +1069,38 @@ mod tests {
             .unwrap();
         let path = tmp("legacy.bin");
         save(&server, &codec(), false, &path).unwrap();
-
-        let mut bytes = std::fs::read(&path).unwrap();
+        let v3 = std::fs::read(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
-        bytes.truncate(bytes.len() - 8);
-        bytes[..5].copy_from_slice(MAGIC_V1);
 
-        let loaded = load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()).unwrap();
-        assert!(!loaded.complete);
-        assert_eq!(loaded.server.block(), 3);
-        assert_eq!(loaded.server.balance_of(&addr).unwrap(), Some(777));
+        // Sanity: the file we are about to downgrade loads as written.
+        load_bytes(&v3, SimpleConfig::with_lwe_dim(256), &codec())
+            .expect("the current-format fixture must load, or this test proves nothing");
+
+        let mut v1 = v3.clone();
+        v1.truncate(v1.len() - 8);
+        v1[..5].copy_from_slice(MAGIC_V1);
+        let mut v2 = v3.clone();
+        v2[..5].copy_from_slice(MAGIC_V2);
+
+        for (version, bytes) in [("RPST1", v1), ("RPST2", v2)] {
+            match load_bytes(&bytes, SimpleConfig::with_lwe_dim(256), &codec()) {
+                Err(StateError::Corrupt(msg)) => {
+                    assert!(msg.contains(version), "must name the version it found: {msg}");
+                    assert!(msg.contains("xxh3_128"), "must name the cause: {msg}");
+                    assert!(msg.contains("re-bootstrap"), "must name the fix: {msg}");
+                    assert!(
+                        msg.contains("do not restore from backup"),
+                        "the file is intact, not corrupt — must not steer to a backup: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("checksum mismatch"),
+                        "must be refused for its lineage, not misreported as corruption: {msg}"
+                    );
+                }
+                Err(StateError::Io(msg)) => panic!("{version} must be rejected as Corrupt, not Io: {msg}"),
+                Ok(_) => panic!("a {version} state file predates the xxh3_128 switch and must not load"),
+            }
+        }
     }
 
     /// A header that declares more setup bytes than the file holds must be
@@ -1138,7 +1212,7 @@ mod tests {
     fn store_arity_matches_the_compiled_store_type() {
         let codec = codec();
         let num_buckets = 2 * 64;
-        let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+        let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
         let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
         assert_eq!(store.params().arity(), STORE_ARITY);
     }

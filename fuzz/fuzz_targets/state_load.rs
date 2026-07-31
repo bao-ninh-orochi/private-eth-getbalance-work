@@ -1,4 +1,4 @@
-//! `RPST1`/`RPST2` state-file loader under adversarial bytes. State files
+//! `RPST3` state-file loader (and the by-name refusal of legacy `RPST1`/`RPST2`) under adversarial bytes. State files
 //! are operator-trusted in the threat model, but the loader's contract is
 //! the same as every decoder's: a corrupt, truncated, or hostile file is
 //! a clean [`risepir_rpc::state::StateError`] — never a panic and never

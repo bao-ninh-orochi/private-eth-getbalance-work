@@ -78,7 +78,7 @@ attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
 ## Build
 
 Depends on the IKPIR primitive, pinned as a git dependency
-(`bao-ninh-orochi/IKPIR` @ `3d60fa7`, the `perf/optimized` tip) — building needs
+(`bao-ninh-orochi/IKPIR` @ `0f3b99b`, the `perf/optimized` tip) — building needs
 read access to that repo; `.cargo/config.toml` sets `git-fetch-with-cli` (system
 git credentials) and `target-cpu=native` (git deps do **not** inherit the
 upstream perf config).

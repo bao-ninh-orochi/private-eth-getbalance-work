@@ -37,13 +37,13 @@ fn codec() -> ValueCodec {
 /// `tests/journal.rs`'s job), so only *a* valid width matters here, not
 /// this exact one — kept consistent with `small_server` regardless.
 fn plaintext_bits() -> u32 {
-    simple_max_plaintext_bits(64, 4, 32, codec().value_bits(), SimpleParams::DEFAULT_SIGMA)
+    simple_max_plaintext_bits(2, 64, 4, 32, codec().value_bits(), SimpleParams::DEFAULT_SIGMA)
 }
 
 fn small_server() -> Server {
     let codec = codec();
     let num_buckets = 2 * 64;
-    let pb = simple_max_plaintext_bits(num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
+    let pb = simple_max_plaintext_bits(2, num_buckets / 2, 4, 32, codec.value_bits(), SimpleParams::DEFAULT_SIGMA);
     let store = Segmented2aryCuckooKVStore::new(num_buckets, 4, 32, codec.value_bits(), pb).unwrap();
     Server::new(store, SimpleConfig::with_lwe_dim(256), codec, 0)
 }

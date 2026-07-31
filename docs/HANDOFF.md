@@ -12,7 +12,7 @@ keyword-PIR). Work in `/Users/admin/Documents/private-ETH-getBalance` (git repo,
 **Before writing code, read, in order:** `docs/plan.md` (authoritative spec),
 `docs/deploy.md` (the runbook + recorded live evidence), `docs/adr/README.md`
 (decisions; ADR-0017/0018 are the newest), `docs/sync.md`. The PIR primitive is a
-**pinned git dep** (`bao-ninh-orochi/IKPIR` @ `3d60fa7`); a local checkout lives at
+**pinned git dep** (`bao-ninh-orochi/IKPIR` @ `0f3b99b`); a local checkout lives at
 `/Users/admin/Documents/CANS2026/RisePIR` — **read its source for exact signatures;
 never guess an API** (but do not build against the checkout: it moves; the pin is the
 truth).
@@ -181,44 +181,39 @@ the superseded `(3,4)` lineage is stale.
   the delta-ring retention check — a `409` must force a re-download);
   ADR-0033 supplied the sharper lineage-epoch revalidation ADR-0038 is
   actually built against.
-- **The IKPIR pin is one lineage behind, and the analysis for crossing it is
-  already done** *(new, 2026-07-31 — ADR-0042)*. Upstream corrected RisePIR's
-  Lemma 2, widened `fingerprint_bits` to u64, and replaced the
-  `plaintext_bits` selectors with δ_cell-targeted ones. **ADR-0042 re-derived
-  this repo's operating point under the corrected lemma and concluded nothing
-  moves**: κ ≈ 61 today (filter-bound, index term 278 bits slacker), 21 bits
-  past the κ = 40 the lemma targets, and the new selector picks the *same*
-  `plaintext_bits` at all four scales this repo builds. So the bump is a
-  compile-time change here, **not** an operational one — no geometry change,
-  no re-bootstrap, `docs/numbers.md`'s geometry rows unaffected.
+- **~~The IKPIR pin is one lineage behind~~ — DONE 2026-07-31, pin now
+  `0f3b99b`** *(ADR-0042)*. Upstream corrected RisePIR's Lemma 2, widened
+  `fingerprint_bits` to u64, and replaced the `plaintext_bits` selectors with
+  δ_cell-targeted ones. ADR-0042 re-derived this repo's operating point
+  against that rule and concluded **nothing moves**: κ ≈ 61 (filter-bound,
+  index term 278 bits slacker), 21 bits past the κ = 40 the lemma targets.
+  Crossing the pin **confirmed that prediction against the real selector** —
+  `docs/numbers.md`'s §4a geometry rows came back byte-identical, so the
+  deployed `(pb 8, cells/slot 22, 23.62 GB, 553.82 MB, 1.11 GB)` operating
+  point is untouched and no re-bootstrap is owed for *geometry* reasons.
 
-  **It is deferred, not declined, and the blocker is not ours.** As of
-  2026-07-31 `orochi-network/IKPIR` `main` is still `8032a2c`, PR #27 (the
-  u64 fingerprint core) is open but cannot go green because that repo's
-  GitHub Actions allocates no runner, and the parameter-selector PR is
-  unopened. There is therefore **no new `perf/optimized` SHA to pin** — this
-  repo stays at `3d60fa7`, which is correct and still builds. Do not re-pin
-  speculatively.
+  **But the bump does invalidate the live state file, for a different
+  reason.** The item hash moved `xxh3_64` → `xxh3_128`, so every key now
+  lands in a different bucket while the entire header stays byte-identical —
+  arity, codec, `bucket_size`, `fingerprint_bits`, `plaintext_bits`,
+  `num_buckets` all match. Neither `STORE_ARITY` nor ADR-0042's
+  `check_geometry_lineage` can see it, and an old file would load clean and
+  then miss on every lookup, answering `0x0` for accounts that exist. The
+  state format version now carries that lineage: **`RPST2` → `RPST3`**, and
+  `RPST1`/`RPST2` are refused by name before a cell is read. **The VM's
+  24.18 GB state file is an `RPST2` file and must be re-bootstrapped, not
+  restarted** — see `docs/deploy.md` for the migration.
 
-  When a SHA does land, the work is mechanical and scoped: bump `rev` in
-  **both** `Cargo.toml` (3 deps; also fix the stale `042d868` comment at
-  line 11) and `fuzz/Cargo.toml` (2 deps) — a mismatch compiles two
-  different filters into one workspace — keep `ikpir-common`'s
-  `default-features = false`, then adapt **20 `*_max_plaintext_bits` call
-  sites across 9 files** (both selectors gain `arity`; `frodo_*` also gains
-  `bucket_size`/`fingerprint_bits`/`value_bits`). Only **two** of those are
-  production code — both in `Geometry::for_num_buckets`, which ADR-0042
-  factored out of `for_accounts` precisely so the selector is called in one
-  place; the other 18 are test fixtures. Then widen every fingerprint
-  *value* to `u64` (`risepir-server/src/fold.rs`'s `SlotMutation` fields are
-  the non-test ones). Two traps that no compiler will catch: the item hash
-  moves `xxh3_64` → `xxh3_128`, so **every stored artifact and fuzz corpus
-  seed is invalid and must be re-derived, not patched**; and
-  `risepir-proto/src/value.rs`'s comment that the fingerprint is "32 bits
-  (unchanged upstream)" becomes false — that same paragraph is what
-  documents the fp/`key_tag` hash independence ADR-0042 shows is
-  load-bearing, so it must be rewritten to describe `xxh3_128`'s low 64
-  bits, not merely deleted.
+  What the adaptation actually cost, for the next time: `rev` in both
+  `Cargo.toml` (3 deps) and `fuzz/Cargo.toml` (2 deps); **20**
+  `*_max_plaintext_bits` call sites across 9 files, of which only **two**
+  were production (both in `Geometry::for_num_buckets`); the client's
+  `ct_eq_u32_mask` collapsed into `ct_eq_u64_mask` now that fingerprints are
+  `u64`; two birthday-search `HashMap` keys widened; and three **Frodo**
+  `plaintext_bits` pins moved (11→10, 8→7) because Eq. 8's weak tail was
+  replaced by an explicit Bernstein tail. **Every SimplePIR pin held** —
+  which is the backend this repo deploys (ADR-0002), and why the geometry
+  survived.
 - **Web front end, remaining deferrals** (ADR-0019 records why, and what each
   needs): ~~public exposure~~ (shipped, PR #5); and serving the page from a
   *different* party than the PIR server, which is the stronger arrangement for

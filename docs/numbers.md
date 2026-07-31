@@ -1,19 +1,19 @@
 # RisePIR numbers table — Stage 3 (measured)
 
 Machine: 8-core Apple Silicon, 16 GB RAM, target-cpu=native (.cargo/config.toml)
-Date: 2026-07-27
+Date: 2026-07-31
 Config: arity 2, bucket_size 4, fingerprint_bits 32, value = key_tag(32) ‖ balance(96) ‖ checksum(16) = 144 bits (ADR-0009), lwe_dim 1275 / sigma 6.4 (`SimpleConfig::default()`), mock seed 0xB0DAC0DE5CA1E000
 Every number below is measured with `std::time::Instant` against a real, built `RisePirServer` — except the byte sizes in §4, which are computed from `Geometry::sizes` (deterministic, not timed).
 
-**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers here are measured against the workspace's pinned IKPIR `perf/optimized` rev (`3d60fa7`, 2026-07-21 — see the root `Cargo.toml`), with the default-on `parallel` feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite this file, and only do so from a build against the pinned rev — bump the rev and these numbers together, never separately.
+**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers here are measured against the workspace's pinned IKPIR `perf/optimized` rev (`0f3b99b`, 2026-07-31 — see the root `Cargo.toml`), with the default-on `parallel` feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite this file, and only do so from a build against the pinned rev — bump the rev and these numbers together, never separately.
 
 ## 1. Full-rebuild time (the headline denominator)
 
 | accounts | full rebuild (measured) |
 |---:|---:|
-| 100,000 | 0.029 s |
-| 1,000,000 | 0.657 s |
-| 9,437,184 | 9.955 s |
+| 100,000 | 0.032 s |
+| 1,000,000 | 0.672 s |
+| 9,437,184 | 9.391 s |
 
 ## 2. Per-block patch time vs. mutations/block (K), at 1,000,000 accounts
 
@@ -21,11 +21,11 @@ Each point: 5 warm-up blocks discarded, then 10 measured blocks averaged (`docs/
 
 | K (mutations/block) | patch time (ms/block, measured) |
 |---:|---:|
-| 50 | 1.6999 |
-| 150 | 2.4432 |
-| 300 | 2.8230 |
-| 600 | 4.4472 |
-| 1200 | 7.0366 |
+| 50 | 1.5716 |
+| 150 | 2.3967 |
+| 300 | 3.0618 |
+| 600 | 4.4983 |
+| 1200 | 10.8046 |
 
 ## 3. Per-block delta bytes: compact vs. naive (K≈300, 1,000,000 accounts, realistic wei-scale balances)
 
@@ -33,7 +33,7 @@ Each point: 5 warm-up blocks discarded, then 10 measured blocks averaged (`docs/
 |---|---:|
 | nonzero cells in delta | 2,724 |
 | naive (10 B/cell, upstream `u16`+`i64`) | 27.24 KB (27,240 B) |
-| compact (`BlockDelta::encoded_len`, varint/zigzag) | 8.13 KB (8,135 B) |
+| compact (`BlockDelta::encoded_len`, varint/zigzag) | 8.12 KB (8,125 B) |
 | compaction ratio | 3.35× |
 
 ## 4. Hint / query / response / A / server-DB sizes, and client memory
@@ -78,7 +78,7 @@ One caveat for the *browser* specifically: this table is steady state, and a tab
 | metric | value |
 |---|---:|
 | queries measured | 20 |
-| avg `server.answer(&queries)` latency | 3.3489 ms |
+| avg `server.answer(&queries)` latency | 3.6276 ms |
 
 ## 6. The headline: full rebuild ÷ per-block patch (K≈300)
 
@@ -86,9 +86,9 @@ Duty cycle assumes a 12 s block (`docs/plan.md` §7's framing — the honest mea
 
 | accounts | full rebuild | per-block patch (K≈300) | ratio (rebuild ÷ patch) | duty cycle @ 12s block |
 |---:|---:|---:|---:|---:|
-| 100,000 | 0.029 s | 1.4266 ms | 20× | 0.0119% |
-| 1,000,000 | 0.657 s | 2.8230 ms | 233× | 0.0235% |
-| 9,437,184 | 9.955 s | 3.8505 ms | 2585× | 0.0321% |
+| 100,000 | 0.032 s | 1.4840 ms | 21× | 0.0124% |
+| 1,000,000 | 0.672 s | 3.0618 ms | 219× | 0.0255% |
+| 9,437,184 | 9.391 s | 4.2336 ms | 2218× | 0.0353% |
 
 ## 7. The complete mainnet set (200,503,969 accounts)
 
@@ -115,9 +115,9 @@ Per-block patch time is *not* holding flat here — it grows from single-digit t
 - Run A (the contaminated run, not tabulated above) fits the same way to a smaller extrapolated ratio — consistent with treating this as an order-of-magnitude statement, not a precise one.
 - Cross-check, itself EXTRAPOLATION: dividing the deployment's own measured 1236.5 s full rebuild by the ~2 × 10^4 extrapolated ratio implies a per-block patch of roughly 62 ms (55–75 ms, allowing for the extrapolation's own uncertainty) at 200,503,969 accounts on that host — a figure nobody has measured (see "instrumentation now exists" below).
 
-**Honest summary.** The 2585× this file publishes for 9,437,184 accounts (§6) understates the argument at deployment scale by roughly 8×; a 10^5 claim (the original brief's assumption) would overstate it. The defensible statement today is: **on the order of 10^4, and rising with N.**
+**Honest summary.** The 2218× this file publishes for 9,437,184 accounts (§6) understates the argument at deployment scale by roughly 9×; a 10^5 claim (the original brief's assumption) would overstate it. The defensible statement today is: **on the order of 10^4, and rising with N.**
 
-**Reproducibility note.** Two historical runs on 2026-07-27 — Run A (contaminated by competing cargo builds) and Run B (quoted above), both this module's pre-ADR-0034 `(arity 3, bucket_size 4)` — measured answer latency at 1,000,000 accounts (5.5713 ms) and full-rebuild time at 9,437,184 accounts (10.559 s), uniformly slower than the 2026-07-22 `(3,4)` baseline this file used to publish (2.6845 ms and 6.677 s respectively — fixed historical citations, not this file's own current §1/§5, which may since be a different geometry and a different day). This run's own figures at the same two scales — 9.955 s (§1) and 3.3489 ms (§5) — are a third, independent data point in that same run-to-run variance. That gap is machine-state variance on this laptop, not a code change — which is exactly why §1–§6 above are always this run's own fresh measurements rather than a value anyone hand-maintains to match them: comparing any two runs of this file is meaningful only in *shape* (the trend, the ratio), never in absolute terms. See the same-machine control below for a same-day, same-machine comparison that isolates the geometry's own effect from exactly this kind of variance.
+**Reproducibility note.** Two historical runs on 2026-07-27 — Run A (contaminated by competing cargo builds) and Run B (quoted above), both this module's pre-ADR-0034 `(arity 3, bucket_size 4)` — measured answer latency at 1,000,000 accounts (5.5713 ms) and full-rebuild time at 9,437,184 accounts (10.559 s), uniformly slower than the 2026-07-22 `(3,4)` baseline this file used to publish (2.6845 ms and 6.677 s respectively — fixed historical citations, not this file's own current §1/§5, which may since be a different geometry and a different day). This run's own figures at the same two scales — 9.391 s (§1) and 3.6276 ms (§5) — are a third, independent data point in that same run-to-run variance. That gap is machine-state variance on this laptop, not a code change — which is exactly why §1–§6 above are always this run's own fresh measurements rather than a value anyone hand-maintains to match them: comparing any two runs of this file is meaningful only in *shape* (the trend, the ratio), never in absolute terms. See the same-machine control below for a same-day, same-machine comparison that isolates the geometry's own effect from exactly this kind of variance.
 
 **Same-machine control (2026-07-27).** §1–§6 above are this run's own fresh measurements at the now-deployed `(arity 2, bucket_size 4)` geometry (ADR-0034) — a different geometry, and very possibly a different day, from the 2026-07-22 `(arity 3, bucket_size 4)` table this file used to publish before ADR-0034, so comparing the two naively conflates both changes at once. To separate them, this laptop ran both configurations back to back, otherwise idle, at `BenchConfig::default()`'s three scales — measured *before* the run that produced §1–§6 above, so this control's own `(2,4)` column differs from whatever §1/§5/§6 actually show by however much the machine's load changed between the two runs, not by a code or geometry change: exactly the run-to-run variance this control exists to expose, not a discrepancy to reconcile.
 

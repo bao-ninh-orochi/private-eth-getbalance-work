@@ -39,7 +39,9 @@ today** and there is a **live GCP deployment** (below).
 ## Build & test
 
 - The PIR primitive is a **pinned git dep**: `bao-ninh-orochi/IKPIR` @
-  `3d60fa7` (`perf/optimized` tip, 2026-07-21). Needs read access to that private repo;
+  `0f3b99b` (`perf/optimized` tip, 2026-07-31 — the f=64 / corrected-Lemma-2
+  merge; ADR-0042 kept this repo at `fingerprint_bits = 32`, so the bump moved
+  no geometry). Needs read access to that private repo;
   `.cargo/config.toml` sets `git-fetch-with-cli` + `target-cpu=native`. The
   local checkout at `../CANS2026/RisePIR` drifts — read it for API signatures,
   **never** path-dep it.
@@ -217,6 +219,28 @@ so the "rollback" it offered was never a restart, it was a code revert to the
 bootstrap is the honest path if `(2,4)` ever needs reverting. Both lineages
 now agree on `(2,4)`, so a plain restart works again; the trap is live for the
 *next* geometry change, not for this one.
+
+**A third trap, and the nastiest, since the `0f3b99b` pin (2026-07-31): a
+change to the *hash* is invisible to every guard that checks the
+*geometry*.** The pin bump moved the primitive's item hash from `xxh3_64` to
+`xxh3_128`, so every key lands in a different bucket — while `arity`, the
+`ValueCodec`, `bucket_size`, `fingerprint_bits`, `plaintext_bits` and
+`num_buckets` all stay byte-identical. `STORE_ARITY` and
+`check_geometry_lineage` cannot see it *by construction*: they compare
+parameters, and the parameters are still correct. An old file would have
+loaded clean and then missed on every lookup — `0x0` for accounts that exist,
+across the whole set. So the **state format version** carries the hash lineage
+now: `RPST2` → **`RPST3`**, and `RPST1`/`RPST2` are refused by name before a
+cell is read (ADR-0042's outcome note). The general lesson: a guard that
+compares parameters cannot catch a change in the *function* those parameters
+configure — only the format version can.
+
+**The live VM's `~/risepir-state.bin` is an `RPST2` file, so it is now
+unloadable and the box needs a re-bootstrap, not a restart** — deploy.md §4
+"Migration: the `xxh3_128` pin bump" has the sequence, the projected ~16 min
+plus hours of replay, and why there is no rollback that is a restart. It has
+**not** been run; the VM is still `TERMINATED` and was left that way
+deliberately.
 
 (The external IP changes across stop/start — hence `duckdns-update.sh`, whose
 empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel

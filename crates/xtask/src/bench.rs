@@ -1397,7 +1397,7 @@ impl BenchReport {
             out,
             "**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers \
              here are measured against the workspace's pinned IKPIR `perf/optimized` rev \
-             (`3d60fa7`, 2026-07-21 — see the root `Cargo.toml`), with the default-on `parallel` \
+             (`0f3b99b`, 2026-07-31 — see the root `Cargo.toml`), with the default-on `parallel` \
              feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports \
              substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte \
              figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to \

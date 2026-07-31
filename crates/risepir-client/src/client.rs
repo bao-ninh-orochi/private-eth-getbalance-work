@@ -406,7 +406,7 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
             for s in 0..bucket_size {
                 let slot = &cells[s * cps..(s + 1) * cps];
                 let (decoded_fp, value_bytes) = unpack_slot_cells(&self.params, slot);
-                let mask = ct_eq_u32_mask(decoded_fp, fp) as u64
+                let mask = ct_eq_u64_mask(decoded_fp, fp)
                     & ct_eq_u64_mask(self.value_codec.extract_key_tag(&value_bytes), key_tag);
                 let mask8 = (mask & 0xFF) as u8;
                 for (a, v) in acc.iter_mut().zip(value_bytes.iter()) {
@@ -423,21 +423,17 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
     }
 }
 
-/// Branchless `u32` equality mask: `0xFFFF_FFFF` if `a == b`, else `0`.
-/// Same trick `IkpirClient::decode` uses, so the scan stays
-/// side-channel hardened in exactly the same way.
-#[inline]
-const fn ct_eq_u32_mask(a: u32, b: u32) -> u32 {
-    let x = a ^ b;
-    ((x | x.wrapping_neg()) >> 31).wrapping_sub(1)
-}
-
 /// Branchless `u64` equality mask: `0xFFFF_FFFF_FFFF_FFFF` if `a == b`,
-/// else `0`. Same trick as [`ct_eq_u32_mask`], widened to 64 bits — used
-/// to fold [`RisePirClient::finish`]'s per-slot `key_tag` check into the
-/// same branchless select as the fingerprint check, so the two can be
-/// ANDed into one joint mask (see that method's docs) without ever
-/// materialising an intermediate branch on either check alone.
+/// else `0`. Same trick `IkpirClient::decode` uses, so the scan stays
+/// side-channel hardened in exactly the same way.
+///
+/// One helper covers both halves of [`RisePirClient::finish`]'s per-slot
+/// test, so the fingerprint check and the `key_tag` check are ANDed into
+/// one joint mask (see that method's docs) without ever materialising an
+/// intermediate branch on either alone. Until the fingerprint widened to
+/// `u64` upstream this needed a `u32` twin and a widening cast on the
+/// fingerprint side; both are gone, and the two checks now meet at the
+/// same width by construction rather than by conversion.
 #[inline]
 const fn ct_eq_u64_mask(a: u64, b: u64) -> u64 {
     let x = a ^ b;
@@ -511,6 +507,7 @@ mod tests {
     impl BackendTestSetup for SimplePirBackend {
         fn plaintext_bits(segment_rows: u32) -> u32 {
             simple_max_plaintext_bits(
+                ARITY,
                 segment_rows,
                 BUCKET_SIZE,
                 FINGERPRINT_BITS,
@@ -525,7 +522,13 @@ mod tests {
 
     impl BackendTestSetup for FrodoPirBackend {
         fn plaintext_bits(segment_rows: u32) -> u32 {
-            frodo_max_plaintext_bits(segment_rows)
+            frodo_max_plaintext_bits(
+                ARITY,
+                segment_rows,
+                BUCKET_SIZE,
+                FINGERPRINT_BITS,
+                KEY_TAG_BITS + BALANCE_BITS + CHECKSUM_BITS,
+            )
         }
         fn small_config() -> FrodoConfig {
             FrodoConfig::with_lwe_dim(LWE_DIM)
@@ -1058,6 +1061,7 @@ mod tests {
         let value_bits = codec.value_bits();
         let segment_rows = NUM_BUCKETS / ARITY;
         let plaintext_bits = simple_max_plaintext_bits(
+            ARITY,
             segment_rows,
             BUCKET_SIZE,
             WEAK_FP_BITS,

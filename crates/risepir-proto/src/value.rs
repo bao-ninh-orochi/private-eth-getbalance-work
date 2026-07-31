@@ -8,15 +8,28 @@
 //! silent-wrong-answer paths at once:
 //!
 //! 1. **False positives.** The Segmented Cuckoo Filter's own positioning
-//!    fingerprint is only 32 bits (`fingerprint_bits`, unchanged upstream)
-//!    — a query for a nonexistent account can land on a slot whose
-//!    fingerprint happens to collide, at a ~2⁻²⁸ rate. [`ValueCodec::key_tag`]
-//!    is a *second*, independently-seeded 32-bit-class hash of the same
-//!    address, carried inside the value bytes (which are opaque to the
-//!    cuckoo store). Requiring both to agree extends the effective
-//!    fingerprint to 64 bits (~2⁻⁶⁰) with **no upstream change** — see
-//!    ADR-0009 for why this beats widening the store's own fingerprint
-//!    type.
+//!    fingerprint is 32 bits here (`fingerprint_bits`) — a query for a
+//!    nonexistent account can land on a slot whose fingerprint happens to
+//!    collide, at a **2⁻²⁹·⁴²** rate at the deployed geometry.
+//!    [`ValueCodec::key_tag`] is a *second*, independently-seeded
+//!    32-bit-class hash of the same address, carried inside the value bytes
+//!    (which are opaque to the cuckoo store). Requiring both to agree
+//!    extends the effective fingerprint to 64 bits, dropping that to
+//!    **2⁻⁶¹·⁴²**.
+//!
+//!    32 is now a **choice, not a ceiling.** Upstream supports
+//!    `fingerprint_bits` up to 64, so the "no upstream change" argument
+//!    ADR-0009 originally rested on no longer applies; ADR-0042 re-derived
+//!    the operating point under RisePIR's corrected Lemma 2 and kept 32
+//!    anyway, because widening to 64 buys margin nobody can spend and costs
+//!    18% on every size — while *retiring* `key_tag` for a 64-bit
+//!    fingerprint is exactly size- and error-neutral, so it buys nothing
+//!    either. Read ADR-0042 before changing this number.
+//!
+//!    Note what those two rates mean together: without `key_tag` this
+//!    deployment sits at κ ≈ 29.4, **below** the κ = 40 the corrected lemma
+//!    targets. The tag is not hardening on top of an adequate fingerprint —
+//!    it is the entire margin.
 //! 2. **Balance corruption.** LWE decode noise can corrupt a value cell
 //!    while the fingerprint (and `key_tag`) cells stay intact, in which
 //!    case an unprotected scheme would return a *plausible, silently
@@ -72,16 +85,28 @@ pub enum Lookup {
 
 /// Seed for [`ValueCodec::key_tag`]'s hash. **Must be nonzero** and must
 /// differ from the Segmented Cuckoo Filter's own positioning fingerprint,
-/// which is the low bits of `xxh3_64(address)` — i.e. `xxh3_64_with_seed`
-/// with an *implicit* seed of `0`
-/// (`segmented_cuckoo::hash::hash_and_i1`/`extract_fingerprint`). Using a
-/// distinct nonzero seed here — rather than seed `0` again — is what makes
-/// the value's `key_tag` statistically independent of the store's own
-/// fingerprint even though both hash the exact same 32 address bytes; that
-/// independence is what lets the two 32-bit-class tags combine into a
-/// 64-bit-effective fingerprint (ADR-0009) instead of just checking the
-/// same 32 bits twice. Value has no other significance; any fixed nonzero
-/// `u64` works, this one spells "RISE_TAG" in ASCII.
+/// which is drawn from the low 64 bits of the **unseeded `xxh3_128`**
+/// digest of the address (`segmented_cuckoo::hash::hash_and_i1` returns
+/// `(u128, u64, u32)` — the full digest, the fingerprint from its low half,
+/// and the primary bucket index from its high half; `extract_fingerprint`
+/// then narrows to `fingerprint_bits`).
+///
+/// Using a distinct nonzero seed here — and a different xxh3 width — is
+/// what makes the value's `key_tag` statistically independent of the
+/// store's own fingerprint even though both hash the exact same 32 address
+/// bytes. **That independence is a load-bearing correctness assumption,
+/// not an implementation detail** (ADR-0042): it is what lets the two
+/// 32-bit-class tags compose into 64-bit-effective agreement in the
+/// corrected Lemma 2's filter term, `|H|·2⁻⁽ᶠ⁺³²⁾/s`, instead of checking
+/// the same 32 bits twice. Break it and the deployment silently drops from
+/// κ ≈ 61 to κ ≈ 29.
+///
+/// The upstream digest moved `xxh3_64` -> `xxh3_128` (IKPIR `0f3b99b`),
+/// which is why the description above changed; the independence argument
+/// is unaffected, since a seeded `xxh3_64` and an unseeded `xxh3_128`
+/// remain different functions. The seed value itself has no other
+/// significance; any fixed nonzero `u64` works, this one spells "RISE_TAG"
+/// in ASCII.
 const KEY_TAG_SEED: u64 = 0x5249_5345_5f54_4147;
 
 /// Packs/unpacks `key_tag ‖ balance ‖ checksum` as a little-endian

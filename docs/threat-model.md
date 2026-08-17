@@ -117,20 +117,104 @@ front of a loopback-only `:8645`, deploy.md §3.7), which closes the on-path
 gap above — and, in closing it, names the parties. *Who* is now trusted is
 worth being explicit about, because it is more than "the operator":
 
-- **Whoever controls the DNS record.** The hostname is a free DuckDNS
-  subdomain. Anyone holding the DuckDNS token — and DuckDNS itself — can
-  repoint it at another machine and obtain a valid certificate for it, since
-  DNS control is the whole of what Let's Encrypt verifies. They would then
-  serve a wasm client of their choosing under this name.
+- **Whoever controls the DNS record.** Anyone who can repoint the hostname at
+  another machine can obtain a valid certificate for it, since DNS control is
+  the whole of what Let's Encrypt verifies. They would then serve a wasm
+  client of their choosing under this name.
 - **The CA.** A mis-issued certificate has the same effect.
 - Both are the *same category* as ADR-0019's disclosed code-delivery trust —
   the page's crypto is delivered by the party serving the page — just widened
   from one party to three. TLS does not remove that trust; it makes it
   attributable to named parties rather than to anyone on the path.
 
-A deployment that wants to reduce this buys a domain it controls, or serves
-the page from a different party than the PIR server (ADR-0019's stronger
-arrangement, which needs CORS the PIR routes do not currently emit).
+**As of 2026-08-17 the name is `demo.risepir.org`, a registered domain**
+(deploy.md §3.7), which is the "buys a domain it controls" mitigation this
+section used to only recommend. It does not remove the trust above — DNS
+control still implies certificate control, inherently — but it shrinks and
+hardens the set of parties who hold it:
+
+- **Out:** DuckDNS, a free service authenticated by a bearer token with no
+  second factor, plus a subdomain the operator never owned.
+- **In:** Cloudflare, as registrar and DNS for a domain held on an account
+  with 2FA and a registrar lock (`clientTransferProhibited`).
+- **New, and not previously available on a free subdomain:** DNSSEC on the
+  zone, and CAA records — which narrow "any of ~50 public CAs may issue for
+  this name" to five.
+
+  Five, not one, and the gap is worth recording because it is invisible in the
+  dashboard. The zone's own CAA record is `0 issue "letsencrypt.org"`, but
+  Cloudflare **injects additional CAA records authorising its own CAs** the
+  moment any CAA record exists in a zone it serves, so that Universal SSL can
+  still issue. Those injected records do not appear in the DNS UI — `dig CAA
+  risepir.org` returns eleven records where the dashboard lists two. The
+  effective issuer set is Let's Encrypt, Google Trust Services, SSL.com,
+  Sectigo and DigiCert. They cannot be removed without disabling Universal SSL
+  for the whole zone.
+
+  For the same reason the zone's `0 issuewild ";"` is **inert**: CAA is a union
+  of permissions rather than a veto, so an injected `issuewild "letsencrypt.org"`
+  authorises wildcards regardless of what `;` says. Read the policy with `dig`,
+  never from the dashboard — this is a case where the UI and the DNS disagree.
+
+One deliberate non-change belongs here, because it is the obvious future
+"optimization" that would silently undo the above: the `demo.` record is
+**DNS-only (unproxied)** at Cloudflare. Enabling the proxy would terminate
+TLS at Cloudflare and re-add exactly one party to the code-delivery chain
+this section exists to enumerate. PIR queries are LWE ciphertexts and stay
+private under a proxy; the wasm client is what must not gain a party. Any
+future CDN for `/setup` (roadmap C5) must therefore serve *the bundle*
+without becoming the origin for *the page*.
+
+Reducing this further means serving the page from a different party than the
+PIR server (ADR-0019's stronger arrangement, which needs CORS the PIR routes
+do not currently emit), or delivering the client through a channel the server
+operator cannot vary per-visitor.
+
+**A second name, and a second party, since 2026-08-17 (ADR-0043).** The zone
+apex `risepir.org` — the URL a paper cites — is an always-on static page on
+**Cloudflare Pages**, so that a cited link resolves while the demo VM is
+stopped. Three things about it belong in this section:
+
+- **It is not the mitigation named in the paragraph above.** That mitigation
+  is *the demo's own page* served by a party other than the PIR server. This
+  is a *different page* answering a different question. The demo's page and
+  its PIR transport remain on one hostname with `connect-src 'self'`. Do not
+  read ADR-0043 as having reduced the code-delivery trust; it has not.
+- **It delivers no client**, makes no PIR query, and holds no key, so it sits
+  outside the code-delivery boundary this section enumerates. What it *can* do
+  is send a reader somewhere other than the real demo, or show screenshots
+  that lie. That is a genuine capability, and it is **undefended** — but it is
+  strictly more visible than a modified wasm client: a wrong destination is
+  legible in the address bar, where tampered client bytes are legible to
+  nobody who does not audit them.
+- **It adds no party who was not already trusted.** Cloudflare is already this
+  zone's registrar and DNS, so the account that could serve a bad apex page
+  could already repoint `demo.` itself. The marginal exposure is a cheaper and
+  more visible route to a class of harm this section already attributes to the
+  Cloudflare account — not a new class.
+
+The apex is a **proxied** Pages record, unavoidably, since that is how Pages
+serves at all; its certificate comes from Google Trust Services under the
+CAA records Cloudflare injects. That is acceptable precisely because no
+cryptographic client is delivered there. It changes nothing about `demo.`,
+which stays a **DNS-only, unproxied `A` record** for the reason above.
+
+**One thing the apex does that is worth naming, because it was not asked
+for.** Cloudflare injects its own analytics beacon
+(`static.cloudflareinsights.com/beacon.min.js`) into the apex page at the
+edge. It is absent from the source and absent from a plain `curl` — it
+appears only for requests carrying a browser `User-Agent`, which is why it
+is easy to miss. It is zone-level Web Analytics, not a Pages project setting
+(`web_analytics_tag` on the project is `null`), so turning it off is a
+dashboard action on the zone. Until it is off, the apex page **discloses it
+in its own trust section**: a page that asks a reader to care who serves it
+cannot quietly ship a third-party script it never mentions. This is a
+privacy wart on a marketing page, not a break in any PIR property — no
+cryptographic client, no query, and no key is delivered there — but a
+project that documents its trust this carefully should not have to be told
+about its own beacon by an auditor.
+
+None of this reaches `demo.`, which is unproxied end to end.
 
 ## 5. Adversary: a network / traffic observer
 
@@ -232,7 +316,8 @@ the address and undoes the system. It is an operator audit tool, full stop.
 |---|---|
 | Operator forges a balance | **undefended** (§4.2) — trust assumption, stated |
 | On-path attacker replaces the session | closed for the public deployment by TLS (§4.2); still open for any plaintext-HTTP or SSH-tunnel-less use |
-| DNS/CA holder serves a modified client under the deployment's name | **undefended** (§4.2) — free-subdomain provider, its token, and the CA are all in the code-delivery chain |
+| DNS/CA holder serves a modified client under the deployment's name | **undefended, narrowed** (§4.2) — inherent: DNS control implies certificate control. Since 2026-08-17 the chain is a registered domain on a 2FA'd, transfer-locked registrar account rather than a free subdomain and its bearer token, with DNSSEC on the zone and CAA narrowing the issuer set from ~50 CAs to five (not one — the DNS provider injects records for its own CAs; §4.2). The `demo.` record stays **unproxied** so no TLS-terminating CDN rejoins the chain |
+| Apex-page host (`risepir.org`, Cloudflare Pages) sends a reader to the wrong demo, or shows false screenshots | **undefended** (§4.2, ADR-0043) — but it delivers no client and holds no key, and a wrong destination is visible in the address bar where a tampered wasm client is visible to nobody. Adds no party: Cloudflare is already this zone's registrar and DNS, so the same account could already repoint `demo.` |
 | Traffic analysis / timing correlation | **undefended** (§5) |
 | `GET /metrics`/`GET /status` publish aggregate request-rate, error-rate, block-lag, and answer-latency metadata publicly | **same status as traffic analysis above, now ask-able without a network position** (§5, ADR-0039) — every field is an aggregate, never per-query, and the latency histogram is timing-side-channel-safe by construction |
 | Feed poisoning between reconcile checkpoints | detected with lag, sampled (§6) |

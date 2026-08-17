@@ -3330,3 +3330,86 @@ one's analysis and corrects one of its consequences.
 - **The live deployment therefore does need a re-bootstrap** — not because
   anything this ADR decided moved, but because the artifact predates the hash
   switch. `docs/deploy.md` carries the migration and its measured cost.
+
+### ADR-0043 — An always-on static apex page at `risepir.org`, served by a party other than the PIR origin **[NEW — closes `docs/roadmap.md`'s C2 remaining item; is not ADR-0019's stronger "different party" code-delivery mitigation, and must not be read as such]**
+
+**The problem.** The VM costs **$8.60/day** running (deploy.md §2.3) and is
+stopped between rounds precisely because that is the affordable way to run
+a demo box rather than a production fleet. `demo.risepir.org` therefore
+fails closed **hard** when it is off: nothing is listening on `:443`, so a
+reader clicking a cited link gets a TLS/connection error, not a "the demo
+is asleep, here is what it showed" page. A URL printed in a published paper
+cannot behave that way — the citation has to resolve to *something* long
+after the paper ships, regardless of whether anyone has paid to keep the
+demo VM up that week. deploy.md §3.7 already flags this in passing, and
+`docs/roadmap.md`'s C2 entry names it directly as "the top of this rung's
+remaining work" the moment the registered-domain mitigation landed: "an
+always-on apex page at `risepir.org` that is not this VM, so a cited URL
+survives the VM being stopped and its certificate lapsing."
+
+**The decision.** Serve a static page from the bare domain (`risepir.org`
+and `www`) on **Cloudflare Pages** — free, always on regardless of what the
+VM is doing, and Cloudflare is *already* the registrar and DNS operator for
+the zone (deploy.md §3.7), so this adds **no new party** to the set that
+can already redirect this name: whoever could already repoint
+`risepir.org`'s DNS could already have sent a reader anywhere they liked.
+The page carries no cryptographic client and makes no PIR queries of its
+own — it is prose, a link to `https://demo.risepir.org`, and screenshots of
+a real lookup, so a reader gets the result the demo would show even while
+the machine behind that link is stopped.
+
+**Why this does not weaken ADR-0019.** ADR-0019's disclosed trust is
+*code-delivery*: whoever serves the page that builds the PIR query chooses
+what that client does. The apex page delivers **no client** — it is static
+HTML with a link and some images, nothing that calls
+`crypto.getRandomValues`, nothing that makes a request on the reader's
+behalf. The demo's own page and its PIR transport are untouched by this
+decision: still one hostname, still `connect-src 'self'`. `docs/threat-model.md`
+§4.2 is explicit about what *would* reduce the code-delivery trust further:
+"serving the page from a different party than the PIR server." It is worth
+being precise here, because conflating the two is exactly the kind of
+silent drift this ADR log exists to prevent: **this ADR is not that
+mitigation.** It stands up a *different* page that answers a *different*
+question — where is the demo, and what does it show — not the demo's own
+page moved to a second host.
+
+**The new trust this introduces, named rather than glossed.** The apex page
+becomes the party a reader reaches *first*, and the one whose link sends
+them on to the demo. Cloudflare Pages could serve a page whose link points
+somewhere else, or whose screenshots lie — that is a real capability handed
+to a real party, and this ADR does not pretend otherwise. It is weaker than
+the code-delivery trust ADR-0019 already discloses: a wrong link is visible
+to anyone who reads the address bar or the anchor text before clicking,
+where a subtly modified wasm client is invisible to everyone who does not
+audit the bytes. It is also not much of a *marginal* addition, because a
+Cloudflare account compromise already reaches the whole zone — DNS included
+— so the same compromise could already repoint the `demo.` record itself
+(`docs/threat-model.md` §4.2). What this decision adds is a cheaper, more
+visible way to cause a class of harm the threat model already treats the
+Cloudflare account as capable of.
+
+**The alternative considered and rejected: serve the apex from the VM's own
+Caddy.** Folding `risepir.org` into the Caddyfile that already serves
+`demo.risepir.org` would tie the apex page's uptime to the VM's uptime —
+exactly the failure this ADR exists to remove. A mitigation for "the demo
+goes to sleep" that itself goes to sleep with the demo is not a mitigation.
+
+**What this explicitly does not change.** The `demo.` record stays DNS-only
+/ unproxied at Cloudflare, exactly as deploy.md §3.7 and `docs/threat-model.md`
+§4.2 require — this decision adds a Pages deployment at the zone apex, it
+does not touch the `demo.` `A` record or put Cloudflare's proxy in front of
+it. No CDN fronts the demo page or the PIR transport. The PIR routes still
+emit no CORS headers, and nothing here needs them to.
+
+The landing page restates ADR-0019's residual-trust disclosure in its own
+section rather than assuming a reader who lands on the apex will eventually
+find it on the demo page — so the disclosure travels with the canonical URL
+a paper would cite, not only with the page that happens to serve the
+working demo.
+
+**Status:** decided **and deployed** 2026-08-17. `risepir.org` and
+`www.risepir.org` are live on Cloudflare Pages, verified serving over a valid
+certificate **while the VM was in `TERMINATED` state** — the one condition that
+actually tests the claim, since a page that only works while the demo is up
+would not have solved anything. Evidence, including the certificate and the
+simultaneous `demo.` timeout, is in deploy.md §3.7; roadmap C2 is closed by it.

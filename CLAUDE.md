@@ -150,16 +150,35 @@ at K ≈ 310** while following the head (8.2–8.8 ms during catch-up, when the
 cache is warmer). `docs/numbers.md` §7 carries the table and what it does to
 §6's ratio.
 
-It is **public** at <https://private-eth-getbalance.duckdns.org> (Caddy + Let's
-Encrypt in front of a loopback-only `:8645`; deploy.md §3.7). Only 80/443 are
-open — `:8545` and `:8645` are never reachable from outside (re-verified
-2026-07-26).
+It is **public** at <https://demo.risepir.org> (Caddy + Let's Encrypt in front
+of a loopback-only `:8645`; deploy.md §3.7), with the old
+`private-eth-getbalance.duckdns.org` still served alongside it during the
+overlap. Only 80/443 are open — `:8545` and `:8645` are never reachable from
+outside (re-verified 2026-08-17, §5.9, with `:443` as a positive control —
+a timeout on the private ports means nothing unless the public one answered
+from the same machine at the same time).
+
+**The URL to cite is <https://risepir.org>, not `demo.`** Since 2026-08-17
+(ADR-0043) the apex is an always-on static page on Cloudflare Pages — *not*
+this VM — so a cited link resolves on the many days the VM is stopped. It
+carries the numbers, screenshots of a real lookup, and ADR-0019's
+residual-trust disclosure, and links onward to the demo. `demo.` is the
+intermittently-available origin and fails hard when the VM is off, which is
+exactly why the apex exists.
+
+Since **2026-08-17** the VM holds the reserved static IP **`136.115.93.177`**,
+so the address no longer moves across stop/start and there is **no DNS step in
+the start path** — the old "run `duckdns-update.sh` *first*, the IP just
+changed" rule is gone. The `demo.` record is deliberately **DNS-only
+(unproxied)** at Cloudflare: proxying would terminate TLS at a third party that
+could then serve a modified wasm client, which is exactly the code-delivery
+trust ADR-0019 discloses (threat model §4.2). Never turn the orange cloud on
+for it.
 
 ```bash
 gcloud --quiet compute ssh risepir --command='...'
-# resume after a stop — the DNS refresh comes first, the IP just changed:
+# resume after a stop — the IP is static now, so no DNS refresh:
 gcloud compute instances start risepir
-gcloud --quiet compute ssh risepir --command='~/duckdns-update.sh'
 # normal restart: the 36 GB state file is loaded, then missed blocks replay
 gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
   "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet \
@@ -259,9 +278,9 @@ is live for the *next* hash change, not for this one. The superseded
 (24.18 GB each) are evidence only — no binary from this tree can load them —
 and can be deleted to reclaim ~48 GB.
 
-(The external IP changes across stop/start — hence `duckdns-update.sh`, whose
-empty `ip=` makes DuckDNS take the request's source address. An SSH tunnel
-doesn't care either: `gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
+(The external IP is now reserved and stable, so nothing has to be refreshed
+after a start. An SSH tunnel works as before:
+`gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
 
 Stopping the meter — in this order:
 

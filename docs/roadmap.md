@@ -102,10 +102,20 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
    `batched_equals_per_mutation` and the RPST2 tests are the seed of the
    pattern; this generalizes it to the whole apply/persist/rewind path.
    ~1 week, the strongest remaining correctness spend.
-5. ~~**C2 — TLS, deployed.**~~ **Done 2026-07-26** — Caddy + Let's Encrypt on
-   a free DuckDNS hostname, listeners still loopback-only, public origin
-   verified end to end (deploy.md §3.7). What it bought and what it did *not*
-   (the DNS/CA parties now in the code-delivery chain) is in threat model §4.2.
+5. ~~**C2 — TLS, deployed.**~~ **Done 2026-07-26** — Caddy + Let's Encrypt,
+   listeners still loopback-only, public origin verified end to end (deploy.md
+   §3.7). What it bought and what it did *not* (the DNS/CA parties now in the
+   code-delivery chain) is in threat model §4.2. **Narrowed 2026-08-17**: the
+   free DuckDNS hostname gave way to `demo.risepir.org`, a registered domain
+   on a static IP, with DNSSEC and CAA — the "buys a domain it controls"
+   mitigation §4.2 had only recommended. **Closed 2026-08-17** (ADR-0043): the
+   **always-on apex page** at `risepir.org` is live on Cloudflare Pages — not
+   this VM — so a cited URL survives the VM being stopped and its certificate
+   lapsing. Verified serving over a valid certificate while the VM was
+   `TERMINATED` (deploy.md §3.7). Cite `risepir.org`; `demo.` stays the
+   intermittently-available origin. What remains on this rung is unchanged and
+   sits with C3/C5: there is still no rate limiting in front of a 553.82 MB
+   `/setup`.
 6. **A1 rungs — signed store digests → public anchoring.** The first
    steps past "documented trust" (ADR-0020): a per-block signed digest
    makes global tampering attributable; anchoring stops split-view. Does

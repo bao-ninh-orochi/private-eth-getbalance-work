@@ -10,7 +10,15 @@
 # rate-limited and a bad loop can lock you out for a week:
 #   { acme_ca https://acme-staging-v02.api.letsencrypt.org/directory }
 
-private-eth-getbalance.duckdns.org {
+# Both names are served during the DuckDNS → risepir.org overlap. Caddy obtains
+# a separate certificate per name; the old one stays until links that predate
+# the move have aged out (deploy.md §3.7). `demo.` is deliberately a DNS-only
+# (unproxied) record at Cloudflare: an orange-cloud proxy would terminate TLS at
+# Cloudflare, putting a third party in a position to serve a modified wasm
+# client under this name — the exact code-delivery trust ADR-0019 discloses and
+# threat model §4.2 enumerates. Queries themselves are LWE ciphertexts and stay
+# private either way; it is the *code path* that must not gain a party.
+demo.risepir.org, private-eth-getbalance.duckdns.org {
 	# ONLY the PIR port is ever proxied. :8545 answers plaintext-address
 	# eth_getBalance and must never leave this machine — publishing it would
 	# hand every visitor's queried account to the operator and to anyone

@@ -767,33 +767,74 @@ The partial demo runs on anything ≥2 GB, including AWS free-tier-class instanc
 ## 3.7 Public HTTPS deployment (live, 2026-07-26)
 
 The browser front end is reachable on the open internet at
-**<https://private-eth-getbalance.duckdns.org>** — one hostname serving both
-the page and the PIR transport, which is what ADR-0019's same-origin
-`connect-src 'self'` CSP requires. Every command below was executed as written.
+**<https://demo.risepir.org>** — one hostname serving both the page and the
+PIR transport, which is what ADR-0019's same-origin `connect-src 'self'` CSP
+requires. Every command below was executed as written.
+
+**Both the page and the transport must stay on one hostname.** Splitting them
+(`app.` for the page, `pir.` for `/setup` and queries) would force the CSP
+open and hand the client a second origin to trust; the same-origin shape is
+load-bearing, not incidental.
+
+The original origin, `private-eth-getbalance.duckdns.org`, is **still served
+alongside** it (both names are in one Caddy site block) so links that predate
+the move keep working. It is retained, not repointed elsewhere: a released
+DuckDNS subdomain can be claimed by anyone, and it appears in earlier evidence
+in this file.
 
 Nothing else is exposed: the firewall opens **only 80/443**, both listeners stay
 on `127.0.0.1`, and Caddy has no route to `:8545`.
 
-**1. A free name, from a dynamic-DNS provider.** DuckDNS needs no registration
-(OAuth sign-in) and gives 5 subdomains. Because the GCP external IP changes
-across stop/start, the record is refreshed *from the VM*, where an empty `ip=`
-makes DuckDNS use the request's source address:
+**1. A registered domain and a static IP** (2026-08-17; `risepir.org`,
+registered at Cloudflare, which is also the zone's DNS). The address is
+reserved, so it survives stop/start:
 
 ```bash
-umask 077; printf '%s' '<token>' > ~/.duckdns-token       # 0600, never in git
-cat > ~/duckdns-update.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-token=$(cat "$HOME/.duckdns-token")
-curl -s "https://www.duckdns.org/update?domains=private-eth-getbalance&token=${token}&ip="
-EOF
-chmod +x ~/duckdns-update.sh && ~/duckdns-update.sh    # prints OK
+gcloud compute addresses create risepir-ip --region=us-central1
+gcloud compute instances delete-access-config risepir \
+  --zone=us-central1-a --access-config-name="external-nat"
+gcloud compute instances add-access-config risepir \
+  --zone=us-central1-a --access-config-name="external-nat" \
+  --address=136.115.93.177
 ```
 
-Run it after every `instances start`, before Caddy needs the name. DuckDNS
-serves a 60 s TTL, so the name follows the VM within a minute. This is why no
-static IP is reserved: a reserved address bills ~$3.60/mo *even while the VM is
-stopped* (attached-and-reserved counts as in use), and dynamic DNS is free.
+Zone records:
+
+| type | name | content | proxy |
+|---|---|---|---|
+| `A` | `demo` | `136.115.93.177` | **DNS only** |
+| `CAA` | `@` | `0 issue "letsencrypt.org"` | — |
+| `CAA` | `@` | `0 issuewild ";"` | — |
+
+Three things about this are load-bearing:
+
+- **`demo` is unproxied (grey cloud), deliberately.** Cloudflare's proxy would
+  terminate TLS and put a third party in a position to serve a modified wasm
+  client under this name — the code-delivery trust of ADR-0019 and threat
+  model §4.2, widened by one party. Tempting, because `/setup` is 553.82 MB
+  with no rate limiting behind it; the answer to *that* is roadmap C3/C5, and
+  any CDN it brings must front the bundle without becoming the page's origin.
+- **The CAA records** cut issuance for this name from "any public CA" to five,
+  not to one, and the difference is invisible in the Cloudflare dashboard.
+  Adding any CAA record to a Cloudflare-served zone makes Cloudflare inject
+  further CAA records authorising its own CAs (Google Trust Services, SSL.com,
+  Sectigo, DigiCert) so Universal SSL keeps working; they are not listed in the
+  DNS UI and cannot be removed without disabling Universal SSL zone-wide. The
+  `0 issuewild ";"` is inert for the same reason — CAA unions permissions
+  rather than vetoing them. **Always read this policy with `dig CAA
+  risepir.org`, never from the dashboard**; the two disagree (two records
+  versus eleven). Threat model §4.2 carries the full accounting.
+- **DNSSEC is on** at the zone, published to the `.org` registry by Cloudflare
+  as both registrar and DNS.
+
+The static address costs **~$3.60/mo**, billed at the in-use rate even while
+the VM is stopped (GCP counts an address attached to a stopped instance as in
+use; an unattached reservation bills higher). What it buys is the removal of
+the previous shape's sharpest failure mode: under DuckDNS the external IP
+changed on every `instances start`, so `~/duckdns-update.sh` had to run
+*before* Caddy needed the name, and forgetting it left the origin pointing at
+whoever now held the old address. **That ordering rule no longer exists** —
+the IP never changes, and there is no update script in the start path.
 
 **2. Firewall — 80/443 only, never the listeners.**
 
@@ -806,7 +847,12 @@ gcloud compute firewall-rules create risepir-web \
 misconfigured loop can lock you out for up to a week, so validate the whole
 path — DNS, `:80` reachability, proxy — against the staging CA, which is not
 rate-limited (browsers will warn; expected). Then remove the `acme_ca` line and
-restart for the real certificate. `ops/caddy/Caddyfile` is the deployed config.
+**restart** for the real certificate — `systemctl restart caddy`, not
+`reload`. A reload does **not** re-issue across a CA change: storage is split
+per issuer on disk, but the in-memory cache is keyed by hostname and is not
+re-checked, so the reload silently issues nothing at all — no error, no
+attempt, just an empty journal (§5.9 measured 10+ minutes of it, then 5
+seconds after a restart). `ops/caddy/Caddyfile` is the deployed config.
 
 **4. The server, as usual.** Caddy 502s until it is up:
 
@@ -843,9 +889,12 @@ of returning `undefined`. On loopback the race never fired.
 
 ### What this deployment costs, and what it does not survive
 
-Zero cash beyond the VM hours: DuckDNS, Let's Encrypt and Caddy are free, no
-static IP is reserved, and a handful of visitors is well under a gigabyte of
-egress.
+Nearly free beyond the VM hours: **~$11.20/yr** for `risepir.org` (Cloudflare
+Registrar sells at registry wholesale, with no renewal premium) and
+**~$3.60/mo** for the static IP — about **$54/yr fixed**, against $8.60 per
+*day* whenever the VM runs. Let's Encrypt, Caddy and Cloudflare DNS are free,
+and a handful of visitors is well under a gigabyte of egress. The cost control
+that matters is unchanged: stop the instance when idle.
 
 It is sized for **a link sent to a few colleagues**, not for public traffic.
 Cold visitors now share a single cached `/setup` encode and get a refcounted
@@ -856,10 +905,12 @@ been measured not to bound what it claimed (tower released its permit when the
 handler returned, not when the transfer finished). What remains undefended is
 unchanged and is the part that matters: there is **no rate limiting at all**,
 and the egress of a large `/setup` bundle per cold visitor is still entirely
-real (threat model §3 names volumetric DoS as undefended) — **830.73 MB**
-today, since this origin has not been re-bootstrapped since ADR-0034 moved
-the deployed geometry to `(arity 2, bucket_size 4)`; a fresh bootstrap cuts
-that to **553.82 MB**. `/setup` behind a CDN plus per-IP quotas is roadmap
+real (threat model §3 names volumetric DoS as undefended) — **553.82 MB** per
+cold visitor today (`content-length: 553819345`, measured on the wire
+2026-08-17, §5.9). This paragraph previously said 830.73 MB on the grounds
+that the origin had not been re-bootstrapped since ADR-0034; it has been
+twice since (§5.4 and §5.8), so `(arity 2, bucket_size 4)` is what it
+actually serves. `/setup` behind a CDN plus per-IP quotas is roadmap
 C5/C3 — do that before sharing the link wider.
 
 **Certificate renewal needs the VM up occasionally.** Caddy renews from ~30 days
@@ -867,12 +918,57 @@ before expiry over `:80`. Since this VM is stopped between demos, a gap longer
 than that window lets the certificate lapse and visitors get a hard TLS error;
 starting the VM for any demo inside the window fixes it automatically.
 
-**The trust chain grew, and this is the price of the free name.** Whoever holds
-the DuckDNS token can repoint the hostname at their own machine, obtain a valid
-certificate for it (DNS control is all Let's Encrypt checks), and serve a
-modified wasm client under this name — and so can DuckDNS itself. That is the
-same category as ADR-0019's disclosed code-delivery trust, one party wider. See
-threat model §4.2 and §8.
+This is why **`demo.` is the wrong hostname to cite in a paper.** A reader who
+clicks a printed URL during one of the many days the VM is stopped gets a
+connection or TLS failure, and a dead demo link reads as abandoned work. The
+intended shape is an always-on static page at the apex `risepir.org` — served
+by something that is not this VM, describing the system with screenshots and
+numbers, and linking onward to `demo.risepir.org` with a plain statement that
+the live instance runs during demos and on request.
+
+**That page is now live** (2026-08-17, ADR-0043). `risepir.org` and
+`www.risepir.org` are served by **Cloudflare Pages**, which is free, always on,
+and adds no party that could not already redirect this name — Cloudflare is
+already the zone's registrar and DNS. It carries no cryptographic client and
+makes no PIR queries; it is prose, the measured numbers, screenshots of a real
+lookup taken while the demo was up, ADR-0019's residual-trust disclosure, and a
+link onward. Verified serving with a valid certificate **while the VM was in
+`TERMINATED` state** — which is the whole point of it:
+
+```
+$ gcloud compute instances describe risepir --zone=us-central1-a --format='value(status)'
+TERMINATED
+$ curl -sS -o /dev/null -w '%{http_code}\n' https://risepir.org/
+200
+$ echo | openssl s_client -connect risepir.org:443 -servername risepir.org 2>/dev/null \
+    | openssl x509 -noout -issuer -subject -dates
+issuer=C=US, O=Google Trust Services, CN=WE1
+subject=CN=risepir.org
+notBefore=Aug 17 09:28:01 2026 GMT / notAfter=Nov 15 10:27:59 2026 GMT
+$ curl -sS -o /dev/null --max-time 12 https://demo.risepir.org/mode
+curl: (28) Connection timed out after 12004 milliseconds
+```
+
+Note the apex certificate comes from **Google Trust Services** (Cloudflare
+Universal SSL), not Let's Encrypt — permitted by the `pki.goog` CAA record
+Cloudflare injects into any zone it serves that has CAA at all, which §3.7's
+CAA note above already explains. The `demo.` record is untouched: still a
+DNS-only `A` at `136.115.93.177`, never proxied.
+
+**So cite `risepir.org`, not `demo.risepir.org`.** The apex resolves whether or
+not anyone is paying for the VM that week; `demo.` remains the
+intermittently-available origin, and the apex says so in plain words rather
+than letting a reader discover it by clicking.
+
+**The trust chain is narrower than it was, and still not empty.** Whoever
+controls DNS for this name can obtain a valid certificate for it — DNS control
+is all Let's Encrypt checks — and serve a modified wasm client under it. That
+is inherent to web delivery, not a property of the registrar, and it is the
+same category as ADR-0019's disclosed code-delivery trust. What the registered
+domain changed is *who* that is: a Cloudflare account with 2FA and a registrar
+lock, rather than a free-subdomain provider and a bearer token with neither,
+plus DNSSEC and CAA that a free subdomain could not carry. See threat model
+§4.2 and §8.
 
 ## 4. Operational notes (the never-wrong-answer contract, operationally)
 
@@ -1043,11 +1139,11 @@ from a fresh snapshot (do not restore from backup, the file itself is fine)
 That refusal is the whole point: without it the server would have come up
 clean and answered `0x0` for every account.
 
-**The sequence.** DNS first — the external IP moves across every stop/start:
+**The sequence.** No DNS step: since 2026-08-17 the external IP is the reserved
+`136.115.93.177` and does not move across stop/start (§3.7).
 
 ```bash
 gcloud compute instances start risepir
-gcloud --quiet compute ssh risepir --command='~/duckdns-update.sh'
 gcloud --quiet compute ssh risepir --command='cd ~/private-ETH-getBalance && \
   git pull && cargo build --release -p risepir-rpc && \
   cargo run -p xtask --release -- web'
@@ -1885,6 +1981,330 @@ check guarantees. They are evidence, not a rollback: reverting means reverting
 the pin *and* re-bootstrapping anyway. Delete them to reclaim ~48 GB once this
 round is trusted, on the same reasoning that reclaimed the 33.77 GB arity-3
 file in §5.4.
+
+### 5.9 The public origin moved to demo.risepir.org (2026-08-17)
+
+The domain and static-IP change §3.7 describes — `risepir.org`, registered at
+Cloudflare (also the zone's DNS), fronting the reserved address
+`136.115.93.177` — was cut over on the live box and verified end to end: a
+new Caddyfile, a staging-then-production certificate, a plain restart of the
+complete-set server, both browser gates, and the boundary re-probed from
+off-box. Steps below noted as re-run independently were re-run from the Mac,
+off the VM, not merely captured once on it.
+
+**Timeline (UTC):**
+
+| time | event |
+|---|---|
+| 08:30:20 | VM `risepir` started (`gcloud compute instances start`) — static IP `136.115.93.177`, no DNS step |
+| 08:35:38 | Caddy obtained **staging** cert for `demo.risepir.org` |
+| 08:50:08 | server launched in tmux (`mainnet --state ~/risepir-state.bin --web web`) |
+| 08:52:02 | state loaded — **113.7 s**, block 25650914, 201,283,514 accounts, complete set |
+| 08:52:07 | Caddy obtained **production** cert for `demo.risepir.org` |
+| ~09:45–10:05 | both gates and the port probes re-run from the Mac |
+
+**Caddyfile.** The live path is `/etc/caddy/Caddyfile` — confirmed from
+`systemctl cat caddy`: `ExecStart=/usr/bin/caddy run --environ --config
+/etc/caddy/Caddyfile`. The original file (993 B, single-hostname) was backed
+up to `/etc/caddy/Caddyfile.bak-20260817` before editing, then:
+
+```
+$ sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+Valid configuration
+```
+
+**This was the file's first real syntax check** — Caddy is not installed on
+the dev Mac, so nothing short of the VM itself can validate a Caddyfile
+before it goes live.
+
+**Certificates — staging first, then production.** Staging (verified on the
+VM):
+
+```
+issuer=C = US, O = Let's Encrypt, CN = (STAGING) Baloney Bulgur YE2
+subject=CN = demo.risepir.org
+notBefore=Aug 17 07:37:02 2026 GMT / notAfter=Nov 15 07:37:01 2026 GMT
+```
+
+Production, independently re-verified from the Mac:
+
+```
+issuer=C=US, O=Let's Encrypt, CN=YE1
+subject=CN=demo.risepir.org
+X509v3 Subject Alternative Name: DNS:demo.risepir.org
+notBefore=Aug 17 07:53:35 2026 GMT / notAfter=Nov 15 07:53:34 2026 GMT
+Verification: OK / Verify return code: 0 (ok)
+```
+
+The old DuckDNS name kept its own, separate production certificate, also
+independently re-verified:
+
+```
+issuer=C=US, O=Let's Encrypt, CN=YE2
+subject=CN=private-eth-getbalance.duckdns.org
+notBefore=Jul 26 09:20:56 2026 GMT / notAfter=Oct 24 09:20:55 2026 GMT
+```
+
+**A Caddy hot reload does not re-issue across a CA change.** After removing
+the `acme_ca` staging line and running `systemctl reload caddy`, **zero
+issuance attempts appeared in the journal for 10+ minutes**, although the
+staging path had issued near-instantly moments before. On-disk storage *is*
+correctly split per issuer (`…/acme-staging-v02…-directory/demo.risepir.org`
+existed, `…/acme-v02…-directory/demo.risepir.org` did not) — so the cause is
+an in-memory certificate cache keyed by hostname that a hot reload does not
+re-check for issuer. A single `systemctl restart caddy` triggered production
+issuance within **5 seconds**.
+
+**§3.7 step 3 already said "restart", and this round did not follow it** — it
+reloaded, and lost ten minutes to a step the runbook had got right the first
+time. What is new here is not the instruction but the *reason*, which the
+runbook never gave: because Caddy's on-disk storage is split per issuer, a
+reader can reasonably assume changing the issuer is picked up like any other
+config change, and reload is the reflex for a config change. It is not
+picked up, the failure is silent — no error, no attempt, just nothing in the
+journal — and it is the step most likely to be misread as "ACME is broken".
+Recording the mechanism is what turns that line of the runbook from a style
+preference into a requirement.
+
+**The server.**
+
+```
+08:50:08Z loading state (--journal-restore) from /home/admin/risepir-state.bin ...
+08:52:02Z state loaded in 113.7s — block 25650914, 201283514 accounts, complete set
+08:52:02Z journal matched the base but had nothing new to replay
+08:52:02Z reconcile: every 30 block(s), 8 sample(s)/checkpoint against https://ethereum-rpc.publicnode.com
+```
+
+**113.7 s cold start → serving is a new measurement**: the runbook has never
+before timed a plain complete-set *restart* — §5.8 timed a *bootstrap* (a
+fresh snapshot ingest plus PIR setup), at 12 min 46 s. It is this fast
+because the previous shutdown was clean, so the journal had nothing to
+replay.
+
+Origin headers, re-verified from the Mac:
+
+```
+GET /mode  → HTTP/2 200, content-length: 1, body byte 0x01   (complete set)
+GET /setup → content-length: 553819345          (the documented 553.82 MB)
+             x-risepir-mode: 1
+             x-risepir-epoch: 46226713616e89da  (unchanged from §5.8 — no re-seed)
+             accept-ranges: bytes
+             etag: "setup-46226713616e89da-25651035"
+             via: 1.1 Caddy
+http://demo.risepir.org/ → 308 → https://demo.risepir.org/
+```
+
+**Both gates, re-run from the Mac, off the VM, against the new origin.**
+`node web/test/browser.mjs https://demo.risepir.org --require-browser`,
+driving Chrome for Testing 152.0.7977.42 on the Mac:
+
+```
+driving Google Chrome for Testing against https://demo.risepir.org (COMPLETE set)
+  ok  the page boots and the private client initialises
+  ok  a complete-set account shows an exact wei balance
+      0x5555555555555555555555555555555555555555 -> 1345804390675688562 wei
+  ok  the answer is labelled with the block it is as of
+  ok  the wire panel reports LWE ciphertext and no addresses
+  ok  real entropy was drawn in the browser
+  ok  two browser queries for the same address send different ciphertext
+  ok  an absent address in a complete set shows 0 and explains that absence means zero
+  ok  a second visit boots successfully from the cached hint
+  ok  ...with no body-bearing GET /setup at all
+      cached reboot: 4842 ms wall clock
+  ok  no Content-Security-Policy violations
+  ok  no uncaught page errors
+PASS: 0 failing checks          (16 checks, exit 0)
+```
+
+`node web/test/e2e.mjs https://demo.risepir.org`, also re-run from the Mac:
+
+```
+connecting to https://demo.risepir.org ...
+  mode=COMPLETE pinned=25651035 arity=2 setup=553.82 MB
+  ok  the query carried no address-sized plaintext
+      0xff3c5c96b3a8e35ca9c67ee1366c66831404b622 = 1538770205383092 wei
+      (0.001538770205383092 ETH) at block 25651039
+  ok  an absent address is exactly 0x0 for a complete set
+  ok  repeated queries for one address send different ciphertext
+  ok  repeated queries keep a constant size (no length leak)
+  ok  a truncated-then-resumed /setup boots successfully
+  ok  the retry carried Range for exactly the missing tail
+  ok  ...and If-Range naming the first response's own ETag
+PASS: 0 failing checks          (51 checks, exit 0)
+```
+
+**The CLI client, driven from the Mac against the public origin** — the shape
+`CLAUDE.md` calls "front end + rewind client on THIS machine against a remote
+PIR server", where the queried address never leaves the laptop:
+
+```
+2026-08-17T10:06:05Z risepir-rpc client: downloading setup bundle from https://demo.risepir.org ...
+2026-08-17T10:07:52Z risepir-rpc client: setup downloaded in 107.0s — hint pinned at block 25651035
+  PIR server:  https://demo.risepir.org
+  JSON-RPC:    http://127.0.0.1:8546   (local — point your wallet here)
+  data set:    COMPLETE nonzero-balance set (not-found answers 0x0)
+
+eth_blockNumber                        → 0x1876760 = 25,651,040
+eth_getBalance(0x5555…5555, "latest")  → 0x12ad41f68362ac72
+                                       = 1345804390675688562 wei
+```
+
+**Two independent client implementations agree byte-for-byte.** The browser
+gate's wasm client and this native CLI client returned the *same* balance for
+the same address — `1345804390675688562` wei. They are built from one Rust
+source but do not share a host: one runs in a wasm sandbox reached through
+`web/pir.js` and the DOM, the other natively through the JSON-RPC front end.
+Agreement across that boundary exercises the rewind path twice by different
+routes, and costs nothing to record.
+
+**The web gates need Node >= 22 — a pre-existing gap, invisible in CI.**
+Under the VM's pre-installed Node 18.20.4, `e2e.mjs` fails before any network
+I/O:
+
+```
+SyntaxError: Named export 'CAPACITY_VERDICT' not found. The requested module
+'../pir.js' is a CommonJS module, which may not support all module.exports as
+named exports.
+```
+
+Cause: the repo has **no `package.json` anywhere**, and `web/pir.js` is a
+`.js` file carrying 17 ESM `export` statements. Node < 22 has no
+module-syntax detection, so it loads that file as CommonJS and the named
+imports fail; Node 22 (syntax detection on by default) loads it as ESM and
+the gate passes 51/51. This is pre-existing, not introduced by this change,
+and invisible in CI because CI's runner image ships a newer Node. Node
+22.23.2 was installed on the VM at `~/node-v22.23.2-linux-x64/` from the
+official `nodejs.org/dist` tarball, SHA-256 checked against
+`SHASUMS256.txt` before extraction.
+
+**The boundary — only 80/443 reachable, re-verified from the Mac.**
+
+```
+nc -z -w6 136.115.93.177 80   → OPEN            (positive control)
+nc -z -w6 136.115.93.177 443  → OPEN            (positive control)
+nc -z -w6 136.115.93.177 8545 → NOT REACHABLE
+curl --max-time 8  http://136.115.93.177:8545/  → curl: (28) Connection timed out
+curl --max-time 10 http://136.115.93.177:8645/  → curl: (28) Connection timed out (exit 28)
+```
+
+The positive control matters: the `:8545`/`:8645` timeouts are meaningful
+only because `:443` answered from the same machine at the same time — a
+probe that only tried the private ports could not distinguish "the firewall
+is correctly closed" from "the whole VM is unreachable".
+
+**The old DuckDNS name — was broken, now fixed.** It resolved to
+**`34.59.149.148`**, not the VM — precisely the failure mode §3.7 documents
+("forgetting it left the origin pointing at whoever now held the old
+address"): the VM's old *ephemeral* address, released when the static IP was
+attached, now held by someone else. Caddy and the certificate were correct
+throughout; only DNS was wrong.
+
+`~/duckdns-update.sh` was run once on the VM (`duckdns: OK`), then
+independently re-checked from the Mac:
+
+```
+dig +short private-eth-getbalance.duckdns.org A @1.1.1.1 → 136.115.93.177
+GET /mode → HTTP/2 200, body byte 0x01, via: 1.1 Caddy
+```
+
+Because the IP is now **reserved**, this is a one-time correction, not a
+recurring step — there is no dynamic-DNS updater in the start path any more.
+
+#### The deployment was verified while lagging — and the evidence says so
+
+The state file was written 2026-07-31 at block 25650914. The server resumed
+there and was at **block 25651035–25651039** during the gates above.
+Finalized head at the time was **25,773,642**, captured on the live
+`/status` page — **lag ≈ 122,700 blocks (~17 days).** None of the checks
+above ran against a current chain state; this is said plainly rather than
+letting a clean certificate, clean CSP, and passing gates be misread as the
+deployment being current.
+
+**The lag was deliberate, not an oversight.** Catching up would have cost
+~122,700 blocks at §5.8's measured 1.72 blocks/s — about **20 h and ~$7 of
+VM time** — and every property this cutover needed to demonstrate
+(certificate, routing, CSP, same-origin wasm delivery, a byte-exact PIR
+answer) is independent of chain height. Every answer above is labelled with
+the block it is as of, so the box was verified **while lagging, and the
+evidence says so**, rather than implying it was current.
+
+Catch-up would not have converged during this window regardless: both feed
+endpoints were refusing throughout —
+
+```
+dRPC:      HTTP 408 "Request timeout on the free plan"
+merkle.io: HTTP 429
+```
+
+— so the server advanced only ~125 blocks in ~70 minutes (~0.03 blocks/s).
+
+`/healthz` at 10:00Z:
+
+```
+ok 25651038
+reconcile_configured=1
+reconcile_checkpoints_total=4
+reconcile_consecutive_dark=4
+reconcile_deferred_total=4      <- deferred, not failed
+reconcile_halted=0
+reconcile_comparisons_total=0
+snapshot_audit=checked=183 disagreed=2 block=25641938 rate=1.09% ci=[0.30%,3.90%]
+```
+
+`deferred == checkpoints` with `halted=0` is the designed behaviour for a
+deployment deeper than the reference provider serves (ADR-0036) — the
+deferred/failed wording fix in PR #49 is why this reads as deferral, not as
+blaming the provider. The `snapshot_audit` rate of 1.09% (CI [0.30%, 3.90%])
+is consistent with the already-documented ~0.33% population-wide BigQuery
+export gap (ADR-0040), not a new defect.
+
+**The stop.** The anchored pattern from §3.6
+(`pkill -INT -f "^\./target/release/risepir-rpc"`), then the save:
+
+```
+2026-08-17T10:11:11Z risepir-rpc mainnet: state saved (shutdown): block 25651040, 24.18 GB in 119.5s (202 MB/s)
+2026-08-17T10:11:11Z risepir-rpc mainnet: state saved; exiting
+```
+
+No `.tmp` was left behind, `head -c 5 ~/risepir-state.bin` still reads
+**`RPST3`**, and the file is 24,176,139,523 B — the size it went in at.
+`gcloud compute instances stop risepir` then reported `TERMINATED`, with
+`risepir-ip` still `IN_USE`: a reserved address stays attached to a stopped
+instance, which is the whole point of reserving it.
+
+**The shutdown-probe trap fired a third time — self-inflicted, and the
+existing guidance was already right.** §5.4 first recorded it and §5.7 saw it
+again; both concluded that `pgrep -af "^\./target/release/risepir-rpc"` is
+"the probe that answers the question actually being asked". This round used
+the *bracketed* form instead (`pgrep -f "risepir-rp[c]"`), which went on
+reporting a live PID after the server had exited — so a wait-for-exit loop
+built on it never saw the exit, and the result briefly read as a server
+ignoring SIGINT.
+
+Worth stating why the documented form is the robust one, since two rounds of
+notes describe the symptom without quite naming the mechanism. Bracketing
+only prevents the probe from matching *its own pattern text*. It does nothing
+about a **different, unbracketed occurrence of `risepir-rpc` elsewhere in the
+same command** — and a stop script necessarily contains one, in its own
+`pkill -INT -f "^\./target/release/risepir-rpc"` line. The wrapper shell's
+command line therefore contains the literal string the bracketed probe is
+looking for. The **`^` anchor**, not the bracket, is what fixes this: the
+wrapper's command line begins `bash -c …`, so an anchored pattern cannot
+match it, whatever the script quotes further along.
+
+So: use the anchored form §5.4 already prescribes, not a bracketed one. Where
+a probe must be certain regardless of what the surrounding script says, one
+that does not pattern-match the command line at all removes the question:
+
+```
+ps -eo pid,comm,args | grep -E "target/release" | grep -v grep
+```
+
+**Cost.** The VM went up at 08:30:20Z and was stopped at ~10:20Z — **1 h
+50 min**; at `e2-highmem-8` that is $8.60/day ($0.358/h). The whole
+verification round — start, both certificate issuances, both gates, the CLI
+client, the DuckDNS fix, and the stop — cost roughly **$0.66**, against the
+~$7 a full catch-up alone would have added.
 
 ## 6. Who does what, explicitly
 

@@ -3413,3 +3413,42 @@ certificate **while the VM was in `TERMINATED` state** — the one condition tha
 actually tests the claim, since a page that only works while the demo is up
 would not have solved anything. Evidence, including the certificate and the
 simultaneous `demo.` timeout, is in deploy.md §3.7; roadmap C2 is closed by it.
+
+### ADR-0044 — Apache-2.0 only; drop the MIT arm **[NEW — supersedes the README's "dual-licensed, matching the upstream IKPIR primitive"]**
+
+**Chosen:** license this workspace under Apache-2.0 alone. `LICENSE-MIT` is
+deleted, `workspace.package.license` becomes `"Apache-2.0"`, and the inbound
+contribution term in `CONTRIBUTING.md` matches.
+**Rejected:** keeping `MIT OR Apache-2.0`, the Rust-ecosystem default this repo
+started with.
+
+**Why.** The two arms are not equivalent for *this* subject matter. MIT grants
+copyright permission and says nothing about patents; Apache-2.0 §3 adds an
+express patent grant from every contributor over anything their contribution
+necessarily practises, plus termination of that grant for anyone who files
+patent litigation alleging the Work infringes. Offering both arms means a
+recipient may take the MIT one and thereby take *none* of that patent
+protection — the weaker arm sets the effective floor, so the dual license
+silently makes §3 optional. Lattice cryptography is not a hypothetical patent
+neighbourhood: RSA, Diffie–Hellman, ECC and NTRU were each encumbered for most
+of their commercial lives, NTRU — a lattice scheme — until 2017. A PIR
+implementation should not hand out an arm that waives its own patent peace.
+
+**What this costs, explicitly.** GPLv2-only projects can no longer incorporate
+this code; the MIT arm was the bridge, because Apache-2.0's retaliation clause
+is an "additional restriction" GPLv2 forbids (GPLv3 is unaffected). We accept
+that: no known consumer is GPLv2, and this is a research PoC, not a library
+courting broad downstream adoption.
+
+**What this does not change.** `deny.toml`'s `licenses.allow` list keeps `MIT`
+— that list governs what the workspace may *link*, and much of the dependency
+tree is MIT. Consuming an `MIT OR Apache-2.0` dependency (including the pinned
+IKPIR primitive) while licensing our own work Apache-2.0-only is ordinary and
+requires nothing from either side: each license governs its own code. The
+divergence from IKPIR's dual license is deliberate, not drift — the README used
+to cite matching IKPIR as the reason for the MIT arm, and that reason is what
+this ADR overrides.
+
+**Status:** decided 2026-08-17. Clean to do because the repo is private and
+single-author: a license grant is irrevocable, so relicensing only ever binds
+future recipients, and here there are no past ones to grandfather.

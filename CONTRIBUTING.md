@@ -73,5 +73,6 @@ failure mode.** If a change alters a security boundary, update
 
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in the work by you, as defined in the Apache-2.0
-license, shall be dual licensed as MIT OR Apache-2.0, without any additional
-terms or conditions.
+license, shall be licensed under Apache-2.0, without any additional terms or
+conditions — which includes the §3 patent grant over anything your
+contribution necessarily practises (ADR-0044).

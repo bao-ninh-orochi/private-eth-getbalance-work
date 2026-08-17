@@ -98,7 +98,8 @@ novel (see `docs/verification.md`).
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
-your option — matching the upstream IKPIR primitive. See
+Licensed under [Apache-2.0](LICENSE-APACHE) — chosen for its express patent
+grant and retaliation clause, which matter for a lattice-PIR implementation
+(ADR-0044). See
 [`SECURITY.md`](SECURITY.md) for reporting vulnerabilities and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the gates a change must pass.

@@ -1,0 +1,384 @@
+/* RisePIR landing page — risepir.org
+   Static, self-contained stylesheet. No external fonts, no CDN. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  /* ---- Light palette (default) ---- */
+  --bg: #fbfbfa;
+  --surface: #f2f1ee;
+  --surface-2: #e8e6e1;
+  --border: #d8d5cd;
+  --text: #1b1c1e;            /* ~16.5:1 on --bg */
+  --text-secondary: #4d4f53;  /* ~7.9:1 on --bg  */
+  --accent: #164e63;          /* ~8.8:1 on --bg  */
+
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --content-width: 52rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101214;
+    --surface: #17191c;
+    --surface-2: #1f2226;
+    --border: #2b2e33;
+    --text: #e8e9ea;           /* ~15.4:1 on --bg */
+    --text-secondary: #b7bac0; /* ~9.6:1 on --bg  */
+    --accent: #7fd0e0;         /* ~10.7:1 on --bg */
+  }
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.65;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0;
+}
+
+h1 { font-size: clamp(2rem, 1.55rem + 2vw, 3rem); }
+h2 { font-size: clamp(1.4rem, 1.2rem + 1vw, 1.9rem); }
+h3 { font-size: clamp(1.1rem, 1rem + 0.4vw, 1.3rem); }
+
+p {
+  margin: 0 0 1rem;
+  max-width: 42rem;
+}
+
+p:last-child {
+  margin-bottom: 0;
+}
+
+ul {
+  margin: 1rem 0 0;
+  padding-left: 1.25rem;
+  max-width: 42rem;
+}
+
+li {
+  margin-bottom: 0.75rem;
+}
+
+li:last-child {
+  margin-bottom: 0;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+code {
+  font-family: var(--font-mono);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a, .stat, nav a {
+    transition: color 120ms ease, border-color 120ms ease;
+  }
+}
+
+.wrap {
+  max-width: var(--content-width);
+  margin-inline: auto;
+  padding-inline: clamp(1.25rem, 4vw, 2.5rem);
+}
+
+/* ---- Skip link ---- */
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--accent);
+  color: var(--bg);
+  padding: 0.75rem 1.25rem;
+  z-index: 100;
+  border-radius: 0 0 6px 0;
+  font-family: var(--font-sans);
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+/* ---- Header ---- */
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  padding-block: clamp(2.25rem, 6vw, 4rem) 1.75rem;
+}
+
+.eyebrow {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  margin: 0 0 0.85rem;
+  max-width: none;
+}
+
+.site-header h1 {
+  margin-bottom: 0.6rem;
+}
+
+.tagline {
+  font-size: 1.15rem;
+  color: var(--text-secondary);
+  max-width: 38rem;
+}
+
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.4rem;
+  margin-top: 1.75rem;
+  font-size: 0.92rem;
+}
+
+.site-header nav a {
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-block: 0.2rem;
+}
+
+.site-header nav a:hover {
+  border-bottom-color: currentColor;
+}
+
+/* ---- Sections ---- */
+
+main {
+  display: block;
+}
+
+main > section {
+  padding-block: clamp(2.5rem, 6vw, 4rem);
+}
+
+main > section + section {
+  border-top: 1px solid var(--border);
+}
+
+.sec-label {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  margin-bottom: 0.6rem;
+}
+
+section h2 {
+  margin-bottom: 1.25rem;
+}
+
+section h3 {
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+}
+
+section h3:first-of-type {
+  margin-top: 1.75rem;
+}
+
+.lede {
+  font-size: 1.05rem;
+}
+
+/* ---- Stats grid ---- */
+
+dl.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  margin: 1.75rem 0 0.75rem;
+  max-width: none;
+}
+
+dl.stats > div {
+  background: var(--bg);
+  padding: 1rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+dl.stats dt {
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+dl.stats dd {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.note {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  max-width: 42rem;
+  margin-top: 1rem;
+}
+
+/* Citation block: the paper is the point of this page, so it is set apart
+   from body prose by a rule rather than by weight or colour. */
+.cite {
+  max-width: 42rem;
+  margin: 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--accent);
+  line-height: 1.6;
+}
+
+.cite cite {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ---- Diagram ---- */
+
+.diagram-figure {
+  margin: 2rem 0;
+  max-width: none;
+}
+
+.diagram-figure .diagram-wrap {
+  max-width: 380px;
+  margin-inline: auto;
+}
+
+.diagram-figure svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.diagram-figure figcaption {
+  margin-top: 1.25rem;
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+  max-width: 40rem;
+  margin-inline: auto;
+  text-align: center;
+}
+
+/* ---- Screenshots ---- */
+
+.shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.5rem;
+  margin: 1.75rem 0;
+  max-width: none;
+}
+
+figure.shot {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+figure.shot img {
+  width: 100%;
+  height: auto;
+  min-height: 140px;
+  background: var(--surface-2);
+  object-fit: cover;
+}
+
+figure.shot figcaption {
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+}
+
+/* ---- Footer ---- */
+
+footer {
+  border-top: 1px solid var(--border);
+  padding-block: 2rem;
+}
+
+footer p {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  max-width: 42rem;
+}
+
+/* ---- 404 page ---- */
+
+.error-page main {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+}
+
+.error-page .wrap {
+  padding-block: 4rem;
+}
+
+.error-code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 1rem;
+  margin-bottom: 0.75rem;
+}

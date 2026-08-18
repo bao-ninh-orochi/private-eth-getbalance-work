@@ -29,10 +29,12 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 | Observability | `GET /metrics` (Prometheus text) + `GET /status` (a polling page) ship block lag, answer latency, error rate by class, store occupancy, save/journal outcomes (ADR-0039, §2 item 2); logging is still `println!`/`eprintln!` only — no `tracing` |
 | Panic audit | **not done** — `clippy::unwrap_used`/`expect_used` not yet enabled (§2 item 1) |
 
-**One key still missing:** CI needs the `IKPIR_TOKEN` secret (fine-grained
+~~**One key still missing:** CI needs the `IKPIR_TOKEN` secret (fine-grained
 PAT, IKPIR repo only, Contents read-only — deploy keys are *disabled* on
 that repo). Until the user mints it, every CI job fails early with an
-explicit `::error`. Two minutes; see `.github/workflows/ci.yml`'s header.
+explicit `::error`.~~ **Closed** — `bao-ninh-orochi/IKPIR` is public now,
+pinned at the `v0.1.0-perf` tag; CI needs no secret, and the
+`IKPIR_TOKEN`/`insteadOf` plumbing is gone (ADR-0045).
 
 ## 1. Done — with the finding that motivated each
 

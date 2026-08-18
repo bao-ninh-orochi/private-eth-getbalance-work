@@ -1,4 +1,4 @@
-# private-ETH-getBalance
+# private-eth-getbalance
 
 A proof-of-concept **private Ethereum RPC**: answer `eth_getBalance` without the
 server learning which account was asked about, using **RisePIR** (the LWE
@@ -78,9 +78,9 @@ attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
 ## Build
 
 Depends on the IKPIR primitive, pinned as a git dependency
-(`bao-ninh-orochi/IKPIR` @ `0f3b99b`, the `perf/optimized` tip) — building needs
-read access to that repo; `.cargo/config.toml` sets `git-fetch-with-cli` (system
-git credentials) and `target-cpu=native` (git deps do **not** inherit the
+(`bao-ninh-orochi/IKPIR` @ `v0.1.0-perf`, the `perf/optimized` tip) — the fork
+is public, so building needs no credentials. `.cargo/config.toml` sets
+`git-fetch-with-cli` and `target-cpu=native` (git deps do **not** inherit the
 upstream perf config).
 
 ## The core idea in one paragraph

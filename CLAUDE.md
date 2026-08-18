@@ -38,13 +38,24 @@ today** and there is a **live GCP deployment** (below).
 
 ## Build & test
 
-- The PIR primitive is a **pinned git dep**: `bao-ninh-orochi/IKPIR` @
-  `0f3b99b` (`perf/optimized` tip, 2026-07-31 — the f=64 / corrected-Lemma-2
-  merge; ADR-0042 kept this repo at `fingerprint_bits = 32`, so the bump moved
-  no geometry). Needs read access to that private repo;
-  `.cargo/config.toml` sets `git-fetch-with-cli` + `target-cpu=native`. The
-  local checkout at `../CANS2026/RisePIR` drifts — read it for API signatures,
-  **never** path-dep it.
+- The PIR primitive is a **pinned git dep**: `bao-ninh-orochi/IKPIR` — the
+  URL is unchanged, but the pin moved from `rev = "0f3b99b"` to `tag =
+  "v0.1.0-perf"`, an annotated, signed tag on the `perf/optimized` tip
+  (commit `adecd9c`): `0f3b99b` (the f=64 / corrected-Lemma-2 merge,
+  2026-07-31) merged with `orochi-network/IKPIR` main, so a strict superset.
+  The `crates/` tree at the tag is bit-identical to `0f3b99b` — no kernel, no
+  hash lineage (`xxh3_128`/`RPST3`), no PIR geometry moved, so ADR-0042's
+  finding that the bump left `fingerprint_bits = 32` untouched still holds,
+  every number measured against `0f3b99b` is still valid, and state files a
+  `0f3b99b` build wrote still load. The tag is immutable; a future perf
+  revision gets a new tag. `bao-ninh-orochi/IKPIR` is now **public**, so
+  fetching it needs no credential. It stays a personal fork rather than
+  `orochi-network/IKPIR` itself because the org's `main` can't serve this
+  dependency — its `ikpir-common` declares no `[features]` section at all
+  (no `parallel` feature) and has neither `backend/gemm.rs` nor
+  `backend/prg.rs`. `.cargo/config.toml` sets `git-fetch-with-cli` +
+  `target-cpu=native`. The local checkout at `../CANS2026/RisePIR` drifts —
+  read it for API signatures, **never** path-dep it.
 - Gates, in escalating strength: `cargo test --workspace` (fast, run always) →
   `cargo run -p xtask --release -- conformance` (byte-exact vs ground truth) →
   `cargo test -p risepir-feed --release -- --ignored` (live: trace parsing vs an
@@ -66,9 +77,9 @@ today** and there is a **live GCP deployment** (below).
 - CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
   --all-targets -- -D warnings` + the tests on every push, conformance and the
   browser gate (mock mode, real headless Chromium) on PRs, and runs the live
-  gate plus the `fuzz/` targets nightly. It fetches the private IKPIR dep via
-  the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR only, Contents read-only —
-  deploy keys are disabled on that repo). **`cargo fmt --all -- --check` is a
+  gate plus the `fuzz/` targets nightly. `bao-ninh-orochi/IKPIR` is public
+  now, so CI fetches it with no credential — the old `IKPIR_TOKEN` secret and
+  its `insteadOf` URL rewrite are gone. **`cargo fmt --all -- --check` is a
   gate** as of 2026-07-31, running first in the `clippy + tests` job — the
   one-off mechanical reformat it was waiting on has landed, and that commit is
   in `.git-blame-ignore-revs` (run `git config blame.ignoreRevsFile
@@ -76,14 +87,42 @@ today** and there is a **live GCP deployment** (below).
 
 ## Git conventions
 
-- Branch → PR → self-merge into `main` (the `PGR-###` rules in the global guide):
-  cut a `type/slug` branch off a synced `main`, open a PR against `origin`'s
-  `main`, get CI green, then squash-merge and delete the branch
-  (`gh pr merge <#> --squash --delete-branch`). **No fork** — `origin` is this
-  repo; there is no `upstream`. `main` is protected by convention (no direct
-  pushes; server-side branch protection needs GitHub Pro for a private repo — see
-  PGR-007). Sign every commit; if signing hangs: `ssh-add --apple-use-keychain`.
-  **No AI-attribution trailers or footers.**
+- **Fork-based, and merged by someone else — the flip from before.** This
+  repo moved under `orochi-network`, so it now runs on the ONR rules in the
+  global guide, not the personal-repo (PGR) ones this section used to
+  encode. `origin` is a personal fork,
+  `bao-ninh-orochi/private-eth-getbalance-work` (the `-work` suffix only
+  because a case-insensitive collision with the pre-existing
+  `bao-ninh-orochi/private-ETH-getBalance` ruled out the plain name);
+  `upstream` is `orochi-network/private-eth-getbalance`. PRs are opened
+  **from the fork branch against `upstream`'s default branch** — this is
+  also the concrete permission reality, not a style choice: on
+  `orochi-network/private-eth-getbalance` the author has `push:false` /
+  `pull:true` / `triage:true` as a plain org member, so there is no branch
+  creation and no direct push on `upstream` itself. Forking is the only way
+  in.
+- **The author never self-merges — the single most important inversion.**
+  Review and merge belong to a separate reviewer agent, `on-unknown-fish`,
+  on its own account and its own tooling; the author requests its review and
+  answers every comment, but the merge button is never theirs to press.
+- Sync `main` from `upstream` before cutting a branch — confirm `main ==
+  origin/main == upstream/main` — then cut a `type/slug` branch (`feat/`,
+  `fix/`, `docs/`, `chore/`) off it. One logical change per branch; atomic
+  commits whose messages explain *why*, not just what.
+- Open the PR as a **draft** while work is in progress; mark it ready only
+  once it is implementation-complete **and** CI is green — both conditions,
+  not either. CI green is required before anything merges, full stop —
+  never around it.
+- Sign every commit (SSH: `gpg.format ssh`, `commit.gpgsign true`); if
+  signing hangs: `ssh-add --apple-use-keychain`. Never push unsigned.
+- **No AI-attribution trailers or footers anywhere on GitHub** — no
+  `Co-Authored-By: Claude` trailer, no "Generated with Claude Code" footer,
+  in PR bodies, PR comments, or issue comments.
+- `gh`, never `curl`, for every GitHub operation.
+- Tracking lives on ONKaban
+  (<https://github.com/orgs/orochi-network/projects/16>) for org issues —
+  assign yourself and move the card as the PR progresses; field IDs and the
+  fuller workflow are in the global guide, not repeated here.
 
 ## The binary (`risepir-rpc`)
 
@@ -124,8 +163,8 @@ operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
 
 ## The live GCP deployment
 
-Project **`risepir-poc`**, VM **`risepir`** (**`e2-highmem-8`, 8 vCPU / 64 GB,
-250 GB disk**, Debian 12, `us-central1-a`); repo at `~/private-ETH-getBalance`,
+Project **`<your-project-id>`**, VM **`risepir`** (**`e2-highmem-8`, 8 vCPU / 64 GB,
+250 GB disk**, Debian 12, `us-central1-a`); repo at `~/private-eth-getbalance`,
 server runs in tmux session `risepir` with `--state ~/risepir-state.bin`, logs
 at `~/server-complete.log`. The Mac's `gcloud` + `gh` are authenticated; the VM
 is drivable non-interactively.
@@ -181,7 +220,7 @@ gcloud --quiet compute ssh risepir --command='...'
 gcloud compute instances start risepir
 # normal restart: the 36 GB state file is loaded, then missed blocks replay
 gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
-  "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet \
+  "cd ~/private-eth-getbalance && exec ./target/release/risepir-rpc mainnet \
    --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
 ```
 

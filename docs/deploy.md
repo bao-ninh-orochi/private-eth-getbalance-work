@@ -42,9 +42,9 @@ current finalized block and tracks exactly the accounts mainnet touches from tha
 moment on.
 
 ```bash
-git clone git@github.com:bao-ninh-orochi/private-ETH-getBalance.git
-cd private-ETH-getBalance
-cargo build --release -p risepir-rpc          # needs access to the pinned IKPIR repo
+git clone https://github.com/orochi-network/private-eth-getbalance.git
+cd private-eth-getbalance
+cargo build --release -p risepir-rpc
 
 ./target/release/risepir-rpc mainnet --partial
 ```
@@ -517,17 +517,11 @@ file's bit-identical `A`/hints).
    the co-located front end, tunnel instead: `ssh -L 8545:localhost:8545 <box>`
    (zero flags needed — the default loopback bind then just works).
 3. **Build on the box** (cross-compiling from macOS to Linux is avoidable
-   friction): install rustup + git, then give the box read access to *both*
-   private repos. **Not per-repo deploy keys** — GitHub allows a deploy key on
-   only one repository, and two repos are needed (this one plus the pinned
-   IKPIR dep). Instead: `ssh-keygen` on the box and add the public key as an
-   **account SSH key** (github.com/settings/keys), plus
-   `git config --global url."git@github.com:".insteadOf "https://github.com/"`
-   — required because cargo fetches the IKPIR dep by its https URL, and the
-   rewrite routes that fetch through the SSH key. Then clone via SSH and
-   `cargo build --release -p risepir-rpc`. On a 2 GB instance add swap first
-   (`fallocate -l 4G /swapfile …`) or build once on a larger spot box and copy
-   the binary (same arch).
+   friction): install rustup + git, clone over HTTPS, and `cargo build
+   --release -p risepir-rpc` — both this repo and the pinned IKPIR dep are
+   public now, so the box needs no GitHub credentials. On a 2 GB instance add
+   swap first (`fallocate -l 4G /swapfile …`) or build once on a larger spot
+   box and copy the binary (same arch).
 4. **Run** under `nohup`/`tmux`/systemd:
    `./risepir-rpc mainnet --partial --bind 0.0.0.0` (demo) or the full
    `--snapshot … --state …` form (§2.2). Then on the laptop:
@@ -568,7 +562,7 @@ Concept map first — GCP is EC2 with different nouns:
 
 ```bash
 brew install --cask google-cloud-sdk
-gcloud init                    # browser login; create project e.g. "risepir-poc"; pick us-central1-a
+gcloud init                    # browser login; create project e.g. "<your-project-id>"; pick us-central1-a
 ```
 
 Activate the **$300/90-day free trial** in the console (console.cloud.google.com —
@@ -584,7 +578,7 @@ happened on first setup, 2026-07-19):
 
 ```bash
 gcloud billing accounts list          # note the ACCOUNT_ID with OPEN: True
-gcloud billing projects link risepir-poc --billing-account=<ACCOUNT_ID>
+gcloud billing projects link <your-project-id> --billing-account=<ACCOUNT_ID>
 ```
 
 (Older SDKs spell it `gcloud beta billing …`. Empty list ⇒ the trial was never
@@ -594,7 +588,7 @@ the console as the org admin, or Manage Resources → select the project →
 Migrate it into the organization, then link.) Now:
 
 ```bash
-gcloud config set project risepir-poc
+gcloud config set project <your-project-id>
 gcloud config set compute/zone us-central1-a     # us-central1: same multi-region as the BigQuery public data
 gcloud services enable compute.googleapis.com
 ```
@@ -636,17 +630,16 @@ gcloud compute firewall-rules create risepir-pir \
 
 **On the VM** — identical to §3.5's build-on-box recipe: `sudo apt-get update &&
 sudo apt-get install -y build-essential git curl pkg-config tmux`, install
-rustup, add the VM's `ssh-keygen` public key as an **account** SSH key
-(github.com/settings/keys — see §3.5 for why per-repo deploy keys do not work
-here) with the https→SSH `insteadOf` rewrite, clone, `cargo build --release
--p risepir-rpc`, run in `tmux` with `--state`. The instance-create warning
+rustup, clone over HTTPS (no GitHub credentials needed — both this repo and
+the pinned IKPIR dep are public), `cargo build --release -p risepir-rpc`, run
+in `tmux` with `--state`. The instance-create warning
 about disk size vs 10 GB image size is expected and harmless — Debian grows
 the root partition on first boot (`df -h /` shows the full disk). Pull the snapshot shards straight
 from the export bucket: `gcloud storage cp 'gs://<your-bucket>/balances-*.csv.gz' .`
 (if the VM's default service account lacks bucket read, the two-minute fix is
 `gcloud auth login` on the VM and retry).
 
-**Verified on GCP, 2026-07-19** (project `risepir-poc`, `e2-medium`/Debian 12 in
+**Verified on GCP, 2026-07-19** (project `<your-project-id>`, `e2-medium`/Debian 12 in
 `us-central1-a`, repo at 58cf7a5): clean-VM build in 4m09s; `mainnet --partial
 --state` bootstrapped at finalized block 25,565,340 and followed live bursts;
 **6/6 private queries byte-exact** vs publicnode *while the head advanced under
@@ -737,7 +730,7 @@ for the complete set — it burns **~$8.60/day** running, against ~$10/mo for th
 restart is a file load rather than a re-bootstrap — and since ADR-0025 the
 server also rewrites the file every `--save-interval` anyway, so even a missed
 Ctrl-C only costs the last ≤30 min of blocks as replay); `…delete` to zero it;
-`gcloud billing projects describe risepir-poc` / the console's Billing page shows
+`gcloud billing projects describe <your-project-id>` / the console's Billing page shows
 credit burn-down. After the credit: switch the same VM to Spot (~$95–130/mo at
 64 GB) — Oracle's free tier is no longer an option at this size.
 
@@ -857,7 +850,7 @@ seconds after a restart). `ops/caddy/Caddyfile` is the deployed config.
 **4. The server, as usual.** Caddy 502s until it is up:
 
 ```bash
-tmux new-session -d -s risepir "cd ~/private-ETH-getBalance && exec \
+tmux new-session -d -s risepir "cd ~/private-eth-getbalance && exec \
   ./target/release/risepir-rpc mainnet --partial --partial-capacity 1000000 \
   --web web --state ~/risepir-state.bin >> ~/server.log 2>&1"
 ```
@@ -1144,7 +1137,7 @@ clean and answered `0x0` for every account.
 
 ```bash
 gcloud compute instances start risepir
-gcloud --quiet compute ssh risepir --command='cd ~/private-ETH-getBalance && \
+gcloud --quiet compute ssh risepir --command='cd ~/private-eth-getbalance && \
   git pull && cargo build --release -p risepir-rpc && \
   cargo run -p xtask --release -- web'
 # The state file must move aside, or --snapshot is silently ignored:
@@ -1333,7 +1326,7 @@ independent verification above exists precisely because that backstop was down.
 The operation §5.3's note said had not happened yet, done on the live box, from
 the same 321 shards §5.3 used. Sequence: graceful `SIGINT` (state saved, 36 GB),
 `instances stop` → `TERMINATED`, `instances start`, `duckdns-update.sh` **first**
-(the external IP moved to `136.112.237.199`), then `git` `49052b3 → c274737`
+(the external IP moved to a new ephemeral address), then `git` `49052b3 → c274737`
 (16 commits), rebuild, move the old state file aside, `~/bootstrap-complete.sh`.
 
 **The refusal fires first, and by name.** Pointing the new binary at the existing
@@ -2193,7 +2186,7 @@ probe that only tried the private ports could not distinguish "the firewall
 is correctly closed" from "the whole VM is unreachable".
 
 **The old DuckDNS name — was broken, now fixed.** It resolved to
-**`34.59.149.148`**, not the VM — precisely the failure mode §3.7 documents
+**a third party's address**, not the VM — precisely the failure mode §3.7 documents
 ("forgetting it left the origin pointing at whoever now held the old
 address"): the VM's old *ephemeral* address, released when the static IP was
 attached, now held by someone else. Caddy and the certificate were correct
@@ -2310,7 +2303,7 @@ client, the DuckDNS fix, and the stop — cost roughly **$0.66**, against the
 
 | step | who | needs |
 |---|---|---|
-| build (`cargo build --release`) | either of us | access to the pinned `bao-ninh-orochi/IKPIR` repo |
+| build (`cargo build --release`) | either of us | nothing — `bao-ninh-orochi/IKPIR` is public now |
 | §1 partial demo, end to end | either of us (already done, §5) | nothing |
 | §2.1 gate query + export | ~~**you**~~ — **done 2026-07-26**, driven from this environment after `gcloud services enable bigquery.googleapis.com` (the project already had billing, so no separate Google-account step was needed after all) | BigQuery + a GCS bucket on the same project |
 | §2.2 complete-mainnet run | **done 2026-07-26** — live on the 64 GB box (§5.3) | the shards + the two gate numbers |

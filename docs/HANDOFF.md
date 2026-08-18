@@ -1,4 +1,4 @@
-# Handoff prompt — continue building private-ETH-getBalance
+# Handoff prompt — continue building private-eth-getbalance
 
 *Paste this into a fresh session to continue. It is self-contained; the linked docs are
 the detail.*
@@ -6,14 +6,14 @@ the detail.*
 ---
 
 You are continuing a proof-of-concept **private `eth_getBalance` over RisePIR** (LWE
-keyword-PIR). Work in `/Users/admin/Documents/private-ETH-getBalance` (git repo, remote
-`bao-ninh-orochi/private-ETH-getBalance`, branch `main`).
+keyword-PIR). Work in your checkout of this repository (git repo, remote
+`orochi-network/private-eth-getbalance`, branch `main`).
 
 **Before writing code, read, in order:** `docs/plan.md` (authoritative spec),
 `docs/deploy.md` (the runbook + recorded live evidence), `docs/adr/README.md`
 (decisions; ADR-0017/0018 are the newest), `docs/sync.md`. The PIR primitive is a
-**pinned git dep** (`bao-ninh-orochi/IKPIR` @ `0f3b99b`); a local checkout lives at
-`/Users/admin/Documents/CANS2026/RisePIR` — **read its source for exact signatures;
+**pinned git dep** (`bao-ninh-orochi/IKPIR` @ `v0.1.0-perf`); a local checkout of the
+primitive may live alongside this one — **read its source for exact signatures;
 never guess an API** (but do not build against the checkout: it moves; the pin is the
 truth).
 

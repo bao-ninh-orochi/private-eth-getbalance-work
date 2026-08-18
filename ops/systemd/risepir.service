@@ -15,7 +15,7 @@
 
 [Unit]
 Description=RisePIR private eth_getBalance server (mainnet --partial)
-Documentation=https://github.com/bao-ninh-orochi/private-ETH-getBalance
+Documentation=https://github.com/orochi-network/private-eth-getbalance
 After=network-online.target
 Wants=network-online.target
 
@@ -23,8 +23,8 @@ Wants=network-online.target
 Type=simple
 # Edit these three to the deployment's login and checkout path.
 User=risepir
-WorkingDirectory=/home/risepir/private-ETH-getBalance
-ExecStart=/home/risepir/private-ETH-getBalance/target/release/risepir-rpc mainnet --partial --state /home/risepir/risepir-state.bin
+WorkingDirectory=/home/risepir/private-eth-getbalance
+ExecStart=/home/risepir/private-eth-getbalance/target/release/risepir-rpc mainnet --partial --state /home/risepir/risepir-state.bin
 
 # Graceful shutdown = the binary's own SIGINT save path. The save is
 # seconds in partial mode but can be minutes at complete-set scale — and

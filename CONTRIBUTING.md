@@ -13,11 +13,9 @@ The workspace pins Rust via [`rust-toolchain.toml`](rust-toolchain.toml)
 (rustup selects it automatically). Bump the pin deliberately and in its own
 commit — `docs/numbers.md` measurements are toolchain-sensitive.
 
-Building needs read access to the private pinned dependency
-`bao-ninh-orochi/IKPIR` (`.cargo/config.toml` sets `git-fetch-with-cli`, so
-your system git credentials are used). CI authenticates with the
-`IKPIR_TOKEN` secret — a fine-grained PAT scoped to that repo, Contents
-read-only (see the provisioning note in `.github/workflows/ci.yml`).
+The pinned dependency `bao-ninh-orochi/IKPIR` (`Cargo.toml`, tag
+`v0.1.0-perf`) is a public repo now, so building needs no credentials and CI
+needs no PAT — the old `IKPIR_TOKEN`/`insteadOf` wiring is gone (ADR-0045).
 
 ## Gates, in escalating strength
 

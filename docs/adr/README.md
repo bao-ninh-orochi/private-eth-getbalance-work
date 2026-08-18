@@ -503,7 +503,7 @@ check is operator-side only (client-side per-query use reveals the address), and
 plaintext HTTP widens "the operator" to "anyone on-path", making TLS a
 prerequisite for naming a trusted party at all.
 
-### ADR-0021 — CI: GitHub Actions with a read-only deploy key for the private primitive **[NEW]**
+### ADR-0021 — CI: GitHub Actions with a read-only deploy key for the private primitive **[NEW]** **[SUPERSEDED IN PART by ADR-0045 — the IKPIR dependency is no longer private, so the `IKPIR_TOKEN` PAT and its `insteadOf` wiring are gone; every other gate it chose still stands]**
 
 **Chosen:** GitHub Actions (`.github/workflows/`): clippy `-D warnings` + full
 workspace tests on every push/PR; the network-free `xtask conformance` gate on
@@ -528,7 +528,7 @@ when a human remembered — the highest impact-per-hour item in the roadmap. The
 deploy-key choice is the standard least-privilege answer to "CI must read a
 private sibling repo".
 
-### ADR-0022 — cargo-deny runs on the host, not in the Docker action, so it sees the IKPIR credential **[NEW]**
+### ADR-0022 — cargo-deny runs on the host, not in the Docker action, so it sees the IKPIR credential **[NEW]** **[RATIONALE SUPERSEDED by ADR-0045 — there is no credential to see any more; the host-side placement stays, for the one-toolchain-path reason, not the credential one]**
 
 **Chosen:** run `cargo deny check` directly on the runner, with cargo-deny
 installed via `taiki-e/install-action` (SHA-pinned). It then inherits the exact
@@ -3452,3 +3452,90 @@ this ADR overrides.
 **Status:** decided 2026-08-17. Clean to do because the repo is private and
 single-author: a license grant is irrevocable, so relicensing only ever binds
 future recipients, and here there are no past ones to grandfather.
+
+### ADR-0045 — The IKPIR dependency resolves from a **public personal fork** at tag `v0.1.0-perf`; `orochi-network/IKPIR` is deliberately untouched **[NEW — supersedes ADR-0021's private-primitive credential wiring and ADR-0022's rationale; records the provenance tradeoff this leaves behind]**
+
+**Chosen:** pin `ikpir-common` / `segmented-cuckoo` / `ikpir-server` at
+`{ git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }` — an
+annotated, SSH-signed tag on the `perf/optimized` tip of a **public** personal
+fork — and publish this PoC as a **standalone** repository,
+`orochi-network/private-eth-getbalance`.
+**Rejected:** four alternatives, each for a concrete reason, below.
+**Why:** the pin had to move — the old `rev = "0f3b99b"` lived only on a private,
+detached archive, so the workspace as imported did not build for anyone but its
+author — and every path that would have kept the dependency inside the org turns
+out to be closed. What follows is which ones, and how they close.
+
+**Rejected: point at `orochi-network/IKPIR` main.** This is the one everybody
+will ask about first, and it is not a preference — the workspace would not
+build. Upstream main's `ikpir-common` declares **no `[features]` section at
+all**, so there is no `parallel` feature for a dependent to enable or subtract;
+and neither `backend/gemm.rs` nor `backend/prg.rs` exists there. ADR-0019's
+arrangement depends on that feature existing in both directions at once: every
+crate here re-enables `ikpir-common/parallel`, and `risepir-wasm` alone
+subtracts it, because rayon has no threads to fan out to on
+`wasm32-unknown-unknown` and panics rather than degrading. Against upstream
+main there is nothing to subtract and nothing to re-enable. This is structural,
+not a performance preference.
+
+**Rejected: push `perf/optimized` to `orochi-network/IKPIR` and pin that.** The
+right answer in principle, and unavailable in practice: on that repository this
+author has `{"admin":false,"maintain":false,"push":false,"pull":true,
+"triage":true}` and is a plain org member. No branch creation, no tag creation,
+no direct push. A pull request cannot substitute, because **a PR's base branch
+must already exist** — the very thing the permission denies. Asking an org owner
+to create it was ruled out for this change. So the org repository's `main` is
+left exactly as it was (`2a9ef82`), with no new branch, no new tag, and no PR
+against it; that was a deliberate constraint on this work, not an oversight.
+
+**Rejected: ship this PoC as an example crate inside IKPIR,** which would have
+made the dependency internal and the whole question moot. Three blockers. MSRV:
+IKPIR pins 1.85.0 for its paper numbers, this workspace pins 1.96.0, and one
+repository cannot honour both. `.cargo/config.toml`: both repositories carry
+one and cargo reads only the *build's* workspace root, so the two would collide
+rather than compose. CI: the library's gates would acquire a dependency on live
+Ethereum RPC and on headless Chromium, which is the wrong thing to make a
+reference implementation's `main` depend on.
+
+**Rejected: vendor IKPIR into this tree.** ADR-0021 already rejected it for
+drift and bloat; nothing about going public changes that, and vendoring would
+also erase the provenance the tag makes legible.
+
+**A tag, not a rev.** `v0.1.0-perf` is annotated and signed, and immutable by
+convention: a future perf revision gets a **new** tag, never a moved one. So it
+pins exactly as hard as a rev while naming *why* that commit. Two properties
+were verified before it was cut, because the deployment depends on both: its
+tree under `crates/` is **bit-identical** to `0f3b99b` (tree
+`0a1267c182eb526ed807b27a53b47980b8a7d886`), so no kernel, no hash lineage
+(`xxh3_128` / `RPST3`) and no PIR geometry moved — every number in
+`docs/numbers.md` carries over unmeasured, and the 24 GB state file on the
+deployment VM still loads; and the branch is `0f3b99b` merged with upstream
+`main`, so it is a strict **superset** of the org's reference implementation
+rather than a divergence from it.
+
+**What going public buys, concretely.** ADR-0021 fetched the then-private
+primitive with a fine-grained PAT stored as the `IKPIR_TOKEN` Actions secret,
+wired through a `git config url.<...>.insteadOf` rewrite in five places in
+`ci.yml` and two in `nightly.yml`; ADR-0022 then moved `cargo deny` host-side
+specifically so it could *see* that credential. All of it is deleted here. CI
+now fetches the dependency anonymously — verified by an unauthenticated
+`git clone --branch v0.1.0-perf`. `cargo deny` stays host-side, for the reason
+that survives: one identical toolchain and config path for every cargo-touching
+job. `.cargo/config.toml` keeps `git-fetch-with-cli = true` for the same
+one-transport reason, no longer a credential one. `deny.toml`'s `allow-git`
+already named this exact URL and needed no change.
+
+**The tradeoff, stated plainly.** This leaves an Orochi artifact whose build
+resolves a dependency from an individual's personal account. That is a real
+provenance and continuity cost: the fork is a single point of control, and if
+it were deleted, renamed, or made private, **every build of this repository —
+including its CI — would break.** It is accepted here because the alternatives
+are "does not build" and "cannot be done with the permissions available", not
+because it is good. The honest exit is upstreaming `perf/optimized` (or an
+equivalent `parallel` feature) into `orochi-network/IKPIR` and repointing the
+pin at an org-owned tag; that is a decision for someone with push rights there,
+and it is a one-line change in the root `Cargo.toml` when it happens. Until
+then `bao-ninh-orochi/IKPIR` must not be deleted, renamed, or made private.
+
+**Status:** decided 2026-08-19, with the import of this project into
+`orochi-network/private-eth-getbalance`. `v0.1.0-perf` = commit `adecd9c`.

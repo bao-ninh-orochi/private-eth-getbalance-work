@@ -31,7 +31,7 @@ that turns "faster" into "otherwise impossible" (§7).
 
 ## 2. Current state
 
-Seven crates, all committed and pushed to `bao-ninh-orochi/private-ETH-getBalance`
+Seven crates, all committed and pushed to `orochi-network/private-eth-getbalance`
 (signed, Verified), **164 tests passing**, and the binary **runs against real
 mainnet** (recorded live evidence in [`deploy.md`](deploy.md) §5):
 
@@ -172,9 +172,9 @@ crates/
 .cargo/config.toml  target-cpu=native   ← git deps do NOT inherit the upstream perf config
 ```
 
-Git dep on the PIR primitive (pin the rev — the branch lives only on the fork):
+Git dep on the PIR primitive (pin the tag — the branch lives only on the fork):
 ```toml
-ikpir-common = { git = "https://github.com/bao-ninh-orochi/IKPIR", rev = "0f3b99b" }   # perf/optimized tip
+ikpir-common = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }   # perf/optimized tip
 ```
 (Currently path deps to a local checkout; switch to the git dep before hand-off is
 final.)
@@ -255,8 +255,9 @@ with the §3.5 encoding: **~12 GB** — it runs on a normal machine.
 The full measured Stage-3 table — every scale, the per-block-patch curve over
 mutations/block, delta compaction on realistic balances, sizes, and answer latency — is
 in [`docs/numbers.md`](numbers.md), produced by `xtask bench`. It is measured against the
-workspace's pinned IKPIR `perf/optimized` rev (`0f3b99b`); see that file's "IKPIR build"
-note — the pin and the numbers move together, never separately.
+workspace's pinned IKPIR `perf/optimized` commit (`0f3b99b`, now tagged `v0.1.0-perf`,
+ADR-0045); see that file's "IKPIR build" note — the pin and the numbers move together,
+never separately.
 
 ## 8. Never-return-a-wrong-answer checklist
 

@@ -1530,13 +1530,15 @@ impl BenchReport {
         writeln!(
             out,
             "**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers \
-             here are measured against the workspace's pinned IKPIR `perf/optimized` rev \
-             (`0f3b99b`, 2026-07-31 — see the root `Cargo.toml`), with the default-on `parallel` \
-             feature (rayon matvec/GEMM kernels). A `--no-default-features` build reports \
-             substantially slower, single-threaded rebuild/answer times (the sizes and delta-byte \
-             figures are unaffected). `xtask bench` prints to stdout by default; pass `--write` to \
-             overwrite this file, and only do so from a build against the pinned rev — bump the rev \
-             and these numbers together, never separately."
+             here are measured against the workspace's pinned IKPIR `perf/optimized` tag \
+             (`v0.1.0-perf` — see the root `Cargo.toml`), with the default-on `parallel` feature \
+             (rayon matvec/GEMM kernels). The tag replaced the `0f3b99b` rev these were originally \
+             measured on; its `crates/` tree is bit-identical to that rev, so the measurements \
+             carry over unchanged. A `--no-default-features` build reports substantially slower, \
+             single-threaded rebuild/answer times (the sizes and delta-byte figures are \
+             unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite \
+             this file, and only do so from a build against the pinned tag — bump the pin and \
+             these numbers together, never separately."
         )
         .unwrap();
         if let Some(reason) = &self.top_scale_fallback_reason {

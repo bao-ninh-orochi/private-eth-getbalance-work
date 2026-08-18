@@ -44,15 +44,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Authenticate the private IKPIR dependency
-        env:
-          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
-        run: |
-          if [ -z "$IKPIR_TOKEN" ]; then
-            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test -p risepir-feed --release -- --ignored
 
@@ -61,15 +52,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Authenticate the private IKPIR dependency
-        env:
-          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
-        run: |
-          if [ -z "$IKPIR_TOKEN" ]; then
-            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: |

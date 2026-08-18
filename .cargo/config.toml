@@ -28,8 +28,10 @@ rustflags = ["-C", "target-cpu=native"]
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="custom"']
 
-# The pinned IKPIR git dep lives in a private repo; cargo's built-in libgit2
-# fetch cannot use the system credential helper, so fetch via the git CLI
-# (which can — the same credentials `git push` on this repo already uses).
+# The IKPIR git dep is public now, so this setting is no longer about
+# credentials. It stays because cargo's built-in libgit2 transport is
+# the less-exercised path: the git CLI is what every other fetch in
+# this project (and on the deployment VM) already uses, so keeping one
+# transport avoids a class of divergence.
 [net]
 git-fetch-with-cli = true

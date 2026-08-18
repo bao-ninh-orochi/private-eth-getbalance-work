@@ -17,16 +17,6 @@
 # It was deliberately absent until then (ADR-0021: the tree predated
 # rustfmt.toml) and turned on immediately after the one-off mechanical
 # reformat landed — that commit is listed in `.git-blame-ignore-revs`.
-#
-# The pinned IKPIR dependency is a *private* repo: every job that touches
-# cargo needs the IKPIR_TOKEN secret — a fine-grained PAT with read-only
-# Contents access to bao-ninh-orochi/IKPIR only (deploy keys are disabled on
-# that repo; ADR-0021). `.cargo/config.toml` sets `git-fetch-with-cli`, so
-# plain git config is all the wiring cargo needs. To provision:
-#   github.com/settings/personal-access-tokens → new fine-grained token,
-#   Resource owner bao-ninh-orochi, repository access: only IKPIR,
-#   permissions: Contents Read-only; then
-#   gh secret set IKPIR_TOKEN -R bao-ninh-orochi/private-ETH-getBalance
 
 name: CI
 
@@ -75,15 +65,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Authenticate the private IKPIR dependency
-        env:
-          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
-        run: |
-          if [ -z "$IKPIR_TOKEN" ]; then
-            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # First check in the job: it is the cheapest one here and needs no
       # compilation, so a formatting slip fails in seconds instead of after
@@ -111,15 +92,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Authenticate the private IKPIR dependency
-        env:
-          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
-        run: |
-          if [ -z "$IKPIR_TOKEN" ]; then
-            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo run -p xtask --release -- conformance
 
@@ -137,15 +109,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Authenticate the private IKPIR dependency
-        env:
-          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
-        run: |
-          if [ -z "$IKPIR_TOKEN" ]; then
-            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -224,20 +187,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Authenticate the private IKPIR dependency
-        env:
-          IKPIR_TOKEN: ${{ secrets.IKPIR_TOKEN }}
-        run: |
-          if [ -z "$IKPIR_TOKEN" ]; then
-            echo "::error::IKPIR_TOKEN secret is not set — a fine-grained PAT with read-only Contents access to bao-ninh-orochi/IKPIR (ADR-0021; deploy keys are disabled on that repo)"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${IKPIR_TOKEN}@github.com/bao-ninh-orochi/IKPIR".insteadOf "https://github.com/bao-ninh-orochi/IKPIR"
-      # cargo-deny runs on the host, not in a container (ADR-0022): the auth
-      # step above writes the insteadOf rewrite to the runner's git config, and
-      # only a host-run cargo (via git-fetch-with-cli) sees it. The Docker-based
-      # cargo-deny-action ran with a different $HOME and could not read the
-      # private IKPIR dep — `could not read Username for 'https://github.com'`.
+      # cargo-deny runs on the host, not in a container (ADR-0022). Every
+      # other job in this workflow already runs cargo directly on the
+      # runner under this repo's own toolchain and `.cargo/config.toml`;
+      # keeping cargo-deny host-side too means every cargo-touching job
+      # shares that one path instead of a second one inside a Docker
+      # action's own image and $HOME — one fewer place for the two to
+      # quietly drift apart.
       - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
         with:
           tool: cargo-deny

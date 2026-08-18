@@ -1,0 +1,41 @@
+[package]
+name        = "risepir-server"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+rust-version.workspace = true
+publish     = false
+description = "Batched RisePIR server library: one epoch and one delta bundle per Ethereum block, built directly on segmented-cuckoo's CuckooKVStore and ikpir-common's IndexPirBackend/IncrementalPirBackend primitives (see docs/plan.md §3.2, docs/verification.md Correction 3). No HTTP yet."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# See `risepir-proto`'s own `[features]`: default-on, forwarded, and turned
+# off only by the browser client (ADR-0019).
+[features]
+default  = ["parallel"]
+parallel = ["ikpir-common/parallel", "risepir-proto/parallel"]
+
+[dependencies]
+# Sibling crate in this workspace: Geometry/Sizes, BlockUpdate/BlockDelta,
+# ValueCodec, and the wire codec. Pure types, no I/O (see its own docs).
+risepir-proto = { path = "../risepir-proto", default-features = false }
+
+segmented-cuckoo = { workspace = true }
+ikpir-common = { workspace = true, default-features = false }
+
+[dev-dependencies]
+# Dev-only: the one thing ikpir-server *is* used for here is as an
+# independent oracle in `batched_equals_per_mutation` — proving our
+# from-scratch `fold` reimplementation (crate-private, mirrors
+# ikpir-server's own crate-private `hint_patch::fold_mutations_into_row_deltas`)
+# produces the identical sparse delta transcript upstream's own private
+# implementation would. Never a runtime dependency of this crate.
+ikpir-server = { workspace = true }
+# Dev-only: `tests/full_rebuild_alloc.rs`'s `#[global_allocator]`. Its own
+# `unsafe impl GlobalAlloc` cannot live in this crate — `unsafe_code =
+# "forbid"` above applies to every target in this package, integration
+# tests included, and a command-line forbid cannot be locally overridden
+# (see that crate's lib.rs docs) — so the impl is quarantined there
+# instead, and this crate only ever names the resulting safe `static`.
+alloc-tracker = { path = "../alloc-tracker" }

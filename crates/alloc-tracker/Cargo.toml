@@ -1,0 +1,19 @@
+[package]
+name        = "alloc-tracker"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+rust-version.workspace = true
+publish     = false
+description = "Dev-only: a #[global_allocator]-installable wrapper over std::alloc::System that records the largest single alloc/alloc_zeroed/realloc request size seen while a recording flag is on. Exists so crates/risepir-server/tests/full_rebuild_alloc.rs can pin 'no single allocation as large as the cell array' without that test file itself needing unsafe code (every crate in this workspace forbids/denies unsafe_code — see this crate's own lib.rs docs for why the one unavoidable `unsafe impl GlobalAlloc` lives here instead)."
+
+# Deliberately NO `[lints.rust] unsafe_code = ...` override here: this is
+# the one crate in the workspace that does not forbid/deny unsafe code,
+# because a `GlobalAlloc` impl is `unsafe fn` by the standard library's own
+# trait definition — see `src/lib.rs`'s module docs for the full rationale
+# and why this had to be its own crate rather than a module inside
+# `risepir-server` (whose `unsafe_code = "forbid"` is enforced via a
+# command-line lint flag on every target in that package, including
+# integration tests, and cannot be locally overridden).
+
+[dependencies]

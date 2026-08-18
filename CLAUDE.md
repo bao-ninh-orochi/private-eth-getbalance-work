@@ -1,0 +1,305 @@
+# CLAUDE.md — operating manual for this repo
+
+Proof-of-concept **private `eth_getBalance` over RisePIR** (LWE keyword-PIR over a
+Segmented Cuckoo Filter): a server follows Ethereum mainnet and answers balance
+queries without learning which account was asked. It **works against real mainnet
+today** and there is a **live GCP deployment** (below).
+
+## Read before changing anything
+
+1. [`docs/plan.md`](docs/plan.md) — authoritative spec.
+2. [`docs/deploy.md`](docs/deploy.md) — the runbook + all recorded live evidence.
+3. [`docs/adr/README.md`](docs/adr/README.md) — every decision with rationale;
+   **reasoned deviation is welcome, silent deviation is the failure mode** — new
+   decisions get a new ADR.
+4. [`docs/HANDOFF.md`](docs/HANDOFF.md) — what is left (short version: the
+   user-run BigQuery export upgrades the partial demo to the complete set).
+5. [`docs/threat-model.md`](docs/threat-model.md) — the adversary definitions;
+   a change that moves a security boundary updates it in the same commit.
+
+## The binding rules
+
+- **Never return a wrong answer.** Erroring is fine; labelled-stale is fine; a
+  silently wrong balance is total failure. Every `NotFound`/`DecodeFailed`/
+  `FingerprintAmbiguity`/`CorruptStoredValue`/strict-partial path exists for
+  this. When in doubt, fail loudly.
+- **Partial mode never answers `0x0` for an untracked account** and never
+  applies a withdrawal credit to one (absence only means zero for a *complete*
+  set — ADR-0015/0017; the completeness flag is served via `GET /mode`, never
+  guessed).
+- **Never hardcode `plaintext_bits` or geometry** — derive via
+  `risepir_proto::Geometry`.
+- **Validate every length before allocating** — the server ingests
+  attacker-controlled blobs; malformed input gives a clean error, never a panic.
+- Store writes go through the verified fp ∧ `key_tag` scan
+  (`risepir-server/src/verified.rs`, ADR-0017) — never call the store's
+  key-addressed `update`/`delete` directly (fp-only first-match corrupts
+  colliding entries).
+
+## Build & test
+
+- The PIR primitive is a **pinned git dep**: `bao-ninh-orochi/IKPIR` @
+  `0f3b99b` (`perf/optimized` tip, 2026-07-31 — the f=64 / corrected-Lemma-2
+  merge; ADR-0042 kept this repo at `fingerprint_bits = 32`, so the bump moved
+  no geometry). Needs read access to that private repo;
+  `.cargo/config.toml` sets `git-fetch-with-cli` + `target-cpu=native`. The
+  local checkout at `../CANS2026/RisePIR` drifts — read it for API signatures,
+  **never** path-dep it.
+- Gates, in escalating strength: `cargo test --workspace` (fast, run always) →
+  `cargo run -p xtask --release -- conformance` (byte-exact vs ground truth) →
+  `cargo test -p risepir-feed --release -- --ignored` (live: trace parsing vs an
+  independent provider) → a `mainnet --partial` smoke run (deploy.md §1). Run
+  the live ones after touching the feed or the apply path. Report real output.
+- Touching the browser client (`crates/risepir-wasm`, `web/`) adds two more:
+  `node web/test/e2e.mjs <pir-url>` (real wasm host) and
+  `node web/test/browser.mjs <pir-url>` (headless Chromium — it is the only
+  thing that can see a CSP, and it has already caught one). Both need a server
+  running with `--web web`; both adapt to `GET /mode`; neither needs npm. CI
+  now runs both against `mock` on every PR (the `browser` job): a runner with
+  no browser fails loudly (`--require-browser`) rather than silently skipping.
+  Still run them locally against real mainnet after touching the feed or the
+  apply path — CI's mock server does not exercise that.
+- `ikpir-common` is inherited `default-features = false`; every crate re-enables
+  the rayon kernels via its own default-on `parallel` feature. A new crate
+  depending on it needs that forwarding feature or it silently builds the scalar
+  kernels the numbers were not measured against (ADR-0019).
+- CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
+  --all-targets -- -D warnings` + the tests on every push, conformance and the
+  browser gate (mock mode, real headless Chromium) on PRs, and runs the live
+  gate plus the `fuzz/` targets nightly. It fetches the private IKPIR dep via
+  the `IKPIR_TOKEN` secret (fine-grained PAT, IKPIR only, Contents read-only —
+  deploy keys are disabled on that repo). **`cargo fmt --all -- --check` is a
+  gate** as of 2026-07-31, running first in the `clippy + tests` job — the
+  one-off mechanical reformat it was waiting on has landed, and that commit is
+  in `.git-blame-ignore-revs` (run `git config blame.ignoreRevsFile
+  .git-blame-ignore-revs` once per clone; GitHub honours it automatically).
+
+## Git conventions
+
+- Branch → PR → self-merge into `main` (the `PGR-###` rules in the global guide):
+  cut a `type/slug` branch off a synced `main`, open a PR against `origin`'s
+  `main`, get CI green, then squash-merge and delete the branch
+  (`gh pr merge <#> --squash --delete-branch`). **No fork** — `origin` is this
+  repo; there is no `upstream`. `main` is protected by convention (no direct
+  pushes; server-side branch protection needs GitHub Pro for a private repo — see
+  PGR-007). Sign every commit; if signing hangs: `ssh-add --apple-use-keychain`.
+  **No AI-attribution trailers or footers.**
+
+## The binary (`risepir-rpc`)
+
+```
+mock                          synthetic demo, no network
+mainnet --partial             live mainnet, empty-start honest demo
+mainnet --snapshot … --snapshot-block … --snapshot-accounts … --state …
+                              complete set (shards from deploy.md §2.1)
+mainnet/mock --bind 0.0.0.0   expose listeners (PIR :8645, JSON-RPC :8545)
+client --pir-url http://host:8645
+                              front end + rewind client on THIS machine against
+                              a remote PIR server (address never leaves it)
+mock/mainnet --web web        also serve the browser front end on the PIR port
+                              (ADR-0019); build it first with
+                              `cargo run -p xtask --release -- web`
+```
+
+The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind
+client compiled to wasm **in the page**, so the address never leaves the
+browser. Same origin as the PIR transport on purpose (no CORS, no mixed
+content, `connect-src 'self'` CSP). Assets are read once at startup — restart
+after editing `web/*`. First load is the whole product constraint: 46.51 MB at
+`--partial-capacity 1000000`, but **553.82 MB at the real complete mainnet set**
+(200,503,969 accounts at the `(arity 2, bucket_size 4)` geometry of ADR-0034 —
+**measured on the wire 2026-07-27**, `/setup` = 553,819,345 B = that hint plus
+145 B of framing; was **830.73 MB** at the `(arity 3, bucket_size 4)` lineage
+this box ran until then; the "588 MB" once quoted here predates both, computed
+against an assumed ~130 M). A
+complete-set client now holds **1.11 GB** resident once `A` is expanded (was
+1.66 GB). That is where the CLI `client` takes over. Its residual trust — you
+trust whoever serves the page — is stated on the page itself, not just in the
+ADR.
+
+Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
+operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
+(ADR-0007) — conformance checks must compare at an explicit height, never at
+"latest"-vs-"latest".
+
+## The live GCP deployment
+
+Project **`risepir-poc`**, VM **`risepir`** (**`e2-highmem-8`, 8 vCPU / 64 GB,
+250 GB disk**, Debian 12, `us-central1-a`); repo at `~/private-ETH-getBalance`,
+server runs in tmux session `risepir` with `--state ~/risepir-state.bin`, logs
+at `~/server-complete.log`. The Mac's `gcloud` + `gh` are authenticated; the VM
+is drivable non-interactively.
+
+Since **2026-07-26 it serves the COMPLETE mainnet set** — `GET /mode` = 1, not
+the partial demo. That is what the 64 GB machine is for. On **2026-07-27 it was
+re-bootstrapped onto ADR-0034's `(arity 2, bucket_size 4)`** (deploy.md §5.4),
+and on **2026-07-31 again onto the `xxh3_128`/`RPST3` lineage** after the
+`0f3b99b` pin bump (deploy.md §5.8), from a fresh snapshot: **201,059,658**
+nonzero accounts (was 200,503,969), server DB **23.62 GB**, load 0.749, state
+file **24,176,139,523 B (24.18 GB)**. The geometry has not moved across either
+of the last two rounds — same 67,108,864 buckets, `plaintext_bits` 8,
+cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged.
+
+Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s snapshot
+ingest, 12 min 46 s to the first saved state file, then 10,816 blocks of replay
+at **1.72 blocks/s** (not the ~1 s/block the runbook long assumed). It costs
+**~$8.60/day running**, so stop it when idle.
+
+The complete-set per-block patch time is no longer an extrapolation: **~11.1 ms
+at K ≈ 310** while following the head (8.2–8.8 ms during catch-up, when the
+cache is warmer). `docs/numbers.md` §7 carries the table and what it does to
+§6's ratio.
+
+It is **public** at <https://demo.risepir.org> (Caddy + Let's Encrypt in front
+of a loopback-only `:8645`; deploy.md §3.7), with the old
+`private-eth-getbalance.duckdns.org` still served alongside it during the
+overlap. Only 80/443 are open — `:8545` and `:8645` are never reachable from
+outside (re-verified 2026-08-17, §5.9, with `:443` as a positive control —
+a timeout on the private ports means nothing unless the public one answered
+from the same machine at the same time).
+
+**The URL to cite is <https://risepir.org>, not `demo.`** Since 2026-08-17
+(ADR-0043) the apex is an always-on static page on Cloudflare Pages — *not*
+this VM — so a cited link resolves on the many days the VM is stopped. It
+carries the numbers, screenshots of a real lookup, and ADR-0019's
+residual-trust disclosure, and links onward to the demo. `demo.` is the
+intermittently-available origin and fails hard when the VM is off, which is
+exactly why the apex exists.
+
+Since **2026-08-17** the VM holds the reserved static IP **`136.115.93.177`**,
+so the address no longer moves across stop/start and there is **no DNS step in
+the start path** — the old "run `duckdns-update.sh` *first*, the IP just
+changed" rule is gone. The `demo.` record is deliberately **DNS-only
+(unproxied)** at Cloudflare: proxying would terminate TLS at a third party that
+could then serve a modified wasm client, which is exactly the code-delivery
+trust ADR-0019 discloses (threat model §4.2). Never turn the orange cloud on
+for it.
+
+```bash
+gcloud --quiet compute ssh risepir --command='...'
+# resume after a stop — the IP is static now, so no DNS refresh:
+gcloud compute instances start risepir
+# normal restart: the 36 GB state file is loaded, then missed blocks replay
+gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
+  "cd ~/private-ETH-getBalance && exec ./target/release/risepir-rpc mainnet \
+   --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
+```
+
+While following, the server rewrites the state file every `--save-interval`
+seconds — default **21600** (6 h) now that `--journal-restore` defaults **on**
+(ADR-0037: the journal, not the full save, is what bounds replay after an
+ungraceful kill), or **1800** (30 min, ADR-0025's original value) if
+`--no-journal-restore` is passed; an explicit `--save-interval` always wins
+over either default. A crash or missed Ctrl-C then replays at most the
+journal's tail (well under a second per block) rather than the whole
+interval. Every save logs a `state saved: block …, … GB in …s` completion
+line.
+
+Every runtime log line is prefixed with an RFC 3339 UTC timestamp
+(`2026-07-30T04:12:33Z risepir-rpc mainnet: …`, `logln!` in
+`crates/risepir-rpc/src/logging.rs`); the message after it is unchanged, so
+existing greps match — but a **`^`-anchored** one must drop its anchor. CLI
+banner/usage/argument output stays untimestamped on stdout, deliberately.
+The log does **not** rotate on its own in the tmux shape (it hit 66.79 MB
+before this was addressed): install `ops/logrotate/risepir`, whose
+`copytruncate` is load-bearing — the server never reopens its log, so a
+rename-then-create rotation would leave it writing to the renamed inode
+while the live file stays 0 bytes (deploy.md §4 "Log timestamps and
+rotation"). Never `kill -HUP` it to force a reopen: there is no SIGHUP
+handler, so that terminates the server.
+
+Beside it sits `<state>.journal` (ADR-0026): one small per-block delta,
+appended and fsynced as each block applies, rotated to a fresh file at every
+save. Always written once a first save exists. Restoring from it is now the
+default (`--journal-restore`, ADR-0037 — ADR-0026 shipped it opt-in behind a
+soak period that has since held without a single corruption report): a
+restart replays it and resumes above the last save's height instead of at
+it, recovering to seconds instead of minutes at a fraction of the disk-write
+cost. `--no-journal-restore` opts back out — a restart then only scans and
+reports it (`journal intact: N records to block X`), the original ADR-0026
+soak signal, still available to anyone who wants it.
+
+The `exec` is load-bearing: it makes the binary *be* the tmux pane process, so
+signalling it never involves a wrapper shell. `--web web` is what serves the
+browser front end at all.
+
+**A state file present means `--snapshot` is silently ignored** (`mainnet.rs`
+prints a note and loads the file). That is the trap to know: leaving the old
+*partial* state file in place would have brought the server back up in PARTIAL
+mode while every flag on the command line said complete. Re-bootstrapping from
+the snapshot means moving the state file aside first — and at the complete set
+that costs **~16 min** at the deployed `(2,4)` geometry (8 min ingest + ~6 min
+PIR setup + 2 min save; it was ~33 min at `(3,4)`), *plus* the snapshot→head
+replay, which is the part that actually hurts: ~1 s/block, so a day-old
+snapshot is another ~3 h. Prefer the state file.
+`~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.
+
+**A second, sharper trap since ADR-0034: a geometry change turns "restart"
+into "re-bootstrap."** The deployed geometry moved from `(arity 3, bucket_size
+4)` to `(arity 2, bucket_size 4)`, and the state-file loader now checks the
+stored geometry's arity **by name**, immediately after the header decodes and
+before the (multi-GB) cells section is even read (`STORE_ARITY` in
+`crates/risepir-rpc/src/state.rs`, ADR-0034 §6). A state file written by the
+old 3-ary binary is therefore *refused*, not silently loaded and not
+misreported as `Corrupt` — the error names the cause (a previous geometry
+lineage) and the fix (move `--state` aside, re-bootstrap). This fired for real
+on 2026-07-27, exactly as designed — `exit 1` with that message, before any of
+the 36 GB was read — and the box was re-bootstrapped past it (deploy.md §5.4).
+The superseded 3-ary file was kept on the box as a rollback until **2026-07-29,
+when it was deleted** to reclaim its 33.77 GB (deploy.md §5.4): no binary built
+from this tree can load it — that is precisely what `STORE_ARITY` guarantees —
+so the "rollback" it offered was never a restart, it was a code revert to the
+3-ary lineage *plus* hours of replay onto a by-then-stale file. A fresh
+bootstrap is the honest path if `(2,4)` ever needs reverting. Both lineages
+now agree on `(2,4)`, so a plain restart works again; the trap is live for the
+*next* geometry change, not for this one.
+
+**A third trap, and the nastiest, since the `0f3b99b` pin (2026-07-31): a
+change to the *hash* is invisible to every guard that checks the
+*geometry*.** The pin bump moved the primitive's item hash from `xxh3_64` to
+`xxh3_128`, so every key lands in a different bucket — while `arity`, the
+`ValueCodec`, `bucket_size`, `fingerprint_bits`, `plaintext_bits` and
+`num_buckets` all stay byte-identical. `STORE_ARITY` and
+`check_geometry_lineage` cannot see it *by construction*: they compare
+parameters, and the parameters are still correct. An old file would have
+loaded clean and then missed on every lookup — `0x0` for accounts that exist,
+across the whole set. So the **state format version** carries the hash lineage
+now: `RPST2` → **`RPST3`**, and `RPST1`/`RPST2` are refused by name before a
+cell is read (ADR-0042's outcome note). The general lesson: a guard that
+compares parameters cannot catch a change in the *function* those parameters
+configure — only the format version can.
+
+**That migration has been RUN (2026-07-31, deploy.md §5.8).** The refusal fired
+for real on the production 24.18 GB file — `exit 1` in under a second, before a
+cell was read — and the box was re-bootstrapped past it from a fresh snapshot.
+The VM now holds an **`RPST3`** file and a plain restart works again; the trap
+is live for the *next* hash change, not for this one. The superseded
+`~/risepir-state.bin.rpst2-20260731` and `~/risepir-state.bin.pre0728`
+(24.18 GB each) are evidence only — no binary from this tree can load them —
+and can be deleted to reclaim ~48 GB.
+
+(The external IP is now reserved and stable, so nothing has to be refreshed
+after a start. An SSH tunnel works as before:
+`gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
+
+Stopping the meter — in this order:
+
+```bash
+gcloud --quiet compute ssh risepir \
+  --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 90 && tail -1 ~/server-complete.log'
+#   → wait for "state saved; exiting" — at the complete set this writes the
+#     24.18 GB state file (the `(2,4)` lineage live since 2026-07-27; the
+#     final save of the old 36.26 GB `(3,4)` file took ~2 min), so allow well
+#     over the 20 s that sufficed in partial mode
+gcloud compute instances stop risepir
+```
+
+The **anchored** pattern matters: a broad `pkill -f risepir-rpc` also kills the
+tmux wrapper shell, tmux then SIGHUPs the pane group, and the server dies
+mid-save with a 0-byte `.tmp` (this happened on 2026-07-19; harmless in partial
+mode, but **now genuinely expensive** — a complete-set re-bootstrap is ~33 min
+of CPU plus the catch-up replay). When checking from `gcloud … --command`,
+bracket the pattern (`pgrep -f "risepir-rp[c]"`) or the probe matches its own
+ssh wrapper. VM SSH key and the GitHub account key `risepir-gcp-vm` are already
+set up; at `e2-highmem-8` the VM burns **~$8.60/day** while running (up from
+~$0.80/day as an `e2-medium`), ~$10/mo stopped (250 GB disk only).

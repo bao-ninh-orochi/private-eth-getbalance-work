@@ -1,0 +1,63 @@
+[package]
+name        = "risepir-http"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+rust-version.workspace = true
+publish     = false
+description = "SimplePIR-concrete binary wire codec + axum HTTP server exposing the RisePIR endpoints (answer/sync/setup/head/delta) over risepir-server (docs/plan.md §3.4, ADR-0006, ADR-0010)."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# `wire` — the binary codec — is the only part of this crate the browser
+# client (ADR-0019) can use: `node` needs axum/tokio and `client` needs
+# reqwest, neither of which belongs in (or builds for) a wasm32 client that
+# does its I/O through the host's `fetch`. Both are default-on, so every
+# existing dependent is unchanged; `--no-default-features` leaves exactly
+# the codec, which is precisely the thing that must not fork between the
+# browser and the server.
+[features]
+default  = ["parallel", "server", "client"]
+parallel = ["risepir-proto/parallel", "risepir-server/parallel"]
+server   = ["dep:axum", "dep:tokio"]
+client   = ["dep:reqwest"]
+
+[dependencies]
+# Sibling crates in this workspace.
+risepir-proto  = { path = "../risepir-proto", default-features = false }
+risepir-server = { path = "../risepir-server", default-features = false }
+
+ikpir-common = { workspace = true, default-features = false }
+segmented-cuckoo = { workspace = true }
+
+axum  = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"], optional = true }
+
+# Production hardening on the listener (threat model §3): a per-request
+# timeout that returns a clean 408 instead of surfacing an error type.
+# Already in the dependency graph via axum; the explicit entry only
+# switches on the named feature. (A `tower::limit::ConcurrencyLimitLayer`
+# used to sit on the huge-response `/setup` route here too — removed in
+# ADR-0028, which found it never bounded body transfer at all and made the
+# memory hazard it targeted O(1) instead; see that ADR and
+# `risepir-http::node`'s route-building comment.)
+tower-http = { version = "0.6", features = ["timeout"] }
+
+# Stage 0.4: the async counterpart to this crate's own axum server —
+# `client` drives the RisePIR HTTP transport from the JSON-RPC front end
+# (`risepir-rpc`) over real HTTP. `default-features = false` +
+# `rustls-tls` avoids pulling in a native TLS toolchain for what is,
+# today, a plain-HTTP localhost deployment.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+
+[dev-dependencies]
+# Dev-only: the integration test in `tests/http.rs` drives a MockFeed
+# genesis through a real client end to end. Never a runtime dependency of
+# this crate itself.
+risepir-feed   = { path = "../risepir-feed" }
+risepir-client = { path = "../risepir-client" }
+
+# `ServiceExt::oneshot` — in-process request driving with no real network.
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

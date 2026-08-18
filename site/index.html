@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RisePIR — private eth_getBalance for Ethereum mainnet</title>
+<meta name="description" content="A keyword-PIR server that answers Ethereum eth_getBalance queries against the complete 201,059,658-account mainnet set without learning which account was asked.">
+
+<meta property="og:title" content="RisePIR — private eth_getBalance for Ethereum mainnet">
+<meta property="og:description" content="LWE keyword-PIR over a Segmented Cuckoo Filter. The server computes over the entire mainnet balance set to answer one query, and never learns which account was asked.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://risepir.org/">
+
+<link rel="canonical" href="https://risepir.org/">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <p class="eyebrow">Ethereum mainnet · private balance queries · paper accepted for publication</p>
+    <h1>RisePIR</h1>
+    <p class="tagline">Private <code>eth_getBalance</code> for Ethereum mainnet, answered without the server learning which account was asked.</p>
+    <nav aria-label="Page sections">
+      <a href="#what">What it does</a>
+      <a href="#mechanism">How it works</a>
+      <a href="#scale">Scale</a>
+      <a href="#demo">Live demo</a>
+      <a href="#trust">Trust</a>
+      <a href="#paper">Paper &amp; code</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+
+  <section id="what" aria-labelledby="what-h">
+    <div class="wrap">
+      <h2 id="what-h">What it does</h2>
+      <p class="lede">RisePIR answers <code>eth_getBalance</code> for Ethereum mainnet through keyword-PIR — private
+        information retrieval keyed by an address rather than a numeric index. A server follows the chain and holds
+        a database of every nonzero account balance. A client asks for one balance without revealing, to the
+        server, which account it asked about.</p>
+      <p>It runs against real mainnet today, serving the complete nonzero-balance set — 201,059,658 accounts as of
+        its most recent bootstrap, and growing with the chain as new accounts are funded. The server computes over
+        every one of them to answer a single query. It cannot do less without learning which account you asked
+        for.</p>
+      <p>The system is built around one invariant: never return a wrong answer. An error is acceptable. A silently
+        wrong balance is not.</p>
+    </div>
+  </section>
+
+  <section id="mechanism" aria-labelledby="mechanism-h">
+    <div class="wrap">
+      <h2 id="mechanism-h">How it works</h2>
+
+      <h3>The protocol</h3>
+      <p>The client first downloads a one-time hint: the server's database, preprocessed into a matrix that is
+        identical for every visitor, so holding it says nothing about you. To look up a balance, the client builds
+        a short LWE-encrypted query locally and sends it. The server computes its response over the entire
+        database — every account, every time — and returns a ciphertext. Only the client, holding the secret
+        behind its own query, can decode that ciphertext into a balance. The server never sees a plaintext
+        address, and it never learns which row of its database the query actually touched, because in a real
+        sense it touched all of them.</p>
+
+      <h3>The keyword layer</h3>
+      <p>Ethereum accounts are addressed by address, not by row number, so a plain index-based PIR scheme cannot be
+        queried directly. RisePIR's keyword layer is a Segmented Cuckoo Filter: it maps each address to a small,
+        fixed set of candidate cells, the way any cuckoo filter maps a key, so the client can look up a fingerprint
+        of the address instead of an index. The filter's own cell array doubles as the PIR database matrix — there
+        is no separate index-to-address table to keep in sync with it.</p>
+
+      <figure class="diagram-figure">
+        <div class="diagram-wrap">
+        <svg viewBox="0 0 420 550" role="img" aria-labelledby="arch-title arch-desc" xmlns="http://www.w3.org/2000/svg">
+          <title id="arch-title">RisePIR architecture</title>
+          <desc id="arch-desc">The browser or CLI client builds an LWE-encrypted query locally; the address never
+            leaves the client. Both the query and the server's response are ciphertext. The PIR server computes
+            its answer over its entire database, so it cannot tell which record was requested. The server's
+            database is populated independently, by following Ethereum mainnet's finalized blocks.</desc>
+          <style>
+            .node-box{fill:var(--surface-2);stroke:var(--text);stroke-width:1.5}
+            .boundary{fill:none;stroke:var(--accent);stroke-width:1.4;stroke-dasharray:5 4}
+            .arrow{fill:none;stroke:var(--text);stroke-width:1.6}
+            .arrowhead{fill:var(--text)}
+            .lbl{font-family:var(--font-sans);fill:var(--text);font-size:16px;font-weight:600}
+            .lbl-sub{font-family:var(--font-sans);fill:var(--text-secondary);font-size:11.5px}
+            .lbl-accent{font-family:var(--font-sans);fill:var(--accent);font-size:11.5px;font-weight:600}
+            .lbl-small{font-family:var(--font-sans);fill:var(--text-secondary);font-size:11px}
+            .lbl-boundary{font-family:var(--font-sans);fill:var(--accent);font-size:10px;font-weight:600;letter-spacing:.06em}
+          </style>
+          <defs>
+            <marker id="arrow-end" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+            </marker>
+          </defs>
+
+          <!-- trust boundary + client -->
+          <text class="lbl-boundary" x="46" y="17">TRUST BOUNDARY — ADDRESS STAYS HERE</text>
+          <rect class="boundary" x="44" y="24" width="332" height="128" rx="10" />
+          <rect class="node-box" x="60" y="40" width="300" height="96" rx="6" />
+          <text class="lbl" x="210" y="72" text-anchor="middle">Browser / CLI client</text>
+          <text class="lbl-sub" x="210" y="94" text-anchor="middle">builds the LWE query locally</text>
+          <text class="lbl-accent" x="210" y="114" text-anchor="middle">the address stays in this box</text>
+
+          <!-- query / response, both ciphertext -->
+          <line class="arrow" x1="160" y1="142" x2="160" y2="222" marker-end="url(#arrow-end)" />
+          <line class="arrow" x1="260" y1="222" x2="260" y2="142" marker-end="url(#arrow-end)" />
+          <text class="lbl-small" x="160" y="172" text-anchor="middle">query</text>
+          <text class="lbl-small" x="160" y="188" text-anchor="middle">435.07 KB</text>
+          <text class="lbl-small" x="260" y="172" text-anchor="middle">response</text>
+          <text class="lbl-small" x="260" y="188" text-anchor="middle">434.37 KB</text>
+
+          <!-- server -->
+          <rect class="node-box" x="60" y="228" width="300" height="96" rx="6" />
+          <text class="lbl" x="210" y="260" text-anchor="middle">PIR server</text>
+          <text class="lbl-sub" x="210" y="282" text-anchor="middle">computes over the entire database</text>
+          <text class="lbl-accent" x="210" y="302" text-anchor="middle">sees ciphertext only</text>
+
+          <!-- feed -->
+          <line class="arrow" x1="210" y1="446" x2="210" y2="330" marker-end="url(#arrow-end)" />
+          <text class="lbl-small" x="222" y="392" text-anchor="start">finalized blocks</text>
+
+          <!-- mainnet -->
+          <rect class="node-box" x="60" y="450" width="300" height="86" rx="6" />
+          <text class="lbl" x="210" y="483" text-anchor="middle">Ethereum mainnet</text>
+          <text class="lbl-sub" x="210" y="505" text-anchor="middle">blocks and traces, followed at finalized</text>
+        </svg>
+        </div>
+        <figcaption>The client builds its query locally; the address it is asking about never leaves that box.
+          Both the query and the server's response are ciphertext — the only things that cross the wire. The
+          server's database is populated independently, by following Ethereum mainnet's finalized blocks.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="scale" aria-labelledby="scale-h">
+    <div class="wrap">
+      <h2 id="scale-h">Scale</h2>
+      <p class="lede">Figures below describe the live deployment at the complete mainnet set. Sizes are computed
+        directly from the deployment's fixed geometry; timings are measured on the running server.</p>
+
+      <dl class="stats">
+        <div>
+          <dt>Accounts served</dt>
+          <dd>201,059,658</dd>
+        </div>
+        <div>
+          <dt>First load (<code>/setup</code>, one-time)</dt>
+          <dd>553.82&nbsp;MB<br>(553,819,200&nbsp;B)</dd>
+        </div>
+        <div>
+          <dt>Client memory (resident)</dt>
+          <dd>1.11&nbsp;GB</dd>
+        </div>
+        <div>
+          <dt>Server database</dt>
+          <dd>23.62&nbsp;GB</dd>
+        </div>
+        <div>
+          <dt>Query (client → server)</dt>
+          <dd>435.07&nbsp;KB</dd>
+        </div>
+        <div>
+          <dt>Response (server → client)</dt>
+          <dd>434.37&nbsp;KB</dd>
+        </div>
+        <div>
+          <dt>Per-block patch time</dt>
+          <dd>~11.1&nbsp;ms at K&nbsp;≈&nbsp;310</dd>
+        </div>
+        <div>
+          <dt>Geometry</dt>
+          <dd>arity 2, bucket size 4,<br>67,108,864 buckets,<br>plaintext_bits 8</dd>
+        </div>
+        <div>
+          <dt>&quot;latest&quot;</dt>
+          <dd>finalized — ~13 minutes<br>behind the public head,<br>by design</dd>
+        </div>
+      </dl>
+      <p class="note">K is mutations per block. The patch-time figure is measured while the server follows the
+        chain head, not during catch-up replay, where a warmer cache makes it look faster than steady state. The
+        account count is the figure the deployment was last bootstrapped at; it is the basis every size in this
+        table is computed from, and the live set grows above it as the chain advances.</p>
+    </div>
+  </section>
+
+  <section id="demo" aria-labelledby="demo-h">
+    <div class="wrap">
+      <h2 id="demo-h">Live demo</h2>
+      <p class="lede">A running instance answers real queries against the deployment described above, at
+        <a href="https://demo.risepir.org">demo.risepir.org</a>.</p>
+      <p>The live instance is not always on. It runs during demos and on request. The screenshots below were
+        captured from it while running, so the result is on this page whether or not the server is up.</p>
+
+      <div class="shots">
+        <figure class="shot">
+          <img src="./assets/demo-initial.png" alt="Screenshot of the RisePIR browser client on first load, working through its one-time setup checklist: cryptographic engine, hint download, and pinning to a finalized block.">
+          <figcaption>First load: the one-time setup sequence, before any query has been made.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="./assets/demo-result.png" alt="Screenshot of the RisePIR browser client showing a completed balance lookup result and a receipt panel listing what was sent and received.">
+          <figcaption>The browser client after a balance lookup: the decoded result, and the receipt of exactly what crossed the wire.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="./assets/demo-mobile.png" alt="Screenshot of the RisePIR browser client rendered on a mobile-width screen.">
+          <figcaption>The same client at a mobile viewport width.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="trust" aria-labelledby="trust-h">
+    <div class="wrap">
+      <h2 id="trust-h">What this does not protect</h2>
+      <p class="lede">RisePIR's cryptographic guarantee is specific: it stops the party operating the server from
+        learning which account a query is about, by observing the traffic it serves. It does not, on its own,
+        protect against a compromised path for delivering the client's code. That is a real, separate trust
+        boundary, and it is stated here deliberately, not as fine print.</p>
+
+      <h3>Who is choosing your client</h3>
+      <p>On the live demo, the page and its WebAssembly client are delivered by the same host being queried,
+        <code>demo.risepir.org</code>. PIR keeps that host from learning your address only if the client it handed
+        you is honest — and whoever serves the page chooses what the client does. A malicious or compromised
+        origin could serve a modified client that leaks the address it was asked about, and the PIR guarantee
+        would not catch it.</p>
+      <ul>
+        <li>Same-origin delivery and a <code>connect-src 'self'</code> content-security policy: the page is
+          structurally unable to send a request anywhere but the server it already talks to. That constrains a
+          tampered page; it does not constrain a dishonest origin.</li>
+        <li>The WebAssembly module's only import from its host is a source of random bytes. No fetch, no clock, no
+          storage — it has no channel to exfiltrate anything on its own.</li>
+        <li>The wasm client and the command-line client are built from the same Rust source, so auditing one
+          audits both. Running the client on your own machine instead of the browser removes the code-delivery
+          question entirely — only PIR ciphertext crosses the network at that point.</li>
+      </ul>
+
+      <h3>What the cryptography does not hide</h3>
+      <p>PIR hides which account you asked about. It does not hide that you asked, when, how often, or from
+        where — the server still sees a requester's IP address and request timing, like any web server. Nothing
+        in this system anonymizes the network layer.</p>
+
+      <h3>This page is not the PIR origin</h3>
+      <p>risepir.org — this page — is static and served by a different party than <code>demo.risepir.org</code>,
+        the PIR origin. It carries no cryptographic client and makes no PIR queries, so it sits outside the trust
+        boundary described above. The demo deliberately keeps its own page and its PIR transport on one hostname:
+        same-origin delivery plus that <code>connect-src 'self'</code> policy is what makes the disclosure above
+        checkable by anyone who looks, rather than a claim taken on faith about a second party.</p>
+      <p>Being specific about this page's own delivery, since the section above asks you to care who serves a
+        page: it is hosted on Cloudflare Pages, so Cloudflare terminates TLS for it and can see requests to it.
+        Cloudflare also injects its own analytics script (<code>cloudflareinsights.com</code>) into this page at
+        the edge — it is not in the source, and it is not something this page asks for. Neither applies to
+        <code>demo.risepir.org</code>, which is served directly by its own machine with no proxy in front of it,
+        precisely so that no third party sits in the path that delivers the cryptographic client.</p>
+    </div>
+  </section>
+
+  <section id="paper" aria-labelledby="paper-h">
+    <div class="wrap">
+      <h2 id="paper-h">Paper and code</h2>
+
+      <h3>Paper</h3>
+      <p class="cite">
+        Bao Ninh.
+        <cite>Incremental Keyword Private Information Retrieval from <i>d</i>-ary Segmented Cuckoo Filters</cite>.
+        CANS 2026 — International Conference on Cryptology and Network Security.
+      </p>
+      <!-- TODO: add DOI and PDF link once the proceedings are published -->
+      <p class="note">Accepted for publication; a DOI and a link to the paper will be added here on release.</p>
+
+      <h3>Code</h3>
+      <p>The implementation is a Rust workspace: a geometry and wire-codec layer, the PIR server with a verified
+        store, the response-rewind client (also compiled to WebAssembly for the browser), a mainnet feed, an HTTP
+        transport, and a JSON-RPC front end — plus a conformance harness checked against an independent provider
+        on real mainnet blocks.</p>
+      <p>The repository, <code>bao-ninh-orochi/private-ETH-getBalance</code>, is private. Access is available on
+        request.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>RisePIR is a research prototype, built alongside the paper above. The live instance runs during demos and
+      on request: <a href="https://demo.risepir.org">demo.risepir.org</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,41 @@
+[package]
+name        = "risepir-feed"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+rust-version.workspace = true
+publish     = false
+description = "Chain-follow feed for the RisePIR private eth_getBalance service: a Feed trait producing BlockUpdates plus a deterministic, seeded mock (Stage 0) with realistic wei-scale balances and exact ground truth. Real `rpc`/`exex` feeds come later (docs/sync.md)."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Default-on rayon kernels — see the workspace manifest's `ikpir-common`
+# note (ADR-0019). This crate only reaches them through `risepir-proto`;
+# its dev-dependencies pull the rest with their own defaults.
+[features]
+default  = ["parallel"]
+parallel = ["risepir-proto/parallel"]
+
+[dependencies]
+risepir-proto = { path = "../risepir-proto" }
+
+# Snapshot ingest (`snapshot` module): BigQuery exports arrive as
+# `.csv.gz` shards; gzip is the only compression this loader speaks.
+flate2 = "1"
+
+# The rpc feed (`rpc` module): plain JSON-RPC 2.0 over HTTPS. Same
+# reqwest configuration the sibling crates use (rustls, no native TLS).
+reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+
+# Dev-only: the integration test in `tests/pipeline.rs` drives the whole
+# mock -> apply_block -> DeltaRing -> client pipeline end-to-end. The crate
+# itself depends only on `risepir-proto`.
+[dev-dependencies]
+# The `rpc` module's live tests (`--ignored`) are async.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+risepir-server   = { path = "../risepir-server" }
+risepir-client   = { path = "../risepir-client" }
+ikpir-common = { workspace = true }
+segmented-cuckoo = { workspace = true }

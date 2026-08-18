@@ -1,0 +1,36 @@
+# RisePIR public front end — Caddy terminates TLS and proxies to the PIR port.
+#
+# The binary deliberately has no TLS of its own (docs/deploy.md): keeping the
+# certificate and its ACME lifecycle out of the process that ingests
+# attacker-controlled blobs, and out of a process that would then need to bind
+# :443, is the point. Caddy obtains and renews a Let's Encrypt certificate
+# automatically via the HTTP-01 challenge on :80.
+#
+# Validate changes against the staging CA first — production issuance is
+# rate-limited and a bad loop can lock you out for a week:
+#   { acme_ca https://acme-staging-v02.api.letsencrypt.org/directory }
+
+# Both names are served during the DuckDNS → risepir.org overlap. Caddy obtains
+# a separate certificate per name; the old one stays until links that predate
+# the move have aged out (deploy.md §3.7). `demo.` is deliberately a DNS-only
+# (unproxied) record at Cloudflare: an orange-cloud proxy would terminate TLS at
+# Cloudflare, putting a third party in a position to serve a modified wasm
+# client under this name — the exact code-delivery trust ADR-0019 discloses and
+# threat model §4.2 enumerates. Queries themselves are LWE ciphertexts and stay
+# private either way; it is the *code path* that must not gain a party.
+demo.risepir.org, private-eth-getbalance.duckdns.org {
+	# ONLY the PIR port is ever proxied. :8545 answers plaintext-address
+	# eth_getBalance and must never leave this machine — publishing it would
+	# hand every visitor's queried account to the operator and to anyone
+	# on-path, which is exactly what this project exists to prevent.
+	reverse_proxy 127.0.0.1:8645
+
+	# GET /metrics and GET /status (ADR-0039) are public by default, same as
+	# every other route on this port — a deliberate choice (docs/threat-model.md
+	# §5/§8), not an oversight: every field is an aggregate, never per-query.
+	# To make them operator-only again without touching the binary, uncomment
+	# this — it must come *before* the reverse_proxy line above so Caddy
+	# matches it first:
+	#   respond /metrics* 404
+	#   respond /status* 404
+}

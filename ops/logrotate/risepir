@@ -1,0 +1,56 @@
+# logrotate for the tmux deployment's append-only server log
+# (docs/deploy.md §4 "Log rotation").
+#
+# Install (as root on the VM; edit the path to the actual login first):
+#   cp ops/logrotate/risepir /etc/logrotate.d/risepir
+#   logrotate --debug /etc/logrotate.d/risepir     # dry run, changes nothing
+#   logrotate --force /etc/logrotate.d/risepir     # rotate once, now
+#
+# NOT needed if you run the systemd unit (ops/systemd/risepir.service):
+# that logs to the journal, which rotates itself. This file exists for the
+# tmux shape the live box actually runs, where the log is a plain file the
+# shell opened with `>> ~/server-complete.log 2>&1`.
+
+/home/admin/server-complete.log {
+	daily
+	rotate 14
+	# Rotate on size too, not just the calendar: the log's volume is driven
+	# by chain activity and by whether a --hard-refresh pass is running, not
+	# by the clock. One pre-ADR-0041 pass alone wrote 67,791 lines.
+	size 64M
+	compress
+	# Keep the most recent rotation uncompressed — it is the one an operator
+	# actually greps during an incident, and `zgrep` on a 60 MB file to
+	# answer "what happened ten minutes ago" is a needless step.
+	delaycompress
+	missingok
+	notifempty
+	# Do not fail the whole run if the file is briefly absent mid-restart.
+	su admin admin
+	create 0644 admin admin
+
+	# ── copytruncate is REQUIRED here, and this is the load-bearing line ──
+	#
+	# The server does not open its own log. The shell opens it (`>>`) before
+	# `exec`ing the binary, so the process holds one file descriptor for the
+	# whole run and NEVER reopens it. Under logrotate's default
+	# rename-then-create, the process would keep writing to the renamed
+	# inode forever: `server-complete.log` would sit at 0 bytes while
+	# `server-complete.log.1` silently grew, which looks exactly like "the
+	# server stopped logging" and is the classic way a rotation setup
+	# destroys the observability it was added to protect.
+	#
+	# `copytruncate` copies the file and truncates the original in place, so
+	# the held descriptor keeps writing to the same inode. Its known cost is
+	# a small race: anything written between the copy and the truncate is
+	# lost. For an append-only diagnostic log that is an acceptable trade;
+	# for anything where a lost line would matter, the answer is the systemd
+	# unit and the journal, not a cleverer logrotate stanza.
+	#
+	# Do NOT replace this with `create` + a postrotate `kill -HUP`: the
+	# binary installs no SIGHUP handler, so the default disposition applies
+	# and the signal would TERMINATE the server — killing it mid-run, which
+	# at the complete set means an ungraceful stop and a journal replay on
+	# the way back up.
+	copytruncate
+}

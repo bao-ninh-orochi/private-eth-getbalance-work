@@ -1,0 +1,59 @@
+[package]
+name        = "risepir-rpc"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+rust-version.workspace = true
+publish     = false
+description = "Stage 0.4: standard Ethereum JSON-RPC front end on :8545 (eth_getBalance et al.) over the RisePIR HTTP transport, deny-by-default for every other method (docs/plan.md §3/§6, ADR-0007, ADR-0008, ADR-0010, ADR-0012)."
+
+[[bin]]
+name = "risepir-rpc"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Default-on rayon kernels, forwarded to every sibling — see the workspace
+# manifest's `ikpir-common` note (ADR-0019).
+[features]
+default  = ["parallel"]
+parallel = [
+    "ikpir-common/parallel",
+    "risepir-proto/parallel",
+    "risepir-server/parallel",
+    "risepir-client/parallel",
+    "risepir-http/parallel",
+]
+
+[dependencies]
+# State-file whole-file checksum (RPST2, state.rs) — the same hash family
+# risepir-proto already uses for the value checksum; no new supplier.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Sibling crates in this workspace.
+risepir-proto  = { path = "../risepir-proto" }
+risepir-server = { path = "../risepir-server" }
+risepir-client = { path = "../risepir-client" }
+risepir-feed   = { path = "../risepir-feed" }
+risepir-http   = { path = "../risepir-http" }
+
+ikpir-common = { workspace = true }
+segmented-cuckoo = { workspace = true }
+
+axum       = "0.8"
+# Request timeout on the JSON-RPC listener (rpc.rs) — same layer the PIR
+# transport already uses; already in the graph via risepir-http.
+tower-http = { version = "0.6", features = ["timeout"] }
+tokio      = { version = "1", features = ["full"] }
+serde_json = "1"
+serde      = { version = "1", features = ["derive"] }
+
+
+# The deny-by-default proxy (ADR-0012) forwards a denied method's raw JSON
+# body verbatim to `--proxy-upstream`; reuses the same async HTTP client
+# `risepir-http::PirHttpClient` is built on rather than introducing a
+# second one. `json` just enables reqwest's own (already-present) use of
+# the `serde_json` this crate depends on directly anyway — used by
+# `tests/rpc.rs` to drive the JSON-RPC surface as a real client would.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

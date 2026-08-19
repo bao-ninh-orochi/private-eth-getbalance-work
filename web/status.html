@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Operational status for this RisePIR deployment — head/finalized block lag, store occupancy, answer latency, error counts, reconcile health, and the last state save. Aggregate counters only; never a queried address."
+    />
+    <title>RisePIR — status</title>
+    <link rel="stylesheet" href="status.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><rect width='28' height='28' rx='6' fill='%23ffffff' stroke='%23c4c2ba'/><circle cx='9' cy='9' r='2' fill='%230c7285'/><circle cx='14' cy='9' r='2' fill='%230c7285'/><circle cx='19' cy='9' r='2' fill='%230c7285'/><circle cx='9' cy='14' r='2' fill='%230c7285'/><circle cx='14' cy='14' r='2' fill='%230c7285'/><circle cx='19' cy='14' r='2' fill='%230c7285'/><circle cx='9' cy='19' r='2' fill='%230c7285'/><circle cx='14' cy='19' r='2' fill='%230c7285'/><circle cx='20.2' cy='20.3' r='2' fill='%230c7285'/></svg>"
+    />
+  </head>
+  <body>
+    <div class="page">
+      <header class="masthead">
+        <div class="brand">
+          <span class="brand-name">RisePIR</span>
+          <span class="brand-sub">status</span>
+        </div>
+        <div class="masthead-right">
+          <span id="poll-state" class="poll-state">connecting…</span>
+          <a class="back-link" href="./">← balance lookup</a>
+        </div>
+      </header>
+
+      <p class="note">
+        Every number on this page is an aggregate over all requests this process has served —
+        never one query's own data. Nothing here can identify which address anyone looked up; see
+        <code>/metrics</code> for the same data as Prometheus text, and this deployment's ADR-0039
+        for the privacy audit. This page polls <code>/metrics</code> every 5 seconds; it does not
+        query the PIR server itself.
+      </p>
+
+      <p id="fetch-error" class="alert hidden"></p>
+
+      <section class="panel" aria-labelledby="h-chain">
+        <h2 id="h-chain">Chain</h2>
+        <div class="grid">
+          <div class="tile">
+            <span class="tile-label">Head block</span>
+            <span id="head-block" class="tile-value">—</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Finalized block</span>
+            <span id="finalized-block" class="tile-value">—</span>
+          </div>
+          <div class="tile" id="lag-tile">
+            <span class="tile-label">Block lag</span>
+            <span id="block-lag" class="tile-value">—</span>
+          </div>
+          <div class="tile">
+            <span class="tile-label">Uptime</span>
+            <span id="uptime" class="tile-value">—</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-build">
+        <h2 id="h-build">Deployment</h2>
+        <table class="kv">
+          <tbody>
+            <tr>
+              <th>Mode</th>
+              <td id="mode">—</td>
+            </tr>
+            <tr>
+              <th>Version</th>
+              <td id="version">—</td>
+            </tr>
+            <tr>
+              <th>Hint-lineage epoch</th>
+              <td id="epoch" class="mono">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" aria-labelledby="h-store">
+        <h2 id="h-store">Store occupancy</h2>
+        <table class="kv">
+          <tbody>
+            <tr>
+              <th>Items</th>
+              <td id="store-items">—</td>
+            </tr>
+            <tr>
+              <th>Capacity</th>
+              <td id="store-capacity">—</td>
+            </tr>
+            <tr>
+              <th>Load factor</th>
+              <td id="store-load">—</td>
+            </tr>
+            <tr>
+              <th>Cached <code>/setup</code> size</th>
+              <td id="setup-bytes">—</td>
+            </tr>
+            <tr>
+              <th><code>/setup</code> regenerations</th>
+              <td id="setup-regens">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" aria-labelledby="h-latency">
+        <h2 id="h-latency">Answer latency (<code>RisePirServer::answer</code> only)</h2>
+        <table class="kv">
+          <tbody>
+            <tr>
+              <th>Requests observed</th>
+              <td id="lat-count">—</td>
+            </tr>
+            <tr>
+              <th>p50</th>
+              <td id="lat-p50">—</td>
+            </tr>
+            <tr>
+              <th>p90</th>
+              <td id="lat-p90">—</td>
+            </tr>
+            <tr>
+              <th>p99</th>
+              <td id="lat-p99">—</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="fine">
+          Quantiles are estimated from the histogram's bucket boundaries (linear interpolation
+          within the bucket that contains the target rank), the standard Prometheus-side
+          approximation — not exact percentiles.
+        </p>
+      </section>
+
+      <section class="panel" aria-labelledby="h-requests">
+        <h2 id="h-requests">Requests &amp; errors</h2>
+        <div id="requests-table-wrap" class="table-scroll">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>Route</th>
+                <th>OK</th>
+                <th>Error</th>
+                <th>Error classes</th>
+              </tr>
+            </thead>
+            <tbody id="requests-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-reconcile">
+        <h2 id="h-reconcile">Reconcile (cross-provider integrity check)</h2>
+        <table class="kv">
+          <tbody>
+            <tr>
+              <th>Configured</th>
+              <td id="rec-configured">—</td>
+            </tr>
+            <tr>
+              <th>Halted</th>
+              <td id="rec-halted">—</td>
+            </tr>
+            <tr>
+              <th>Consecutive dark checkpoints</th>
+              <td id="rec-dark">—</td>
+            </tr>
+            <tr>
+              <th>Checkpoints / comparisons total</th>
+              <td id="rec-totals">—</td>
+            </tr>
+            <tr>
+              <th>Last checkpoint</th>
+              <td id="rec-last-checkpoint">—</td>
+            </tr>
+            <tr>
+              <th>Last success</th>
+              <td id="rec-last-success">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" aria-labelledby="h-save">
+        <h2 id="h-save">State save &amp; journal</h2>
+        <table class="kv">
+          <tbody>
+            <tr>
+              <th>Configured</th>
+              <td id="save-configured">—</td>
+            </tr>
+            <tr>
+              <th>Last save</th>
+              <td id="save-last">—</td>
+            </tr>
+            <tr>
+              <th>Last save duration</th>
+              <td id="save-duration">—</td>
+            </tr>
+            <tr>
+              <th>Last save size</th>
+              <td id="save-bytes">—</td>
+            </tr>
+            <tr>
+              <th>Save failures</th>
+              <td id="save-failures">—</td>
+            </tr>
+            <tr>
+              <th>Journal records since save</th>
+              <td id="journal-records">—</td>
+            </tr>
+            <tr>
+              <th>Journal broken</th>
+              <td id="journal-broken">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <footer>
+        <p class="fine">
+          <code>GET /metrics</code> — Prometheus text exposition. <code>GET /healthz</code> —
+          liveness plus the same reconcile fields, plain text. This deployment's threat model
+          (§5, §8) states plainly that publishing these endpoints means the query-rate/timing
+          metadata they carry no longer requires a network position to observe — see ADR-0039.
+        </p>
+      </footer>
+    </div>
+
+    <script src="status.js"></script>
+  </body>
+</html>

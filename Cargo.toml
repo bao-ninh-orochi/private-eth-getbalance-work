@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members  = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+# MSRV — the toolchain pin (rust-toolchain.toml) is also the support floor.
+rust-version = "1.96"
+
+# The IKPIR primitive, pinned at `v0.1.0-perf` — an annotated, signed tag on
+# the `perf/optimized` tip of the **public** fork `bao-ninh-orochi/IKPIR`.
+# That tag is the build docs/numbers.md §7's headline was measured against.
+# One place, not seven: every crate says `{ workspace = true }`. The former
+# path deps pointed at ../../../CANS2026/Incremental-Keyword-PIR, a checkout
+# that has since been renamed, which is exactly the fragility a pin removes.
+#
+# A tag, not a rev, and not `orochi-network/IKPIR`. Three things to know:
+#
+#   * The tag is immutable by convention — a future perf revision gets a NEW
+#     tag, never a moved one — so it pins exactly as hard as the `0f3b99b`
+#     rev it replaces, while naming *why* that commit rather than a hash.
+#     Its tree under `crates/` is bit-identical to `0f3b99b`, so nothing
+#     measured against that rev has to be re-measured, and state files
+#     written by a `0f3b99b` build still load.
+#   * The fork is public, so this resolves with no credential. It used to be
+#     private, which is why CI once carried an `IKPIR_TOKEN` PAT and an
+#     `insteadOf` rewrite (ADR-0021/0022); that plumbing is gone (ADR-0045).
+#   * `orochi-network/IKPIR` main cannot serve this dependency at all. Its
+#     `ikpir-common` declares no `[features]` section, so there is no
+#     `parallel` feature to enable, and neither `backend/gemm.rs` nor
+#     `backend/prg.rs` exists there. Repointing at the org's own repo is not
+#     a matter of preference; the workspace would not build. ADR-0045 records
+#     the provenance tradeoff that leaves behind.
+#
+# `ikpir-common` is inherited with `default-features = false` — **not**
+# because anything here wants the single-threaded kernels, but because a
+# dependent cannot subtract a default feature that is switched on at the
+# workspace level (cargo ignores a member's `default-features = false` when
+# the workspace entry does not set it, with a warning), and the browser
+# client must subtract exactly one: `parallel`/rayon, which has no threads
+# to fan out to on `wasm32-unknown-unknown` and panics rather than degrades
+# (ADR-0019).
+#
+# So every crate here re-enables it through its own **default-on**
+# `parallel` feature, which forwards to `ikpir-common/parallel`. Net effect
+# for every existing build: unchanged, rayon kernels on. Only
+# `risepir-wasm` (and anything built `--no-default-features`) opts out.
+# If you add a crate that depends on `ikpir-common`, give it the same
+# default-on `parallel` forwarding feature — otherwise it silently builds
+# the scalar kernels the headline numbers were not measured against.
+[workspace.dependencies]
+ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf", default-features = false }
+segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }
+ikpir-server     = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }

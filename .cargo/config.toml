@@ -1,0 +1,37 @@
+# Load-bearing, not cosmetic: `target-cpu=native` here is NOT inherited by
+# ikpir-common/-server/-client when they're pulled in as path (or, later,
+# git) dependencies. Cargo only reads `.cargo/config.toml` starting from the
+# current build's workspace root and walking up its ancestors — it never
+# looks inside a dependency's own directory tree, so the upstream repo's own
+# `.cargo/config.toml` (on its `perf/optimized` branch) is invisible to a
+# build launched from here. Without this file, the LWE matvec code — the
+# hot path the project's headline latency numbers depend on — silently
+# builds without AVX2/NEON codegen, and nothing errors to tell you.
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+# The browser client (`crates/risepir-wasm`, ADR-0019). A target-specific
+# `rustflags` **replaces** `[build] rustflags` rather than appending to it,
+# which is exactly what this needs twice over:
+#
+#   * `target-cpu=native` is meaningless-to-fatal for wasm32 — the host CPU
+#     is not the target, and the value would be rejected;
+#   * `getrandom_backend="custom"` is mandatory. `wasm32-unknown-unknown`
+#     has no ambient entropy source, so `getrandom` (under `rand`, under
+#     the LWE secret sampling in `sample_slot`) refuses to build for it
+#     unless a backend is named. `custom` routes it to the host-supplied
+#     `crypto.getRandomValues` shim in `risepir-wasm`'s `entropy` module.
+#     This failing *loudly at compile time* is the property that matters:
+#     a browser client that silently sampled its LWE secret from a
+#     deterministic fallback would still look like it worked while
+#     leaking the queried address.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']
+
+# The IKPIR git dep is public now, so this setting is no longer about
+# credentials. It stays because cargo's built-in libgit2 transport is
+# the less-exercised path: the git CLI is what every other fetch in
+# this project (and on the deployment VM) already uses, so keeping one
+# transport avoids a class of divergence.
+[net]
+git-fetch-with-cli = true

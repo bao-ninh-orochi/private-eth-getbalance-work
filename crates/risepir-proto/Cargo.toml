@@ -1,0 +1,50 @@
+[package]
+name        = "risepir-proto"
+version     = "0.1.0"
+edition.workspace = true
+license.workspace   = true
+rust-version.workspace = true
+publish     = false
+description = "Pure types, geometry math, and wire codec for the RisePIR-backed private eth_getBalance service. No I/O, no async."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# `parallel` forwards ikpir-common's (default-on) rayon kernels. Default-on
+# here too, so every existing build is unchanged; the browser client
+# (`risepir-wasm`, ADR-0019) turns it off, because `wasm32-unknown-unknown`
+# has no threads to fan out to. Expressed as a feature rather than a
+# `cfg(target_arch)` because feature selection is what a dependent crate can
+# actually control.
+[features]
+default  = ["parallel"]
+parallel = ["ikpir-common/parallel"]
+
+[dependencies]
+ikpir-common = { workspace = true, default-features = false }
+
+# `Geometry::for_accounts`'s per-configuration load-factor ceiling
+# (ADR-0031): depends on the real `segmented_cuckoo::MAX_LOAD_FACTOR`
+# table rather than a copy of it, so this crate's sizing rule cannot drift
+# from the primitive it is sizing for. No feature gating needed — this
+# crate has no `parallel`-style toggle of its own, and `risepir-wasm`
+# already depends on it directly at these same default features (see the
+# workspace manifest), so it is already proven to build for wasm32.
+segmented-cuckoo = { workspace = true }
+
+# `ValueCodec::key_tag`'s hash (ADR-0009): deliberately the *same* xxh3
+# crate `segmented-cuckoo` uses for the SCF's own fingerprint, but called
+# with a distinct nonzero seed (`value::KEY_TAG_SEED`) so the two hashes
+# are statistically independent even though both hash the same address
+# bytes — see `value.rs`'s module docs. `xxh3` feature only; this crate
+# never needs the 32-bit or streaming variants.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# keccak256 for the SCF key (ADR-0008) — lives here (rather than in the
+# JSON-RPC crate that first needed it) because every ingest path hashes
+# addresses: the RPC front end, the snapshot ingester, and the rpc feed.
+# The `keccak` feature is the classic (pre-NIST) padding Ethereum uses.
+tiny-keccak = { version = "1", features = ["keccak"] }
+
+[dev-dependencies]
+proptest = "1"

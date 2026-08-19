@@ -1,0 +1,200 @@
+# CI (ADR-0021). Gates that run here and why:
+#   clippy -D warnings + cargo test  — every push and PR (fast, network-free)
+#   xtask conformance                — PRs only (release build, ~minutes;
+#                                      byte-exact vs a synthetic ground truth,
+#                                      fully network-free: MockFeed)
+#   browser                          — PRs only (two release builds — xtask
+#                                      web, risepir-rpc — the same cost class
+#                                      as conformance; drives real headless
+#                                      Chromium against a network-free mock
+#                                      server, the one thing that can see a CSP
+#                                      violation)
+#   cargo-deny                       — advisories / licenses / sources
+# The live feed gate and fuzzing are nightly (nightly.yml): they need the
+# network / long wall-clock and must never flake a merge.
+#
+# `cargo fmt --check` runs in the `clippy + tests` job, first, since 2026-07-31.
+# It was deliberately absent until then (ADR-0021: the tree predated
+# rustfmt.toml) and turned on immediately after the one-off mechanical
+# reformat landed — that commit is listed in `.git-blame-ignore-revs`.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+  # `.cargo/config.toml` sets `-C target-cpu=native`, which is right on a
+  # developer's machine and on the deployment VM (it is what gives the LWE
+  # matvec its AVX2 codegen — see that file's comment) and *wrong* here.
+  # GitHub's `ubuntu-latest` pool is not one CPU model: a job that compiles
+  # the dependency tree on a runner with AVX-512 and stores it via
+  # `Swatinem/rust-cache` hands those artifacts to a later job that landed
+  # on a runner without it, which then dies with SIGILL — exit 132,
+  # "Illegal instruction (core dumped)", a fraction of a second into a
+  # binary whose own crates just recompiled cleanly. That is not a
+  # hypothetical: it took down the conformance gate on PR #15 while the
+  # identical tree had passed it minutes earlier.
+  #
+  # `CARGO_BUILD_RUSTFLAGS` is the right lever rather than `RUSTFLAGS`:
+  # cargo resolves `target.<triple>.rustflags` ahead of `build.rustflags`,
+  # so this replaces the `native` baseline for the host build while leaving
+  # `[target.wasm32-unknown-unknown]`'s mandatory
+  # `getrandom_backend="custom"` untouched. `RUSTFLAGS` would clobber that
+  # too and take the browser client's entropy shim with it.
+  #
+  # `x86-64-v3` rather than a lowest-common-denominator baseline: it is
+  # AVX2, which every current GitHub-hosted Linux runner supports and which
+  # is precisely the codegen the kernels under test are meant to use — so
+  # the gates still exercise the SIMD paths production runs, just pinned to
+  # one ISA the whole fleet agrees on instead of whatever each runner
+  # happened to report.
+  CARGO_BUILD_RUSTFLAGS: -C target-cpu=x86-64-v3
+
+jobs:
+  test:
+    name: clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # First check in the job: it is the cheapest one here and needs no
+      # compilation, so a formatting slip fails in seconds instead of after
+      # clippy and the test suite. `rustfmt.toml` holds the settings.
+      - name: rustfmt (check only)
+        run: cargo fmt --all -- --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace
+      - name: rustdoc (deny warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - name: browser client compiles for its real target
+        # The host-target build above already covers risepir-wasm's rlib;
+        # this catches what only wasm32 can — above all the getrandom
+        # custom-backend wiring (ADR-0019: entropy is a build error there,
+        # not a runtime hope).
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p risepir-wasm --target wasm32-unknown-unknown
+
+  conformance:
+    name: conformance (byte-exact vs ground truth)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo run -p xtask --release -- conformance
+
+  browser:
+    name: browser (wasm client + headless Chromium)
+    # Same reasoning as conformance, one job up: this needs two release
+    # builds (xtask web's wasm build, then risepir-rpc itself) plus standing
+    # up a live mock server and a real headless-Chromium session — minutes,
+    # not seconds. Every push to main is already a squash-merge of a PR that
+    # ran this exact gate (PGR-001/005), so re-running it there would only
+    # re-pay that cost without a matching chance of catching anything new.
+    # PRs are where a CSP regression must be caught, before it merges — so,
+    # like conformance, this runs on PRs and workflow_dispatch, not on push.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # The gates use only Node's built-ins (fetch, WebSocket, wasm) —
+          # there is no package.json in this repo, so no `cache:` input here
+          # (it requires a lockfile to key against) and no `npm install`.
+          node-version: "22"
+      - name: verify a Chromium-family browser is present
+        # `web/test/browser.mjs` exits 0 with a friendly skip when it finds
+        # no browser — right for a developer's laptop, wrong for CI, where
+        # that would be a gate silently passing while testing nothing.
+        # `ubuntu-latest` ships Google Chrome at /usr/bin/google-chrome,
+        # already in browser.mjs's CANDIDATES list, so this fails loudly the
+        # day that ever stops being true, and prints the version so the
+        # gate's evidence is visible in the log. `--require-browser` below
+        # closes the same hole a layer further in, on the Node side.
+        run: |
+          if [ ! -x /usr/bin/google-chrome ]; then
+            echo "::error::/usr/bin/google-chrome not found on this runner — the browser gate has nothing to drive"
+            exit 1
+          fi
+          /usr/bin/google-chrome --version
+          echo "RISEPIR_BROWSER=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+      - name: rustup target add wasm32-unknown-unknown
+        run: rustup target add wasm32-unknown-unknown
+      - name: build the browser client's wasm (xtask web)
+        run: cargo run -p xtask --release -- web
+      - name: build risepir-rpc
+        run: cargo build --release -p risepir-rpc
+      - name: start the mock server (network-free; no live feed needed)
+        run: |
+          ./target/release/risepir-rpc mock --web web > server.log 2>&1 &
+          echo $! > server.pid
+      - name: wait for GET /healthz
+        # Never a fixed sleep — that is exactly how this kind of job goes
+        # flaky (too short on a slow runner, wasted minutes on a fast one).
+        # Poll with a bounded deadline and a failure that dumps the log.
+        run: |
+          # 120s, not 60s: the mock comes up in about two seconds, but this
+          # step starts the instant a release build finishes, and on a
+          # loaded runner that first moment is the worst one — a 60s budget
+          # expired here once with the server having printed nothing at
+          # all. The budget only ever costs wall-clock on a genuine
+          # failure; a healthy server still passes on the first poll.
+          deadline=$((SECONDS + 120))
+          until curl -fsS http://127.0.0.1:8645/healthz > /dev/null 2>&1; do
+            # A server that has already died will never answer, so waiting
+            # out the full budget just delays the report. Fail the moment
+            # the pid is gone and show its log, which is where the reason
+            # will be.
+            if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+              echo "::error::risepir-rpc mock exited before answering GET /healthz"
+              cat server.log
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::risepir-rpc mock never answered GET /healthz on :8645 within 120s"
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: e2e gate (protocol under Node, real wasm host)
+        run: node web/test/e2e.mjs http://127.0.0.1:8645
+      - name: browser gate (headless Chromium — the only thing that can see a CSP)
+        run: node web/test/browser.mjs http://127.0.0.1:8645 --mock --require-browser
+      - name: server log
+        if: failure()
+        run: cat server.log
+      - name: stop the server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
+
+  deny:
+    name: cargo-deny (advisories, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # cargo-deny runs on the host, not in a container (ADR-0022). Every
+      # other job in this workflow already runs cargo directly on the
+      # runner under this repo's own toolchain and `.cargo/config.toml`;
+      # keeping cargo-deny host-side too means every cargo-touching job
+      # shares that one path instead of a second one inside a Docker
+      # action's own image and $HOME — one fewer place for the two to
+      # quietly drift apart.
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-deny
+      - run: cargo deny check

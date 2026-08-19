@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="RisePIR mark">
+  <title>RisePIR</title>
+  <style>
+    .bg { fill: #fbfbfa; }
+    .mark { fill: none; stroke: #1b1c1e; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #101214; }
+      .mark { stroke: #e8e9ea; }
+    }
+  </style>
+  <rect class="bg" width="32" height="32" rx="7" />
+  <path class="mark" d="M11 14.5V11a5 5 0 0 1 10 0v3.5" />
+  <rect class="mark" x="9" y="14.5" width="14" height="11" rx="2.5" />
+</svg>

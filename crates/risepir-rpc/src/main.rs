@@ -38,6 +38,10 @@ async fn main() {
         Some("mock") => run_mock(parse_mock(&args[2..])).await,
         Some("mainnet") => run_mainnet(parse_mainnet(&args[2..])).await,
         Some("client") => run_client(parse_client(&args[2..])).await,
+        Some("time-setup") => {
+            let cfg = parse_time_setup(&args[2..]);
+            std::process::exit(risepir_rpc::time_setup::run(&cfg.state, cfg.out.as_deref()));
+        }
         Some("--help" | "-h") => {
             print_usage();
         }
@@ -254,6 +258,10 @@ fn parse_mock(args: &[String]) -> DemoConfig {
                 cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
             }
             "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
+            "--answer-timing-header" => {
+                cfg.answer_timing_header = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -389,6 +397,13 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             }
             "--lwe-dim" => cfg.lwe_dim = Some(parse_next(args, &mut i, "--lwe-dim")),
             "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
+            "--block-metrics-csv" => {
+                cfg.block_metrics_csv = Some(next_value(args, &mut i, "--block-metrics-csv").into())
+            }
+            "--answer-timing-header" => {
+                cfg.answer_timing_header = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -406,6 +421,35 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
         cfg.save_interval_secs = if cfg.journal_restore { 21_600 } else { 1_800 };
     }
     cfg
+}
+
+/// Flags for `risepir-rpc time-setup` (C13) — see [`risepir_rpc::time_setup::run`].
+struct TimeSetupConfig {
+    state: std::path::PathBuf,
+    out: Option<std::path::PathBuf>,
+}
+
+fn parse_time_setup(args: &[String]) -> TimeSetupConfig {
+    let mut state = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--state" => state = Some(next_value(args, &mut i, "--state").into()),
+            "--out" => out = Some(next_value(args, &mut i, "--out").into()),
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => unknown(other),
+        }
+    }
+    let Some(state) = state else {
+        eprintln!("risepir-rpc time-setup: --state <file> is required");
+        print_usage();
+        std::process::exit(2);
+    };
+    TimeSetupConfig { state, out }
 }
 
 /// Reads and parses the value following flag `name`, advancing past both.
@@ -438,7 +482,7 @@ fn unknown(flag: &str) -> ! {
 fn print_usage() {
     eprintln!("usage:");
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
-    eprintln!("                      [--web <dir>]");
+    eprintln!("                      [--web <dir>] [--answer-timing-header]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
     eprintln!("                      [--snapshot-rewind <N>] [--snapshot-audit-samples <N>]");
     eprintln!("                      [--hard-refresh <file>] [--refresh-url <url>]...");
@@ -448,10 +492,12 @@ fn print_usage() {
     eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
+    eprintln!("                      [--block-metrics-csv <path>] [--answer-timing-header]");
     eprintln!(
         "  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]"
     );
     eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
+    eprintln!("  risepir-rpc time-setup --state <file> [--out <json-path>]");
     eprintln!();
     eprintln!(
         "mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial."
@@ -525,6 +571,25 @@ fn print_usage() {
     );
     eprintln!("client, compiled to wasm and running in the page, so the address never leaves the browser.");
     eprintln!("Build its wasm first: cargo run -p xtask --release -- web");
+    eprintln!(
+        "--block-metrics-csv <path> (mainnet, off by default) appends one row per applied block"
+    );
+    eprintln!("to a CSV file (mutation counts, apply/store/fold/patch timings, delta bytes — see");
+    eprintln!("crate::block_metrics_csv for the exact columns) — a measurement-campaign aid.");
+    eprintln!(
+        "--answer-timing-header (mock/mainnet, off by default) adds x-risepir-answer-compute-ns"
+    );
+    eprintln!("and x-risepir-answer-handler-ns response headers to POST /answer; both are");
+    eprintln!("data-independent by construction (ADR-0039's timing-side-channel analysis).");
+    eprintln!(
+        "time-setup loads --state exactly like mainnet does, times a full PIR setup recompute over"
+    );
+    eprintln!(
+        "it (C13), decode-verifies the persisted hints against the store, and reports the result —"
+    );
+    eprintln!(
+        "see time_setup's own module docs for exactly what \"decode-verifies\" checks and why."
+    );
     eprintln!("See docs/deploy.md for the full runbook.");
 }
 

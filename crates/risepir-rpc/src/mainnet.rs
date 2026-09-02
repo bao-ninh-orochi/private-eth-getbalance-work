@@ -71,12 +71,13 @@ use ikpir_common::SimpleConfig;
 use risepir_feed::rpc::{Address, FetchedBlock, RpcClient, RpcFeed};
 use risepir_feed::snapshot;
 use risepir_feed::FeedError;
-use risepir_http::{NodeState, PirHttpClient, ReconcileHealth};
+use risepir_http::{BlockApplyOutcome, NodeState, PirHttpClient, ReconcileHealth};
 use risepir_proto::{keccak256, Backend, Balance, BlockDelta, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::Segmented2aryCuckooKVStore;
 
 use crate::autosave::{SaveOutcome, StateSaver};
+use crate::block_metrics_csv::{self, BlockMetricsRow};
 use crate::hard_refresh::{self, CorrectionQueue};
 use crate::journal::{self, JournalWriter, ScanStop};
 use crate::private_eth::PrivateEth;
@@ -310,6 +311,20 @@ pub struct MainnetConfig {
     /// with `--snapshot` (a `--state`/`--partial` bootstrap does not
     /// ingest anything to sample from). See `crate::snapshot_audit`.
     pub snapshot_audit_samples: usize,
+    /// `--block-metrics-csv <path>` (a measurement-campaign aid, off by
+    /// default): append one row per successfully applied block to this
+    /// CSV file — see `crate::block_metrics_csv` for the exact columns.
+    /// `None` runs the follow loop exactly as before, with no extra I/O
+    /// or bookkeeping.
+    pub block_metrics_csv: Option<PathBuf>,
+    /// `--answer-timing-header` (off by default): when set, `POST
+    /// /answer` carries the `x-risepir-answer-compute-ns`/
+    /// `x-risepir-answer-handler-ns` response headers — see
+    /// `risepir_http::node`'s `answer` handler for exactly what each
+    /// carries and ADR-0039's timing-side-channel analysis for why both
+    /// are safe to expose. Off leaves every response byte-identical to
+    /// before this flag existed.
+    pub answer_timing_header: bool,
 }
 
 impl Default for MainnetConfig {
@@ -361,6 +376,8 @@ impl Default for MainnetConfig {
             ],
             snapshot_rewind: 2_000,
             snapshot_audit_samples: 512,
+            block_metrics_csv: None,
+            answer_timing_header: false,
         }
     }
 }
@@ -1065,6 +1082,10 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     // for one that was but simply has not saved yet.
     node.set_state_saving_configured(cfg.state.is_some());
 
+    // `--answer-timing-header`: same "set once, before any traffic is
+    // possible" reasoning as the setters around it.
+    node.set_answer_timing_header(cfg.answer_timing_header);
+
     // ── Hard-refresh (ADR-0040) + snapshot audit (ADR-0040) ─────────────
     // Both run as background tasks, never awaited here: neither may block
     // serving or following (see `crate::hard_refresh`'s and
@@ -1169,6 +1190,14 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     });
 
     // ── Follow loop ────────────────────────────────────────────────────
+    // `--block-metrics-csv` (off by default): opened here, before the
+    // loop starts, so a bad path fails fast at startup rather than after
+    // the first block — the same "configuration mistakes fail in
+    // milliseconds" reasoning `--hard-refresh`'s validation above uses.
+    let block_metrics_csv = cfg.block_metrics_csv.as_ref().map(|path| {
+        block_metrics_csv::BlockMetricsCsvWriter::open(path)
+            .unwrap_or_else(|e| die(format!("--block-metrics-csv {}: {e}", path.display())))
+    });
     tokio::spawn(follow_loop(
         feed,
         RpcClient::new(cfg.confirm_url.clone()),
@@ -1180,6 +1209,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             start_at: head_at_start,
             saver: saver.clone(),
             corrections: corrections.clone(),
+            block_metrics_csv,
         },
     ));
 
@@ -1236,6 +1266,9 @@ struct FollowConfig {
     /// `--hard-refresh` was never set), so the follow loop can drain it
     /// unconditionally rather than branching on an `Option` every block.
     corrections: Arc<CorrectionQueue>,
+    /// `--block-metrics-csv`'s open writer, if the flag was given — see
+    /// `crate::block_metrics_csv`.
+    block_metrics_csv: Option<block_metrics_csv::BlockMetricsCsvWriter>,
 }
 
 /// Pure aggregation of [`NodeState::apply_block`]'s measured hint-patch
@@ -1347,13 +1380,23 @@ async fn record_save_tick(saver: &StateSaver, node: &NodeState) {
 /// causes (ADR-0024) — and always *after* the previous iteration's
 /// reconcile, so a state that just failed reconciliation is never the
 /// one being persisted (the loop exits before the next trigger).
-async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cfg: FollowConfig) {
+async fn follow_loop(
+    feed: RpcFeed,
+    confirm: RpcClient,
+    node: Arc<NodeState>,
+    mut cfg: FollowConfig,
+) {
     let mut last = cfg.start_at;
     let mut patch_stats = PatchStats::default();
     // Persists across every checkpoint for the life of the loop (ADR-0036
     // §4) — addresses queued here during a blind checkpoint are verified
     // later, a couple at a time, once checkpoints run normally again.
     let mut reservoir = DeferredReservoir::default();
+    // Cumulative `/answer` compute count/seconds as of the *previous*
+    // applied block — only meaningful with `--block-metrics-csv`, but
+    // cheap enough (one lock, two field reads) to read every block
+    // regardless: `NodeState::answer_compute_totals`'s own docs.
+    let (mut prev_answer_count, mut prev_answer_seconds) = node.answer_compute_totals();
     loop {
         if let Some(saver) = &cfg.saver {
             // Outcome/error ignored by this loop's own control flow (the
@@ -1384,6 +1427,11 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             }
 
             let n = last + 1;
+            // Timed around the fetch call only, restarted fresh on every
+            // retry (the `continue` below re-enters this loop body) — so a
+            // written CSV row's `feed_fetch_ms` is always the *successful*
+            // attempt's own duration, never inflated by earlier refusals.
+            let fetch_t0 = std::time::Instant::now();
             let fetched = match feed.block_update(n).await {
                 Ok(f) => f,
                 Err(e) => {
@@ -1392,6 +1440,7 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                     continue; // same n, idempotent
                 }
             };
+            let feed_fetch_ms = fetch_t0.elapsed().as_secs_f64() * 1000.0;
             let FetchedBlock {
                 mut update,
                 changed,
@@ -1471,8 +1520,8 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 }
             }
 
-            let (delta, patch_duration) = match node.apply_block(&update).await {
-                Ok(d) => d,
+            let outcome = match node.apply_block_reporting(&update).await {
+                Ok(o) => o,
                 Err(e) => {
                     critical(&format!(
                         "apply_block({n}) failed: {e} — serving stays at block {last}; re-bootstrap required"
@@ -1480,6 +1529,13 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                     return;
                 }
             };
+            let BlockApplyOutcome {
+                delta,
+                report,
+                apply_duration: patch_duration,
+                lock_wait,
+                delta_bytes,
+            } = outcome;
             last = n;
 
             // Delta journal (ADR-0026): one append per applied block,
@@ -1511,6 +1567,51 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 log_patch_stats(n, &patch_stats);
                 patch_stats = PatchStats::default();
             }
+
+            // `--block-metrics-csv` (a measurement-campaign aid, off by
+            // default): one row per applied block. `answers_since_prev_block`/
+            // `answer_compute_ms_since_prev_block` diff this block's
+            // cumulative `/answer` totals against the previous block's —
+            // an interference indicator, read unconditionally (cheap, see
+            // `NodeState::answer_compute_totals`'s own docs) so the deltas
+            // stay correct even for a run that starts writing the CSV only
+            // partway through (which cannot happen today, but costs
+            // nothing to keep correct regardless). A write failure is
+            // logged and otherwise ignored — this is measurement
+            // instrumentation, never a reason to stop following or
+            // serving.
+            let (answer_count, answer_seconds) = node.answer_compute_totals();
+            if let Some(csv) = cfg.block_metrics_csv.as_mut() {
+                if let Err(e) = csv.write_row(BlockMetricsRow {
+                    block: n,
+                    applied_at_unix_ms: unix_now_ms(),
+                    changes: report.changes,
+                    credits: report.credits,
+                    inserts: report.inserts,
+                    updates: report.updates,
+                    deletes: report.deletes,
+                    noop_deletes: report.noop_deletes,
+                    touched_cells: report.touched_cells,
+                    store_ms: report.store_dur.as_secs_f64() * 1000.0,
+                    fold_ms: report.fold_dur.as_secs_f64() * 1000.0,
+                    patch_ms: report.patch_dur.as_secs_f64() * 1000.0,
+                    apply_ms: patch_duration.as_secs_f64() * 1000.0,
+                    lock_wait_ms: lock_wait.as_secs_f64() * 1000.0,
+                    delta_bytes,
+                    answers_since_prev_block: answer_count.saturating_sub(prev_answer_count),
+                    answer_compute_ms_since_prev_block: (answer_seconds - prev_answer_seconds)
+                        .max(0.0)
+                        * 1000.0,
+                    feed_fetch_ms,
+                    finalized_block: finalized,
+                }) {
+                    logln!(
+                        "risepir-rpc mainnet: --block-metrics-csv: write failed (block {n}): {e}"
+                    );
+                }
+            }
+            prev_answer_count = answer_count;
+            prev_answer_seconds = answer_seconds;
 
             // Feed `GET /recent` (ADR-0019). Only *after* a successful
             // apply: an address is offered to the front end as queryable
@@ -2152,6 +2253,16 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// [`unix_now`], in milliseconds — `--block-metrics-csv`'s
+/// `applied_at_unix_ms` column, the only caller that needs sub-second
+/// resolution.
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

@@ -57,3 +57,13 @@ serde      = { version = "1", features = ["derive"] }
 # the `serde_json` this crate depends on directly anyway — used by
 # `tests/rpc.rs` to drive the JSON-RPC surface as a real client would.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[dev-dependencies]
+# Tokio's paused-clock test harness (`#[tokio::test(start_paused = true)]`)
+# for the block-prefetch unit tests (ADR-0047): scripted per-block fetch
+# latencies become *logical* time that the runtime auto-advances, so the
+# ordering and max-concurrency assertions are exact rather than wall-clock
+# races on a loaded CI runner. Same supplier and version as the runtime
+# dependency above — only the extra feature — and dev-dependencies are not
+# built for `cargo build`, so `test-util` never reaches the release binary.
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -3588,3 +3588,120 @@ the `v0.1.0-perf`/bit-identical claims being corrected here.
 **Status:** decided 2026-09-02, closing
 `orochi-network/private-eth-getbalance#2`. `v0.2.0-perf` = commit
 `d91c75fb807d25807104c29b1931f846f007379a`.
+
+### ADR-0047 — Bounded in-order block prefetch for the follow loop; `--prefetch` defaults to 1 **[NEW — a catch-up accelerator only; changes nothing about apply, reconcile, autosave or the journal]**
+
+**Chosen:** a small, strictly in-order lookahead over the *fetch* half of
+the follow loop (`crates/risepir-rpc/src/prefetch.rs`, `BlockPrefetch`).
+New `--prefetch <k>` (default **1**, max `mainnet::MAX_PREFETCH` = 32):
+while the loop applies block `n`, up to `k - 1` later blocks are already
+being fetched. One `logln!` at startup names the depth in force. The
+applier still asks for exactly `last + 1` every iteration and gets *that*
+block or an error, so blocks are applied in strictly increasing order,
+exactly once each.
+**Rejected:** applying whichever prefetched block finished first (a
+skipped or reordered block is a wrong balance — the first binding rule);
+a default above 1 (it would silently change how every existing deployment
+talks to its feed provider); an unbounded or self-tuning window (it is
+someone else's free tier at the other end — ADR-0024); parallelising
+`apply_block` or the reconcile/autosave/journal steps (ADR-0025's "the
+applier's own task is the only writer" argument is exactly what keeps
+`/answer` flowing during a save, and this must not touch it); and
+prefetching past `finalized`.
+
+**The problem, measured.** On 2026-09-02 the complete-set deployment
+restarted from a state file saved 2026-08-26 and replayed at ~**1.1
+blocks/s** against dRPC, while `apply_block` took ~**4 ms**. The loop was
+idle on the network ~99.6% of the time: ~1–2 s per
+`debug_traceBlockByNumber` plus the `HTTP 408` refusals ADR-0024 exists
+for. 52,000 blocks ≈ **13 h** of catch-up during which the deployment
+serves a labelled-stale head. Overlapping the fetches is the whole
+difference; nothing else in the loop is on the critical path.
+
+**Why this is safe here, and would not be on `latest`.** The lookahead is
+clipped to the `finalized` block the loop last polled. `finalized` cannot
+reorg (ADR-0007), so a block fetched before it is applied can never turn
+out to have been the wrong block — the clip is not a politeness bound, it
+is the correctness argument. On a `latest`-following deployment the same
+code would be unsound.
+
+**The invariants, and where each is enforced** (`prefetch.rs`):
+
+1. **In order, nothing skipped.** `BlockPrefetch::fetch(n)` returns block
+   `n` or an error, never a later block that finished first. On error the
+   slot is cleared, so the loop's existing retry (same `n`, same
+   `RETRY_INTERVAL`, same log line) re-issues the same
+   `RpcFeed::block_update(n)` down the same endpoint chain. Later blocks
+   stay in flight, untouched and unreachable, until `n` applies.
+2. **At most `k` in flight.** The window is `n ..= min(n + k - 1, head)`,
+   refilled only from `fetch`.
+3. **Never past the head.** `set_head(finalized)` is called once per poll;
+   the sweep there also aborts anything above a (theoretically) regressed
+   head, so the invariant holds unconditionally.
+4. **`k = 1` is the old loop's call sequence and retry semantics.** One
+   fetch issued and awaited per applied block, in block order, retried the
+   same way on failure — pinned by
+   `depth_one_reproduces_the_pre_prefetch_call_sequence`, which runs a
+   driver written the way the loop's body was before this ADR against the
+   same mock and asserts the two call sequences are *equal*. It is not
+   "byte for byte" in every observable, and the difference is worth
+   naming: at any depth the fetch now runs in a spawned task, so a
+   **panic inside `block_update` is contained** and becomes a
+   `FetchFailure::Task` retried every `RETRY_INTERVAL` with a loud log
+   line, where before it unwound out of `follow_loop` and stopped
+   following silently. That is strictly the safer direction — a panicking
+   fetch never applied a block, so no answer can be wrong, and the loud
+   retry is visible where the silent stop was not — but it is a change,
+   not an identity.
+
+**A fetch task that panics is a failed fetch, not a skipped block**
+(`FetchFailure::Task`): it retries like any other failure. Giving up on
+the block is the one thing that is never allowed, and a panic in a fetch
+is evidence about the fetch, not about the chain. This is also the one
+place `--prefetch 1` is not literally the old loop — see invariant 4.
+
+**The follow loop re-checks the block number it got** (`mainnet.rs`,
+immediately after the `FetchedBlock` destructure): `update.block != n`
+is a `CRITICAL` halt. It cannot fire against this implementation —
+`fetch(n)` returns block `n`'s own task or an error — and it is there
+anyway, because the prefetcher schedules without validating the payload
+(`a_mislabelled_block_is_passed_through_for_the_caller_to_reject`) and
+because applying one block's *absolute* post-state as another's is
+exactly a silently wrong balance, which nothing downstream would catch.
+
+**Evidence.** Eight unit tests in `prefetch.rs` drive a mock
+`BlockSource` with scripted per-block latencies, failures and panics under
+`#[tokio::test(start_paused = true)]`, so the latencies are logical time
+the runtime auto-advances — the orderings are exact, not wall-clock races
+(this is the one new dev-dependency feature: `tokio/test-util`, test-only,
+same supplier and version). The four that carry the acceptance criteria
+were each checked against a mutation that breaks the property: removing
+the lookahead fails the ordering/concurrency and held-blocks tests;
+removing the head clip fails the head-bound test; forcing `depth >= 2`
+fails the `k = 1` equivalence test.
+
+**Measured against real mainnet** (`docs/deploy.md` §5.10, 2026-09-02):
+one saved `--partial` state file replayed four times over the same
+85-block gap — **0.69 / 0.75 blocks/s at `--prefetch 1`** against
+**1.29 / 1.39 at `--prefetch 8`**, ≈**1.86×**, with the order reversed
+between the pairs so a warmed provider cache cannot explain it. Not 8×:
+the endpoint's own concurrency limit and per-call latency are what the
+window runs into. And the part that matters more — the three runs that
+stopped at the same block produced **byte-identical** state files
+(`sha256 0b550ff4…`, 116,526,275 B), one sequential and two 8-deep
+concurrent. Same cells, same encoded hints; the lookahead moved when the
+fetches were issued and nothing else.
+
+**Cost accepted:** up to `k` blocks' raw JSON responses in memory at once,
+and up to `k` concurrent connections to a keyless provider that may rate-
+limit — which is why the flag is opt-in, capped, and documented as a
+catch-up tool rather than a permanent setting. While caught up,
+`finalized` is a block or two ahead at most, so the window naturally
+degenerates to 0–1 and `--prefetch 8` behaves like `--prefetch 1`.
+
+**Status:** decided 2026-09-03, closing
+`orochi-network/private-eth-getbalance#5`. The live measurement above is a
+laptop `--partial` replay of 85 blocks; the complete-set box has not run a
+multi-thousand-block catch-up under this flag yet, so treat 1.86× as the
+shape of the effect, not as the number to quote for a 52,000-block
+replay.

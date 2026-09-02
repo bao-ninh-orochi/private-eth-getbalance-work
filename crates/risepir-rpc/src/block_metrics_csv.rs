@@ -38,7 +38,7 @@ use std::path::Path;
 /// — see this module's own docs for the full column list.
 const HEADER: &str = "block,applied_at_unix_ms,changes,credits,inserts,updates,deletes,noop_deletes,touched_cells,store_ms,fold_ms,patch_ms,apply_ms,lock_wait_ms,delta_bytes,answers_since_prev_block,answer_compute_ms_since_prev_block,feed_fetch_ms,finalized_block";
 
-/// Number of columns [`HEADER`]/[`BlockMetricsRow::to_csv_line`] both
+/// Number of columns the header row and every [`BlockMetricsRow`] both
 /// produce — checked directly by this module's own tests rather than
 /// merely asserted in a doc comment.
 pub const COLUMN_COUNT: usize = 19;
@@ -150,7 +150,7 @@ pub struct BlockMetricsCsvWriter {
 
 impl BlockMetricsCsvWriter {
     /// Opens `path` for appending, creating it if it does not exist.
-    /// Writes [`HEADER`] first (and only) when the file is freshly
+    /// Writes the header row first (and only) when the file is freshly
     /// created or was already empty — an existing non-empty file (e.g. a
     /// restart against the same `--block-metrics-csv` path) is appended
     /// to exactly as it stands, never re-headered and never truncated.

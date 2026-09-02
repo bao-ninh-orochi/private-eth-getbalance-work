@@ -6,9 +6,9 @@
 //! compare against the persisted hints
 //!
 //! [`SimplePirBackend::server_setup`] — the function every fresh bootstrap
-//! and [`RisePirServer::full_rebuild`] both call — samples a **fresh
-//! random seed** for the per-segment public matrix `A` on every call ("no
-//! way to inject one through the public API", pinned by
+//! and [`risepir_server::RisePirServer::full_rebuild`] both call — samples
+//! a **fresh random seed** for the per-segment public matrix `A` on every
+//! call ("no way to inject one through the public API", pinned by
 //! `risepir-server`'s own `tests/full_rebuild_alloc.rs`). So a freshly
 //! recomputed hint and the persisted, incrementally-patched hint are
 //! built from *different* `A` matrices even when the underlying cells are

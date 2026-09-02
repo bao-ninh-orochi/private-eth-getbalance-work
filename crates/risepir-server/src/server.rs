@@ -102,7 +102,7 @@ enum ChangeKind {
 ///   store never held) performs no store mutation at all.
 /// - `changes + credits` equals `inserts + updates + deletes +
 ///   noop_deletes`: every entry of `BlockUpdate::changes` and
-///   `BlockUpdate::credits` resolves to exactly one [`ChangeKind`].
+///   `BlockUpdate::credits` resolves to exactly one `ChangeKind`.
 /// - `touched_cells` is the number of `(row, offset)` delta entries across
 ///   every segment's [`SegmentRowDeltas`] in the returned [`BlockDelta`]
 ///   — i.e. exactly the size of what a client rewinding through this
@@ -130,11 +130,11 @@ pub struct BlockApplyReport {
     /// will ingest to stay in sync with this block.
     pub touched_cells: u64,
     /// Wall-clock time of stage (i): the loop applying every change and
-    /// credit through [`RisePirServer::apply_change`] (store reads/writes
+    /// credit through `RisePirServer::apply_change` (store reads/writes
     /// only — no encoding, no logging, no lock acquisition).
     pub store_dur: Duration,
     /// Wall-clock time of stage (ii): `CuckooKVStore::drain_mutations` plus
-    /// [`fold_mutations_into_row_deltas`].
+    /// the internal row-delta fold (`fold_mutations_into_row_deltas`).
     pub fold_dur: Duration,
     /// Wall-clock time of stage (iii): every touched segment's
     /// `IncrementalPirBackend::server_patch_hint` call.
@@ -584,14 +584,15 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// # Timed regions — exactly three, nothing else inside them
     ///
     /// 1. **`store_dur`**: the loop applying every entry of
-    ///    `update.changes` through [`Self::apply_change`], then every
-    ///    entry of `update.credits` (its verified prior-value read,
-    ///    overflow check, and [`Self::apply_change`] call). No encoding,
-    ///    no logging, no lock acquisition — this method never acquires a
-    ///    lock itself (the caller, `NodeState::apply_block_reporting`,
-    ///    holds `RisePirServer` behind one).
-    /// 2. **`fold_dur`**: `CuckooKVStore::drain_mutations` plus
-    ///    [`fold_mutations_into_row_deltas`] — nothing else.
+    ///    `update.changes` through `Self::apply_change`, then every entry
+    ///    of `update.credits` (its verified prior-value read, overflow
+    ///    check, and `Self::apply_change` call). No encoding, no logging,
+    ///    no lock acquisition — this method never acquires a lock itself
+    ///    (the caller, `NodeState::apply_block_reporting`, holds
+    ///    `RisePirServer` behind one).
+    /// 2. **`fold_dur`**: `CuckooKVStore::drain_mutations` plus the
+    ///    internal row-delta fold (`fold_mutations_into_row_deltas`) —
+    ///    nothing else.
     /// 3. **`patch_dur`**: every touched segment's
     ///    `IncrementalPirBackend::server_patch_hint` call — nothing else.
     ///    In particular, encoding the returned [`BlockDelta`] (e.g. via
@@ -603,9 +604,9 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// less than this whole call's own wall-clock time (the classification
     /// bookkeeping between stages, and the final [`BlockDelta`]
     /// construction, are real but negligible) — the same "sum of stages
-    /// plus a tiny residual" relationship [`crate::node`]'s docs already
-    /// describe for `NodeState::apply_block`'s outer timer against these
-    /// three.
+    /// plus a tiny residual" relationship `risepir_http::node`'s docs
+    /// already describe for `NodeState::apply_block`'s outer timer against
+    /// these three.
     pub fn apply_block_reporting(
         &mut self,
         update: &BlockUpdate,

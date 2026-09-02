@@ -31,7 +31,7 @@
 //!   idempotent); the server keeps serving its last applied block,
 //!   labelled, meanwhile.
 //! - Block *fetches* may run ahead of the applier (ADR-0047,
-//!   `--prefetch`, [`crate::prefetch`]) — nothing else does. The applier
+//!   `--prefetch`, the `prefetch` module) — nothing else does. The applier
 //!   still asks for exactly `last + 1` and gets that block or an error,
 //!   so blocks are applied in strictly increasing order, exactly once
 //!   each, with the same retry on failure; the lookahead is clipped to

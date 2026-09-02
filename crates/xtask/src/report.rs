@@ -310,6 +310,7 @@ const TRIALS_COLUMNS: &[&str] = &[
     "head_wire_us",
     "sync_wire_us",
     "answer_wire_us",
+    "setup_wire_us",
     "finish_us",
     "residual_us",
     "rewind_us",
@@ -355,12 +356,18 @@ pub struct TrialRow {
     pub sync_wire_us: u64,
     /// Client-measured answer wire span, microseconds.
     pub answer_wire_us: u64,
+    /// The re-bootstrap `/setup` download's wire span, microseconds: `0`
+    /// on a normal trial, the whole hint download on an `attempts = 2`
+    /// row. A budget term of its own rather than part of the residual
+    /// precisely because it is enormous when nonzero — see the probe's
+    /// own module docs.
+    pub setup_wire_us: u64,
     /// A5: client-side finish latency (rewind+decode+delta_apply+scan),
     /// microseconds.
     pub finish_us: u64,
-    /// `t_total_us - (build+head+sync+answer+finish)`, by construction —
-    /// signed so a data-integrity violation is visible in either
-    /// direction (see [`budget_violation_us`]).
+    /// `t_total_us - (build+head+sync+answer+setup+finish)`, by
+    /// construction — signed so a data-integrity violation is visible in
+    /// either direction (see [`budget_violation_us`]).
     pub residual_us: i64,
     /// A5 sub-timer: rewind, microseconds.
     pub rewind_us: u64,
@@ -435,6 +442,7 @@ pub fn parse_trials_csv(content: &str) -> Result<Vec<TrialRow>, String> {
         i_head,
         i_sync,
         i_answer,
+        i_setup_wire,
         i_finish,
         i_residual,
         i_rewind,
@@ -462,6 +470,7 @@ pub fn parse_trials_csv(content: &str) -> Result<Vec<TrialRow>, String> {
         idx("head_wire_us"),
         idx("sync_wire_us"),
         idx("answer_wire_us"),
+        idx("setup_wire_us"),
         idx("finish_us"),
         idx("residual_us"),
         idx("rewind_us"),
@@ -494,6 +503,7 @@ pub fn parse_trials_csv(content: &str) -> Result<Vec<TrialRow>, String> {
             head_wire_us: parse_u64_field(f[i_head], FILE, row_num, "head_wire_us")?,
             sync_wire_us: parse_u64_field(f[i_sync], FILE, row_num, "sync_wire_us")?,
             answer_wire_us: parse_u64_field(f[i_answer], FILE, row_num, "answer_wire_us")?,
+            setup_wire_us: parse_u64_field(f[i_setup_wire], FILE, row_num, "setup_wire_us")?,
             finish_us: parse_u64_field(f[i_finish], FILE, row_num, "finish_us")?,
             residual_us: parse_i64_field(f[i_residual], FILE, row_num, "residual_us")?,
             rewind_us: parse_u64_field(f[i_rewind], FILE, row_num, "rewind_us")?,
@@ -695,10 +705,18 @@ pub struct ServerBlockRow {
     pub lock_wait_ms: f64,
     /// B9: server-side delta wire size, bytes.
     pub delta_bytes: u64,
-    /// Answers served since the previous block — `> 0` marks this block
-    /// as applied while probe traffic was active (the interference
+    /// Answers served since the previous block — `Some(n > 0)` marks this
+    /// block as applied while probe traffic was active (the interference
     /// check's "probe-adjacent" subset).
-    pub answers_since_prev_block: u64,
+    ///
+    /// `None` (an empty CSV field) on the **first block a follow-loop run
+    /// applies**: that row's "since" window would otherwise start at loop
+    /// entry rather than at a genuine previous applied block, which the
+    /// producer deliberately refuses to report as the same quantity. Such
+    /// a row is neither quiet nor probe-adjacent — it is unknown — so it
+    /// is excluded from both subsets below rather than silently counted
+    /// as quiet.
+    pub answers_since_prev_block: Option<u64>,
 }
 
 /// Parses `--server-blocks` content into one [`ServerBlockRow`] per data
@@ -766,7 +784,7 @@ pub fn parse_server_blocks_csv(content: &str) -> Result<Vec<ServerBlockRow>, Str
             apply_ms: parse_f64_field(f[i_apply_ms], FILE, row_num, "apply_ms")?,
             lock_wait_ms: parse_f64_field(f[i_lock_wait_ms], FILE, row_num, "lock_wait_ms")?,
             delta_bytes: parse_u64_field(f[i_delta_bytes], FILE, row_num, "delta_bytes")?,
-            answers_since_prev_block: parse_u64_field(
+            answers_since_prev_block: parse_opt_u64_field(
                 f[i_answers_since_prev_block],
                 FILE,
                 row_num,
@@ -862,9 +880,13 @@ pub struct SetupInfo {
     pub plaintext_bits: u32,
     /// C13: one-time PIR setup wall time, seconds.
     pub setup_seconds: f64,
-    /// C13: whether the persisted hints matched a fresh setup at load —
-    /// the invariant check.
-    pub hints_match_persisted: bool,
+    /// C13: whether the persisted hints reproduced **byte for byte** from
+    /// the persisted seed and the store's current cells — the invariant
+    /// check, and the only field of `risepir-rpc time-setup`'s JSON that
+    /// gates its exit code. Named exactly as the producer writes it
+    /// (`persisted_hints_exact_match`); it was `hints_match_persisted`
+    /// before that check was made exact.
+    pub persisted_hints_exact_match: bool,
     /// Block this setup measurement was taken at/after.
     pub state_block: u64,
     /// C13: rayon thread count used for this setup.
@@ -886,7 +908,7 @@ pub fn parse_setup_json(content: &str) -> Result<SetupInfo, String> {
         lwe_dim: json_u32(&obj, "lwe_dim", FILE)?,
         plaintext_bits: json_u32(&obj, "plaintext_bits", FILE)?,
         setup_seconds: json_f64(&obj, "setup_seconds", FILE)?,
-        hints_match_persisted: json_bool(&obj, "hints_match_persisted", FILE)?,
+        persisted_hints_exact_match: json_bool(&obj, "persisted_hints_exact_match", FILE)?,
         state_block: json_u64(&obj, "state_block", FILE)?,
         rayon_threads: json_u32(&obj, "rayon_threads", FILE)?,
     })
@@ -1100,17 +1122,24 @@ fn binned_stats<'a>(
     buckets.map(|b| compute_stats(&b))
 }
 
-/// `A1 − (A2 + head + sync + answer + A5 + residual)`, in microseconds,
-/// for one trial row. Must be exactly `0` for a well-formed campaign —
-/// `residual_us` is defined as exactly that difference by the producer
-/// (`risepir-rpc probe`), so a nonzero value reports a data-integrity
-/// problem in the raw CSV, not a bug in this computation.
+/// `A1 − (A2 + head + sync + answer + setup + A5 + residual)`, in
+/// microseconds, for one trial row. Must be exactly `0` for a well-formed
+/// campaign — `residual_us` is defined as exactly that difference by the
+/// producer (`risepir-rpc probe`), so a nonzero value reports a
+/// data-integrity problem in the raw CSV, not a bug in this computation.
+///
+/// `setup_wire_us` is a term here because the producer makes it one: it
+/// is `0` on every normal trial but carries the whole re-bootstrap
+/// `/setup` download on an `attempts = 2` row, and omitting it would
+/// report exactly those rows — the rare, interesting ones — as spurious
+/// budget violations.
 pub fn budget_violation_us(row: &TrialRow) -> i64 {
     let lhs = row.t_total_us as i64;
     let rhs = row.build_us as i64
         + row.head_wire_us as i64
         + row.sync_wire_us as i64
         + row.answer_wire_us as i64
+        + row.setup_wire_us as i64
         + row.finish_us as i64
         + row.residual_us;
     lhs - rhs
@@ -1340,7 +1369,7 @@ fn render_section_a(out: &mut String, data: &ReportData, successful: &[&TrialRow
     writeln!(out).unwrap();
     writeln!(
         out,
-        "`A1 = A2 + head_wire_us + sync_wire_us + answer_wire_us + A5 + residual_us`"
+        "`A1 = A2 + head_wire_us + sync_wire_us + answer_wire_us + setup_wire_us + A5 + residual_us`"
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -1352,6 +1381,7 @@ fn render_section_a(out: &mut String, data: &ReportData, successful: &[&TrialRow
     let head_mean = mean_of(|r| r.head_wire_us as f64);
     let sync_mean = mean_of(|r| r.sync_wire_us as f64);
     let answer_mean = mean_of(|r| r.answer_wire_us as f64);
+    let setup_wire_mean = mean_of(|r| r.setup_wire_us as f64);
     let a5_mean = mean_of(|r| r.finish_us as f64);
     let residual_mean = mean_of(|r| r.residual_us as f64);
     let a1_mean = mean_of(|r| r.t_total_us as f64);
@@ -1359,9 +1389,11 @@ fn render_section_a(out: &mut String, data: &ReportData, successful: &[&TrialRow
     writeln!(out, "| head_wire_us | {} |", fmt_dec(head_mean, 2)).unwrap();
     writeln!(out, "| sync_wire_us | {} |", fmt_dec(sync_mean, 2)).unwrap();
     writeln!(out, "| answer_wire_us | {} |", fmt_dec(answer_mean, 2)).unwrap();
+    writeln!(out, "| setup_wire_us | {} |", fmt_dec(setup_wire_mean, 2)).unwrap();
     writeln!(out, "| A5 (finish_us) | {} |", fmt_dec(a5_mean, 2)).unwrap();
     writeln!(out, "| residual_us | {} |", fmt_dec(residual_mean, 2)).unwrap();
-    let sum_of_means = a2_mean + head_mean + sync_mean + answer_mean + a5_mean + residual_mean;
+    let sum_of_means =
+        a2_mean + head_mean + sync_mean + answer_mean + setup_wire_mean + a5_mean + residual_mean;
     writeln!(
         out,
         "| **sum of components** ({DERIVED}) | {} |",
@@ -1386,7 +1418,8 @@ fn render_section_a(out: &mut String, data: &ReportData, successful: &[&TrialRow
     };
     writeln!(
         out,
-        "Per-row check ({DERIVED}): max |A1 \u{2212} (A2+head+sync+answer+A5+residual)| across {} \
+        "Per-row check ({DERIVED}): max |A1 \u{2212} (A2+head+sync+answer+setup+A5+residual)| \
+         across {} \
          successful rows = {} us ({violation_note}).",
         successful.len(),
         max_violation.unsigned_abs(),
@@ -1696,12 +1729,12 @@ fn render_section_b(out: &mut String, data: &ReportData) {
     let quiet: Vec<&ServerBlockRow> = data
         .server_blocks
         .iter()
-        .filter(|r| r.answers_since_prev_block == 0)
+        .filter(|r| r.answers_since_prev_block == Some(0))
         .collect();
     let probe_adjacent: Vec<&ServerBlockRow> = data
         .server_blocks
         .iter()
-        .filter(|r| r.answers_since_prev_block > 0)
+        .filter(|r| matches!(r.answers_since_prev_block, Some(n) if n > 0))
         .collect();
     write_stats_row(
         out,
@@ -1986,8 +2019,8 @@ fn render_section_c(out: &mut String, data: &ReportData) {
     .unwrap();
     writeln!(
         out,
-        "| hints_match_persisted (invariant check) | {} |",
-        data.setup.hints_match_persisted
+        "| persisted_hints_exact_match (invariant check) | {} |",
+        data.setup.persisted_hints_exact_match
     )
     .unwrap();
     writeln!(out, "| state_block | {} |", fmt_num(data.setup.state_block)).unwrap();
@@ -2066,13 +2099,27 @@ fn render_section_d(
     let probe_adjacent_count = data
         .server_blocks
         .iter()
-        .filter(|r| r.answers_since_prev_block > 0)
+        .filter(|r| matches!(r.answers_since_prev_block, Some(n) if n > 0))
+        .count();
+    let unknown_interference = data
+        .server_blocks
+        .iter()
+        .filter(|r| r.answers_since_prev_block.is_none())
         .count();
     writeln!(
         out,
         "- **Blocks applied while probe traffic was active (`answers_since_prev_block > 0`):** \
-         {probe_adjacent_count}/{}.",
-        data.server_blocks.len()
+         {probe_adjacent_count}/{}{}.",
+        data.server_blocks.len(),
+        if unknown_interference == 0 {
+            String::new()
+        } else {
+            format!(
+                " ({unknown_interference} row(s) carry an empty `answers_since_prev_block` \
+                 \u{2014} the first block of a follow-loop run, whose window is undefined \u{2014} \
+                 and are counted in neither the quiet nor the probe-adjacent subset)"
+            )
+        }
     )
     .unwrap();
 
@@ -2181,6 +2228,7 @@ mod tests {
             ("head_wire_us", "50".into()),
             ("sync_wire_us", "60".into()),
             ("answer_wire_us", "70".into()),
+            ("setup_wire_us", "0".into()),
             ("finish_us", "200".into()),
             ("residual_us", "20".into()),
             ("rewind_us", "50".into()),
@@ -2415,7 +2463,7 @@ mod tests {
             "lwe_dim": 1275,
             "plaintext_bits": 9,
             "setup_seconds": 12.5,
-            "hints_match_persisted": true,
+            "persisted_hints_exact_match": true,
             "state_block": 300,
             "rayon_threads": 8
         }"#;
@@ -2479,7 +2527,7 @@ mod tests {
             "lwe_dim": 999,
             "plaintext_bits": 8,
             "setup_seconds": 3.0,
-            "hints_match_persisted": true,
+            "persisted_hints_exact_match": true,
             "state_block": 300,
             "rayon_threads": 8
         }"#;

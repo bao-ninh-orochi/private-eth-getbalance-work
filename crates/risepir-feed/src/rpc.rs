@@ -200,6 +200,33 @@ impl RpcClient {
     /// check. Errors are loud; a reconciler must never treat "could not
     /// fetch" as "matched".
     pub async fn balance_at(&self, addr: &Address, block: u64) -> Result<Balance, FeedError> {
+        Ok(self.balance_at_raw(addr, block).await?.0)
+    }
+
+    /// [`Self::balance_at`], also handing back the provider's **raw**
+    /// `result` string exactly as it arrived — not re-rendered from the
+    /// parsed value.
+    ///
+    /// # Why the raw string is worth keeping
+    ///
+    /// The crate's own `parse_hex_u128` normalises:
+    /// `"0x0de0b6b3a7640000"`,
+    /// `"0xDE0B6B3A7640000"` and `"0xde0b6b3a7640000"` all parse to the
+    /// same `u128`, so a comparison made *after* parsing can only ever
+    /// test the number. A caller checking that this service is
+    /// byte-for-byte substitutable for a public RPC needs the other
+    /// half — that the string on the wire is the same string too — and
+    /// once the value is parsed that evidence is gone. So it is returned
+    /// alongside rather than reconstructed.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::balance_at`]'s.
+    pub async fn balance_at_raw(
+        &self,
+        addr: &Address,
+        block: u64,
+    ) -> Result<(Balance, String), FeedError> {
         let addr_hex = format!("0x{}", hex(addr));
         let result = self
             .call("eth_getBalance", json!([addr_hex, format!("0x{block:x}")]))
@@ -207,7 +234,8 @@ impl RpcClient {
         let s = result
             .as_str()
             .ok_or_else(|| parse_err("eth_getBalance", "result is not a string"))?;
-        parse_hex_u128(s).map_err(|e| parse_err("eth_getBalance", &e))
+        let value = parse_hex_u128(s).map_err(|e| parse_err("eth_getBalance", &e))?;
+        Ok((value, s.to_string()))
     }
 }
 

@@ -41,6 +41,14 @@ risepir-http   = { path = "../risepir-http" }
 ikpir-common = { workspace = true }
 segmented-cuckoo = { workspace = true }
 
+# `rayon::current_num_threads()` for `time-setup`'s JSON report (C13) —
+# already transitively in the dependency graph via `ikpir-common`'s own
+# `parallel` feature (the kernels this crate's setup/patch calls actually
+# run on); this is only a direct edge to a version already resolved, not
+# a new supplier. Unpinned within the already-locked major version, same
+# style as this file's other bare `"1"` specs.
+rayon      = "1"
+
 axum       = "0.8"
 # Request timeout on the JSON-RPC listener (rpc.rs) — same layer the PIR
 # transport already uses; already in the graph via risepir-http.

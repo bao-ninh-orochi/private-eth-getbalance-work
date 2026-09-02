@@ -12,6 +12,12 @@
 //!                     [--prefetch <k>]
 //!                     [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]
 //!                     [--web <dir>]
+//! risepir-rpc probe   --pir-url <url> --queries-csv <path> --blocks-csv <path>
+//!                     [--confirm-url <url>] [--no-confirm] [--resolve <host:port:ip>]...
+//!                     [--addresses-file <path>] [--batch-size <n>] [--batches <k>]
+//!                     [--batch-interval-secs <s>] [--trial-gap-ms <ms>]
+//!                     [--follow-secs <s>] [--poll-secs <s>] [--absent-fraction <f>]
+//!                     [--rss-every <n>] [--chain-id <u64>]
 //! ```
 //!
 //! `--snapshot-rewind`/`--snapshot-audit-samples`/`--hard-refresh` are the
@@ -31,6 +37,7 @@ use risepir_rpc::demo::{self, DemoConfig};
 use risepir_rpc::front::{self, FrontConfig};
 use risepir_rpc::logln;
 use risepir_rpc::mainnet::{self, MainnetConfig};
+use risepir_rpc::probe::{self, ProbeConfig, ResolveOverride};
 
 #[tokio::main]
 async fn main() {
@@ -39,6 +46,11 @@ async fn main() {
         Some("mock") => run_mock(parse_mock(&args[2..])).await,
         Some("mainnet") => run_mainnet(parse_mainnet(&args[2..])).await,
         Some("client") => run_client(parse_client(&args[2..])).await,
+        Some("time-setup") => {
+            let cfg = parse_time_setup(&args[2..]);
+            std::process::exit(risepir_rpc::time_setup::run(&cfg.state, cfg.out.as_deref()));
+        }
+        Some("probe") => run_probe(parse_probe(&args[2..])).await,
         Some("--help" | "-h") => {
             print_usage();
         }
@@ -240,6 +252,64 @@ async fn run_client(cfg: FrontConfig) {
     std::future::pending::<()>().await;
 }
 
+/// Run one measurement campaign and print its summary.
+///
+/// Exits `1` on a fatal probe failure and `3` when the run completed but
+/// found at least one provider mismatch — a distinct code, because a
+/// mismatch is a **correctness defect** and a campaign script must be
+/// able to tell it apart from "the probe itself broke".
+async fn run_probe(cfg: ProbeConfig) {
+    println!("RisePIR private eth_getBalance — client measurement probe");
+    println!("  PIR transport:      {}", cfg.pir_url);
+    println!(
+        "  independent check:  {}",
+        if cfg.no_confirm {
+            "DISABLED (--no-confirm)".to_string()
+        } else {
+            cfg.confirm_url.clone()
+        }
+    );
+    println!("  queries CSV:        {}", cfg.queries_csv.display());
+    println!("  blocks CSV:         {}", cfg.blocks_csv.display());
+    println!(
+        "  schedule:           {} batches of {} every {}s, {}ms between trials, {}s lifetime",
+        cfg.batches, cfg.batch_size, cfg.batch_interval_secs, cfg.trial_gap_ms, cfg.follow_secs
+    );
+    println!();
+    println!("The PIR server NEVER learns the queried address: it sees only LWE query vectors,");
+    println!("exactly as in `client` mode.");
+    if cfg.no_confirm {
+        println!("--no-confirm is set, so the address reaches no network peer at all in any form.");
+    } else {
+        println!("The independent check is the one exception, and it is the point of the check:");
+        println!(
+            "each successful trial asks {} for eth_getBalance(address, block) in PLAINTEXT,",
+            cfg.confirm_url
+        );
+        println!("after the trial's clock has stopped. That operator is deliberately a different");
+        println!("one from the PIR server, so neither sees both halves. --no-confirm disables it.");
+    }
+    println!(
+        "Neither CSV ever records the address or the balance — only `found`, `provider_match`"
+    );
+    println!("and `provider_hex_match`, one bit each.");
+    println!();
+
+    let mismatches = match probe::run(cfg).await {
+        Ok(summary) => {
+            probe::print_summary(&summary);
+            summary.provider_mismatched
+        }
+        Err(e) => {
+            logln!("risepir-rpc probe: fatal: {e}");
+            std::process::exit(1);
+        }
+    };
+    if mismatches > 0 {
+        std::process::exit(3);
+    }
+}
+
 // ─── flag parsing (hand-rolled; see the Stage-0.4 note in git history) ──
 
 fn parse_mock(args: &[String]) -> DemoConfig {
@@ -255,6 +325,10 @@ fn parse_mock(args: &[String]) -> DemoConfig {
                 cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
             }
             "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
+            "--answer-timing-header" => {
+                cfg.answer_timing_header = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -277,6 +351,64 @@ fn parse_client(args: &[String]) -> FrontConfig {
             "--proxy-upstream" => {
                 cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
             }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => unknown(other),
+        }
+    }
+    cfg
+}
+
+/// `risepir-rpc probe` — the client-side measurement probe
+/// ([`risepir_rpc::probe`]).
+///
+/// `--resolve` is repeatable (one override per host); every other flag
+/// is last-wins, like the rest of this parser.
+fn parse_probe(args: &[String]) -> ProbeConfig {
+    let mut cfg = ProbeConfig::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pir-url" => cfg.pir_url = next_value(args, &mut i, "--pir-url"),
+            "--confirm-url" => cfg.confirm_url = next_value(args, &mut i, "--confirm-url"),
+            "--no-confirm" => {
+                cfg.no_confirm = true;
+                i += 1;
+            }
+            "--resolve" => {
+                let raw = next_value(args, &mut i, "--resolve");
+                match ResolveOverride::parse(&raw) {
+                    Ok(r) => cfg.resolve.push(r),
+                    Err(e) => {
+                        eprintln!("risepir-rpc: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--queries-csv" => cfg.queries_csv = next_value(args, &mut i, "--queries-csv").into(),
+            "--blocks-csv" => cfg.blocks_csv = next_value(args, &mut i, "--blocks-csv").into(),
+            "--addresses-file" => {
+                cfg.addresses_file = Some(next_value(args, &mut i, "--addresses-file").into())
+            }
+            "--batch-size" => cfg.batch_size = parse_next(args, &mut i, "--batch-size"),
+            "--batches" => cfg.batches = parse_next(args, &mut i, "--batches"),
+            "--batch-interval-secs" => {
+                cfg.batch_interval_secs = parse_next(args, &mut i, "--batch-interval-secs")
+            }
+            "--trial-gap-ms" => cfg.trial_gap_ms = parse_next(args, &mut i, "--trial-gap-ms"),
+            "--follow-secs" => cfg.follow_secs = parse_next(args, &mut i, "--follow-secs"),
+            "--poll-secs" => cfg.poll_secs = parse_next(args, &mut i, "--poll-secs"),
+            "--absent-fraction" => {
+                cfg.absent_fraction = parse_next(args, &mut i, "--absent-fraction");
+                if !(0.0..=1.0).contains(&cfg.absent_fraction) {
+                    eprintln!("risepir-rpc: --absent-fraction must be in [0, 1]");
+                    std::process::exit(2);
+                }
+            }
+            "--rss-every" => cfg.rss_every = parse_next(args, &mut i, "--rss-every"),
+            "--chain-id" => cfg.chain_id = parse_next(args, &mut i, "--chain-id"),
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -411,6 +543,13 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             }
             "--lwe-dim" => cfg.lwe_dim = Some(parse_next(args, &mut i, "--lwe-dim")),
             "--web" => cfg.web_dir = Some(next_value(args, &mut i, "--web").into()),
+            "--block-metrics-csv" => {
+                cfg.block_metrics_csv = Some(next_value(args, &mut i, "--block-metrics-csv").into())
+            }
+            "--answer-timing-header" => {
+                cfg.answer_timing_header = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -428,6 +567,35 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
         cfg.save_interval_secs = if cfg.journal_restore { 21_600 } else { 1_800 };
     }
     cfg
+}
+
+/// Flags for `risepir-rpc time-setup` (C13) — see [`risepir_rpc::time_setup::run`].
+struct TimeSetupConfig {
+    state: std::path::PathBuf,
+    out: Option<std::path::PathBuf>,
+}
+
+fn parse_time_setup(args: &[String]) -> TimeSetupConfig {
+    let mut state = None;
+    let mut out = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--state" => state = Some(next_value(args, &mut i, "--state").into()),
+            "--out" => out = Some(next_value(args, &mut i, "--out").into()),
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => unknown(other),
+        }
+    }
+    let Some(state) = state else {
+        eprintln!("risepir-rpc time-setup: --state <file> is required");
+        print_usage();
+        std::process::exit(2);
+    };
+    TimeSetupConfig { state, out }
 }
 
 /// Reads and parses the value following flag `name`, advancing past both.
@@ -460,7 +628,7 @@ fn unknown(flag: &str) -> ! {
 fn print_usage() {
     eprintln!("usage:");
     eprintln!("  risepir-rpc mock    [--chain-id <u64>] [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
-    eprintln!("                      [--web <dir>]");
+    eprintln!("                      [--web <dir>] [--answer-timing-header]");
     eprintln!("  risepir-rpc mainnet [--snapshot <csv[.gz]>]... [--snapshot-block <N>] [--snapshot-accounts <N>]");
     eprintln!("                      [--snapshot-rewind <N>] [--snapshot-audit-samples <N>]");
     eprintln!("                      [--hard-refresh <file>] [--refresh-url <url>]...");
@@ -471,10 +639,22 @@ fn print_usage() {
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
     eprintln!("                      [--prefetch <k>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
+    eprintln!("                      [--block-metrics-csv <path>] [--answer-timing-header]");
     eprintln!(
         "  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]"
     );
     eprintln!("                      [--chain-id <u64>] [--proxy-upstream <url>]");
+    eprintln!("  risepir-rpc time-setup --state <file> [--out <json-path>]");
+    eprintln!("  risepir-rpc probe   --pir-url <url> --queries-csv <path> --blocks-csv <path>");
+    eprintln!(
+        "                      [--confirm-url <url>] [--no-confirm] [--resolve <host:port:ip>]..."
+    );
+    eprintln!("                      [--addresses-file <path>] [--batch-size <n>] [--batches <k>]");
+    eprintln!("                      [--batch-interval-secs <s>] [--trial-gap-ms <ms>]");
+    eprintln!(
+        "                      [--follow-secs <s>] [--poll-secs <s>] [--absent-fraction <f>]"
+    );
+    eprintln!("                      [--rss-every <n>] [--chain-id <u64>]");
     eprintln!();
     eprintln!(
         "mainnet needs one data source: --snapshot (+ --snapshot-block), --state, or --partial."
@@ -560,6 +740,53 @@ fn print_usage() {
     );
     eprintln!("client, compiled to wasm and running in the page, so the address never leaves the browser.");
     eprintln!("Build its wasm first: cargo run -p xtask --release -- web");
+    eprintln!(
+        "--block-metrics-csv <path> (mainnet, off by default) appends one row per applied block"
+    );
+    eprintln!("to a CSV file (mutation counts, apply/store/fold/patch timings, delta bytes — see");
+    eprintln!("crate::block_metrics_csv for the exact columns) — a measurement-campaign aid.");
+    eprintln!(
+        "--answer-timing-header (mock/mainnet, off by default) adds x-risepir-answer-compute-ns"
+    );
+    eprintln!("and x-risepir-answer-handler-ns response headers to POST /answer; both are");
+    eprintln!("data-independent by construction (ADR-0039's timing-side-channel analysis).");
+    eprintln!(
+        "time-setup loads --state exactly like mainnet does, times a full PIR setup recompute over"
+    );
+    eprintln!(
+        "it (C13, setup_seconds), and exactly reproduces the persisted hints from the persisted"
+    );
+    eprintln!(
+        "seed and the store's cells, asserting byte-for-byte equality against what is actually"
+    );
+    eprintln!(
+        "persisted (persisted_hints_exact_match, exits non-zero if false) — see time_setup's own"
+    );
+    eprintln!("module docs for the full derivation and the two (non-gating) decode diagnostics.");
+    eprintln!(
+        "probe runs ONE long-lived product session against a deployment and measures it from"
+    );
+    eprintln!(
+        "the client: end-to-end latency, query build, wire time, server-reported answer time,"
+    );
+    eprintln!(
+        "decode broken into ADR-0003's four rewind steps, bytes each way, per-block delta cost,"
+    );
+    eprintln!(
+        "hint size, and client RSS — with every trial's decoded balance compared byte-exactly"
+    );
+    eprintln!("against --confirm-url at the SAME explicit block height (never latest-vs-latest,");
+    eprintln!("ADR-0007). The address never leaves the machine and never enters either CSV.");
+    eprintln!("--resolve host:port:ip is curl-style DNS override (TLS validation stays ON), so a");
+    eprintln!("deployment can be measured while its public DNS record still points elsewhere.");
+    eprintln!(
+        "--follow-secs is the run's total lifetime: no new batch starts after it and following"
+    );
+    eprintln!(
+        "ends at it, but a batch already in flight always finishes, so --follow-secs 0 means"
+    );
+    eprintln!("\"run the batches back to back, do not follow\" rather than \"do nothing\".");
+    eprintln!("Exit 3 means the run finished but at least one answer disagreed with the provider.");
     eprintln!("See docs/deploy.md for the full runbook.");
 }
 

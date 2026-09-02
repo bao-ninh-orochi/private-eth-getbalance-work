@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -31,7 +31,7 @@ use tower_http::timeout::TimeoutLayer;
 use ikpir_common::backend::simple::SimpleServerParams;
 use ikpir_common::SimplePirBackend;
 use risepir_proto::{codec, BlockDelta, BlockUpdate};
-use risepir_server::{DeltaRing, RisePirServer, ServerError};
+use risepir_server::{BlockApplyReport, DeltaRing, RisePirServer, ServerError};
 use segmented_cuckoo::Segmented2aryScheme;
 
 use crate::wire;
@@ -173,6 +173,39 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// This process's resident set size, in bytes — `risepir_process_rss_bytes`
+/// (ADR-0039's follow-on). Linux only: parses the `VmRSS:` line of
+/// `/proc/self/status`, which the kernel already reports in kibibytes
+/// (`kB` in that file is actually 1024 bytes, a long-standing `/proc`
+/// naming quirk) — no page-size assumption needed, unlike
+/// `/proc/self/statm`'s page-count fields. `0` on any read/parse failure
+/// and on every non-Linux target: this is a best-effort operational
+/// gauge, never something `GET /metrics` should fail or block over.
+/// Plain file I/O, no `unsafe` `sysconf` FFI call (every crate here
+/// forbids `unsafe_code`) and no new dependency for something this small
+/// — the same "hand-roll it" precedent ADR-0039 itself sets.
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> u64 {
+    let Ok(contents) = std::fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    let Some(line) = contents.lines().find(|l| l.starts_with("VmRSS:")) else {
+        return 0;
+    };
+    // `VmRSS:` <whitespace> <kB count> <whitespace> `kB` — the count is
+    // always the line's second whitespace-separated field.
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|kib| kib.saturating_mul(1024))
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> u64 {
+    0
 }
 
 /// Everything the lock guards: the PIR server, its sliding delta-ring
@@ -363,6 +396,39 @@ pub struct NodeState {
     /// translates its own `SaveOutcome`/journal state into these plain
     /// fields via [`Self::record_save_outcome`] and friends.
     save_state: Mutex<crate::metrics::SaveState>,
+
+    /// Whether `POST /answer` should carry the `x-risepir-answer-*-ns`
+    /// timing headers (`--answer-timing-header`, off by default) — set
+    /// once at startup via [`Self::set_answer_timing_header`], the same
+    /// "only the deployment's own startup flags know this" shape
+    /// [`Self::set_reconcile_configured`] already established. An
+    /// `AtomicBool` rather than a plain field: read on every `/answer`
+    /// request, so it must not require locking anything the request path
+    /// doesn't already need.
+    answer_timing_header: std::sync::atomic::AtomicBool,
+}
+
+/// Everything [`NodeState::apply_block_reporting`] learns about one
+/// block's apply — the delta, its classification/timing report, and the
+/// two measurements only this layer can add (lock-wait time and encoded
+/// delta size). No address or balance anywhere in it.
+#[derive(Clone, Debug)]
+pub struct BlockApplyOutcome {
+    /// The [`BlockDelta`] this block produced.
+    pub delta: BlockDelta,
+    /// Mutation-kind counts and per-stage timings — see
+    /// [`BlockApplyReport`].
+    pub report: BlockApplyReport,
+    /// B8: wall-clock time of the inner
+    /// `RisePirServer::apply_block_reporting` call alone (lock already
+    /// held; see [`NodeState::apply_block_reporting`]'s docs).
+    pub apply_duration: Duration,
+    /// Time spent queued for `NodeState`'s write lock before this call's
+    /// own `apply_duration` began.
+    pub lock_wait: Duration,
+    /// B9: `delta.encoded_len()` — see
+    /// [`NodeState::apply_block_reporting`]'s docs.
+    pub delta_bytes: u64,
 }
 
 impl NodeState {
@@ -398,6 +464,7 @@ impl NodeState {
             counters: Mutex::new(crate::metrics::Counters::new()),
             finalized: AtomicU64::new(0),
             save_state: Mutex::new(crate::metrics::SaveState::new()),
+            answer_timing_header: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -576,6 +643,24 @@ impl NodeState {
         self.finalized.load(Ordering::Relaxed)
     }
 
+    /// Turns the `POST /answer` `x-risepir-answer-*-ns` timing headers on
+    /// or off (`--answer-timing-header`, off by default) — called once at
+    /// startup by `mainnet`/`mock`, mirroring [`Self::set_reconcile_configured`]'s
+    /// identical "a deployment-wide startup flag, set before serving
+    /// begins" shape. See the `answer` handler for what the two headers
+    /// carry and why both are safe to expose (ADR-0039's timing-side-channel
+    /// analysis).
+    pub fn set_answer_timing_header(&self, enabled: bool) {
+        self.answer_timing_header.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::set_answer_timing_header`] turned the `/answer`
+    /// timing headers on. `Ordering::Relaxed`: a plain on/off flag read
+    /// once per request, with no other field's ordering to preserve.
+    fn answer_timing_header(&self) -> bool {
+        self.answer_timing_header.load(Ordering::Relaxed)
+    }
+
     /// Declares whether this deployment persists state at all (`--state`
     /// was given) — called once at startup, mirroring
     /// [`Self::set_reconcile_configured`]'s identical reasoning: an
@@ -664,6 +749,48 @@ impl NodeState {
         self.counters_lock().answer_duration.observe(d);
     }
 
+    /// `(cumulative /answer computations served, cumulative seconds spent
+    /// computing them)` this process has observed so far — the same
+    /// counter and running sum the `risepir_answer_duration_seconds`
+    /// histogram already keeps (`GET /metrics`, ADR-0039), read back for a
+    /// second purpose: the `risepir-rpc` follow loop calls this once per
+    /// applied block and diffs consecutive readings to record
+    /// `answers_since_prev_block`/`answer_compute_ms_since_prev_block` in
+    /// the per-block CSV — a cheap interference indicator (how much
+    /// concurrent `/answer` traffic happened while this block was being
+    /// applied). `O(1)`: one lock acquisition, two field reads — as cheap
+    /// as any other `GET /metrics` field, safe to call every block.
+    pub fn answer_compute_totals(&self) -> (u64, f64) {
+        let hist = &self.counters_lock().answer_duration;
+        (hist.count(), hist.sum_seconds())
+    }
+
+    /// Folds one applied block's [`BlockApplyReport`] into the cumulative
+    /// `GET /metrics` series ADR-0039's follow-on adds: per-kind store
+    /// operation counters (`risepir_store_operations_total` — insert/
+    /// update/delete calls, not `segmented_cuckoo::SlotMutation`s), the
+    /// apply-time sum/count pair a scraper needs to compute a mean
+    /// (`risepir_block_apply_seconds_total`/`risepir_block_apply_total`),
+    /// and the cumulative delta-byte counter
+    /// (`risepir_block_delta_bytes_total`). Called once per applied block,
+    /// from [`Self::apply_block_reporting`] — never on the `/answer` path,
+    /// and never touches `inner`'s lock (already released by the time this
+    /// runs).
+    fn record_block_apply_metrics(
+        &self,
+        report: &BlockApplyReport,
+        apply_duration: Duration,
+        delta_bytes: u64,
+    ) {
+        let mut counters = self.counters_lock();
+        *counters.store_operations.entry("insert").or_insert(0) += report.inserts;
+        *counters.store_operations.entry("update").or_insert(0) += report.updates;
+        *counters.store_operations.entry("delete").or_insert(0) += report.deletes;
+        counters.block_apply_seconds_total += apply_duration.as_secs_f64();
+        counters.block_apply_total += 1;
+        counters.block_delta_bytes_total += delta_bytes;
+    }
+
     /// Size, in bytes, of the currently cached `GET /setup` response —
     /// `0` if nothing has been encoded yet this process. Unlike
     /// [`Self::setup_bytes`], this **never regenerates** the cache:
@@ -684,12 +811,24 @@ impl NodeState {
     /// discipline), never all the locks at once — then renders outside
     /// every lock.
     pub async fn render_metrics(&self) -> String {
-        let (head_block, store_items, store_capacity) = {
+        let (head_block, store_items, store_capacity, store_cells_bytes, hint_bytes) = {
             let inner = self.inner.read().await;
             let items = inner.server.num_items();
             let params = inner.server.params();
             let capacity = u64::from(params.num_buckets) * u64::from(params.bucket_size);
-            (inner.server.block(), items, capacity)
+            // Both cheap: `cells()` is a borrow (no clone, no encode) and
+            // `hint_bytes()` sums each segment's own recorded length
+            // (`O(arity)`) — neither touches the `/setup` cache or clones
+            // a hint, unlike `Self::setup_bytes`/`RisePirServer::setup`.
+            let cells_bytes = inner.server.cells().len() as u64 * 4;
+            let hints_bytes = inner.server.hint_bytes();
+            (
+                inner.server.block(),
+                items,
+                capacity,
+                cells_bytes,
+                hints_bytes,
+            )
         };
         let counters = self.counters_lock().clone();
         let snapshot = crate::metrics::Snapshot {
@@ -701,6 +840,9 @@ impl NodeState {
             finalized_block: self.finalized(),
             store_items,
             store_capacity,
+            store_cells_bytes,
+            hint_bytes,
+            process_rss_bytes: process_rss_bytes(),
             setup_bytes: self.cached_setup_bytes().await,
             setup_regenerations: self.setup_generation() as u64,
             reconcile: self.reconcile_health(),
@@ -708,6 +850,10 @@ impl NodeState {
             requests: counters.requests,
             request_errors: counters.request_errors,
             answer_duration: counters.answer_duration,
+            store_operations: counters.store_operations,
+            block_apply_seconds_total: counters.block_apply_seconds_total,
+            block_apply_total: counters.block_apply_total,
+            block_delta_bytes_total: counters.block_delta_bytes_total,
         };
         crate::metrics::render(&snapshot)
     }
@@ -784,14 +930,81 @@ impl NodeState {
     /// `per_block` (matching that method's own "no partial delta leaks"
     /// guarantee), and neither a delta nor a duration is returned — there
     /// was no patch to journal and nothing meaningful to time.
+    ///
+    /// [`Self::apply_block_reporting`] is the canonical implementation —
+    /// it does everything documented above, under the identical single
+    /// write-lock acquisition, plus measures lock-wait time and a
+    /// [`risepir_server::BlockApplyReport`]. This method is a thin
+    /// wrapper whose *outputs* are unchanged from before that method
+    /// existed — same `(delta, patch_time)` pair, same `Result`/error
+    /// conditions, same ring/`per_block` bookkeeping — for the many
+    /// existing callers (tests, the mock deployment) that only ever
+    /// wanted that pair. Its *internal cost* is not byte-for-byte
+    /// identical: the call it delegates to also classifies every change
+    /// and credit, measures `lock_wait`, and computes `delta_bytes`
+    /// (outside the write lock — see [`Self::apply_block_reporting`]'s
+    /// own docs) before this wrapper discards everything but the two
+    /// fields it returns.
     pub async fn apply_block(
         &self,
         update: &BlockUpdate,
     ) -> Result<(BlockDelta, Duration), ServerError> {
+        let outcome = self.apply_block_reporting(update).await?;
+        Ok((outcome.delta, outcome.apply_duration))
+    }
+
+    /// [`Self::apply_block`], additionally measuring write-lock wait time
+    /// and returning the full [`BlockApplyOutcome`] — B7 (mutation
+    /// counts), B8 (apply time), and B9 (delta bytes) for a measurement
+    /// campaign, in one call. `risepir-rpc`'s mainnet follow loop is the
+    /// one production caller; every other existing caller stays on
+    /// [`Self::apply_block`] (see that method's docs).
+    ///
+    /// # `lock_wait`
+    ///
+    /// Measured from immediately before `self.inner.write().await` to the
+    /// moment the guard is actually acquired — i.e. exactly the time this
+    /// call spent queued behind whatever else (another `apply_block`
+    /// call, or a slow concurrent reader under tokio's write-preferring
+    /// `RwLock`) held or was ahead of it for the lock. This is the
+    /// complement of `apply_duration` below: together they show whether a
+    /// slow block was slow to *apply* or merely slow to *start*.
+    ///
+    /// # `apply_duration`
+    ///
+    /// B8: the wall-clock time of the inner `RisePirServer::apply_block_reporting`
+    /// call *and nothing else* — timing starts only after the write lock
+    /// is already held, so `lock_wait` above is never double-counted into
+    /// it. By construction this equals `report.store_dur + report.fold_dur
+    /// + report.patch_dur` plus a tiny residual (the classification
+    /// bookkeeping between those three stages) — see
+    /// `RisePirServer::apply_block_reporting`'s own docs.
+    ///
+    /// # `delta_bytes`
+    ///
+    /// B9: `delta.encoded_len()` — the exact byte length
+    /// `risepir_proto::codec::encode_block_delta` would produce for this
+    /// block's delta (the same bytes served at `GET /delta/{block}` and
+    /// folded into `/sync`, and appended to the on-disk journal),
+    /// computed without allocating or actually encoding — see
+    /// [`BlockDelta::encoded_len`]. Computed once, after both the timed
+    /// apply call *and* `self.inner`'s write lock have been released (it
+    /// depends only on the already-cloned `delta`), so it is never
+    /// itself timed, never holds up a concurrent reader or the next
+    /// writer, and never doubles as a second encode of anything the
+    /// ring/journal/`/delta` path also encodes.
+    pub async fn apply_block_reporting(
+        &self,
+        update: &BlockUpdate,
+    ) -> Result<BlockApplyOutcome, ServerError> {
+        let wait_t0 = Instant::now();
         let mut inner = self.inner.write().await;
+        let lock_wait = wait_t0.elapsed();
+
         let t0 = Instant::now();
-        let delta = inner.server.apply_block(update)?;
-        let patch_time = t0.elapsed();
+        let (delta, report) = inner.server.apply_block_reporting(update)?;
+        let apply_duration = t0.elapsed();
+
         inner.ring.push(delta.clone());
         inner.per_block.insert(delta.block, delta.clone());
         if let Some(oldest) = inner.ring.oldest() {
@@ -800,7 +1013,23 @@ impl NodeState {
                 inner.per_block.remove(&b);
             }
         }
-        Ok((delta, patch_time))
+        drop(inner);
+
+        // Computed outside the write lock: `encoded_len()` is cheap (no
+        // allocation) but there is no reason to make any other writer, or
+        // a concurrent `/answer` reader, queue behind it when it has no
+        // dependency on `inner` at all beyond the already-cloned `delta`.
+        let delta_bytes = delta.encoded_len() as u64;
+
+        self.record_block_apply_metrics(&report, apply_duration, delta_bytes);
+
+        Ok(BlockApplyOutcome {
+            delta,
+            report,
+            apply_duration,
+            lock_wait,
+            delta_bytes,
+        })
     }
 
     /// Seeds the ring / per-block delta index from a journal-restore
@@ -1046,6 +1275,14 @@ impl NodeState {
 // query-processing errors both map to a clean `400 Bad Request` with the
 // error's `Display` text, never a 500 or a panic.
 
+/// Response header names for the optional per-request answer-timing
+/// instrumentation (`--answer-timing-header`, ADR-0039's follow-on) — see
+/// the comment inside the `answer` handler, just above where these
+/// headers are inserted, for what each carries and why both are safe to
+/// expose.
+const ANSWER_COMPUTE_NS_HEADER: HeaderName = HeaderName::from_static("x-risepir-answer-compute-ns");
+const ANSWER_HANDLER_NS_HEADER: HeaderName = HeaderName::from_static("x-risepir-answer-handler-ns");
+
 /// `POST /answer?epoch=<lineage>`: decode the query bundle, answer at the
 /// server's current head, encode the response bundle. Read lock only.
 ///
@@ -1062,6 +1299,12 @@ async fn answer(
     RawQuery(raw): RawQuery,
     body: Bytes,
 ) -> Response {
+    // First line of the handler, i.e. immediately after axum has finished
+    // receiving the request body into `body` — the start of
+    // `x-risepir-answer-handler-ns` below.
+    let handler_t0 = Instant::now();
+    let timing_enabled = state.answer_timing_header();
+
     if let Some(refusal) = epoch_gate(&state, raw.as_deref()) {
         return refusal;
     }
@@ -1091,7 +1334,8 @@ async fn answer(
     // a function of this deployment's geometry alone, never of the query.
     let t0 = Instant::now();
     let answer_result = inner.server.answer(&queries);
-    state.observe_answer_duration(t0.elapsed());
+    let compute_ns = t0.elapsed();
+    state.observe_answer_duration(compute_ns);
 
     let (responses, head) = match answer_result {
         Ok(r) => r,
@@ -1099,10 +1343,37 @@ async fn answer(
     };
     drop(inner);
 
-    octet_response(
+    let mut resp = octet_response(
         StatusCode::OK,
         wire::encode_response_bundle(&responses, head),
-    )
+    );
+
+    // `--answer-timing-header` (off by default): two headers naming
+    // exactly what the histogram above observes (`compute-ns`) and the
+    // whole handler's own wall-clock span (`handler-ns`, decode + read-
+    // lock wait + compute + encode — everything from `handler_t0` to
+    // here). Both are safe to expose for the identical reason the
+    // histogram itself is (ADR-0039's timing-side-channel analysis,
+    // referenced above): `RisePirServer::answer` folds over the *entire*
+    // segment slice for every query unconditionally, so neither duration
+    // varies with which account was asked about — they are
+    // data-independent by construction, not merely by policy. Present
+    // only on this success path (an error response has no well-defined
+    // "compute" duration to report) and only when the flag is on; when it
+    // is off, neither header is inserted and nothing else about this
+    // response changes.
+    if timing_enabled {
+        let handler_ns = handler_t0.elapsed();
+        let h = resp.headers_mut();
+        if let Ok(v) = HeaderValue::from_str(&compute_ns.as_nanos().to_string()) {
+            h.insert(ANSWER_COMPUTE_NS_HEADER, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&handler_ns.as_nanos().to_string()) {
+            h.insert(ANSWER_HANDLER_NS_HEADER, v);
+        }
+    }
+
+    resp
 }
 
 /// `GET /delta/{block}?epoch=<lineage>`: the immutable per-block delta,

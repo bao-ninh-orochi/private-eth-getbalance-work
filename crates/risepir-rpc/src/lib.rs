@@ -55,15 +55,18 @@ mod private_eth;
 pub mod rpc;
 
 pub mod autosave;
+pub mod block_metrics_csv;
 pub mod demo;
 pub mod front;
 pub mod hard_refresh;
 pub mod journal;
 pub mod mainnet;
+pub mod probe;
 pub mod snapshot_audit;
 pub mod snapshot_rewind;
 pub mod state;
+pub mod time_setup;
 
 pub use error::RpcError;
-pub use private_eth::PrivateEth;
+pub use private_eth::{BalanceTimings, PrivateEth, SyncFetch};
 pub use risepir_proto::keccak256;

@@ -6,6 +6,8 @@
 //! xtask web
 //! xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] [--fingerprint-bits <u32>]
 //!                 [--fill-check] [--fill-accounts <u64>]
+//! xtask report --trials <csv> --client-blocks <csv> --server-blocks <csv> --setup <json>
+//!               --provenance <toml-or-json> [--setup-download <json>] [--write <path>]
 //! ```
 //!
 //! `conformance` runs the Stage 0.5 conformance harness (`docs/plan.md`
@@ -26,6 +28,18 @@
 //! `segmented_cuckoo` stores and inserts into them for a small candidate
 //! set (slow; opt-in only, never part of `cargo test`). `<list>` accepts
 //! comma-separated values and/or inclusive ranges, e.g. `2,3,4` or `1-16`.
+//!
+//! `report` turns one measurement campaign's raw `--trials`/
+//! `--client-blocks`/`--server-blocks` CSVs and `--setup` JSON (all
+//! required) into the markdown statistics table `xtask::report` renders —
+//! see that module's docs for the exact `(measured)`/`(computed)`/
+//! `(derived)` labelling and percentile method. `--setup-download` is
+//! optional (§C12's `/setup`-download bytes, absent from every other
+//! input); `--provenance` accepts either a `.json` file or a flat
+//! `key = value` file (sniffed by extension) and is printed verbatim,
+//! never invented. Prints to stdout; `--write <path>` additionally writes
+//! the same markdown to `<path>`, which is never one of the inputs — this
+//! command never modifies any input file.
 
 use xtask::conformance::{self, ConformanceConfig};
 
@@ -35,6 +49,7 @@ fn main() {
         Some("conformance") => run_conformance(&args[2..]),
         Some("bench") => run_bench(&args[2..]),
         Some("geometry") => run_geometry(&args[2..]),
+        Some("report") => run_report(&args[2..]),
         Some("web") => {
             xtask::web::run();
         }
@@ -194,6 +209,10 @@ fn print_usage() {
     eprintln!(
         "       xtask geometry [--accounts <u64>] [--arity <list>] [--bucket-size <list>] \
          [--fingerprint-bits <u32>] [--fill-check] [--fill-accounts <u64>]"
+    );
+    eprintln!(
+        "       xtask report --trials <csv> --client-blocks <csv> --server-blocks <csv> \
+         --setup <json> --provenance <toml-or-json> [--setup-download <json>] [--write <path>]"
     );
 }
 
@@ -372,6 +391,134 @@ fn run_geometry(rest: &[String]) {
         );
         print!("{}", xtask::geometry::render_fill_check(&results));
     }
+}
+
+/// Reads the campaign input files named on the command line, parses them
+/// (`xtask::report::ReportData::parse`), renders the markdown report
+/// (`xtask::report::render_markdown`), prints it to stdout, and — only
+/// with `--write <path>` — also writes it to `<path>`. Every input file
+/// is opened read-only; `<path>` is a separate, caller-named output file,
+/// never one of the inputs, so this command never modifies any input.
+fn run_report(rest: &[String]) {
+    const CMD: &str = "xtask report";
+    let mut trials_path: Option<String> = None;
+    let mut client_blocks_path: Option<String> = None;
+    let mut server_blocks_path: Option<String> = None;
+    let mut setup_path: Option<String> = None;
+    let mut setup_download_path: Option<String> = None;
+    let mut provenance_path: Option<String> = None;
+    let mut write_path: Option<String> = None;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--trials" => trials_path = Some(parse_path_value(CMD, rest, &mut i, "--trials")),
+            "--client-blocks" => {
+                client_blocks_path = Some(parse_path_value(CMD, rest, &mut i, "--client-blocks"))
+            }
+            "--server-blocks" => {
+                server_blocks_path = Some(parse_path_value(CMD, rest, &mut i, "--server-blocks"))
+            }
+            "--setup" => setup_path = Some(parse_path_value(CMD, rest, &mut i, "--setup")),
+            "--setup-download" => {
+                setup_download_path = Some(parse_path_value(CMD, rest, &mut i, "--setup-download"))
+            }
+            "--provenance" => {
+                provenance_path = Some(parse_path_value(CMD, rest, &mut i, "--provenance"))
+            }
+            "--write" => write_path = Some(parse_path_value(CMD, rest, &mut i, "--write")),
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("{CMD}: unknown argument: {other}");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let (
+        Some(trials_path),
+        Some(client_blocks_path),
+        Some(server_blocks_path),
+        Some(setup_path),
+        Some(provenance_path),
+    ) = (
+        trials_path,
+        client_blocks_path,
+        server_blocks_path,
+        setup_path,
+        provenance_path,
+    )
+    else {
+        eprintln!(
+            "{CMD}: --trials, --client-blocks, --server-blocks, --setup, and --provenance are all required"
+        );
+        print_usage();
+        std::process::exit(2);
+    };
+
+    let trials_csv = read_input_file(CMD, "--trials", &trials_path);
+    let client_blocks_csv = read_input_file(CMD, "--client-blocks", &client_blocks_path);
+    let server_blocks_csv = read_input_file(CMD, "--server-blocks", &server_blocks_path);
+    let setup_json = read_input_file(CMD, "--setup", &setup_path);
+    let setup_download_json =
+        setup_download_path.map(|p| read_input_file(CMD, "--setup-download", &p));
+    let provenance_raw = read_input_file(CMD, "--provenance", &provenance_path);
+    // Sniffed by extension, per this command's own usage docs — a `.json`
+    // provenance file parses as JSON, anything else as the flat
+    // `key = value` reader (`xtask::report::parse_provenance`).
+    let provenance_is_json = provenance_path.to_ascii_lowercase().ends_with(".json");
+
+    let data = xtask::report::ReportData::parse(
+        &trials_csv,
+        &client_blocks_csv,
+        &server_blocks_csv,
+        &setup_json,
+        setup_download_json.as_deref(),
+        &provenance_raw,
+        provenance_is_json,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("{CMD}: {e}");
+        std::process::exit(1);
+    });
+
+    let markdown = xtask::report::render_markdown(&data);
+    println!("{markdown}");
+
+    if let Some(path) = write_path {
+        std::fs::write(&path, &markdown).unwrap_or_else(|e| {
+            eprintln!("{CMD}: failed to write {path}: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("Wrote {path}");
+    }
+}
+
+/// Reads `path` (named by CLI flag `flag_name`) to a `String`, or exits
+/// loudly naming the command, the flag, and the underlying I/O error.
+fn read_input_file(cmd: &str, flag_name: &str, path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("{cmd}: failed to read {flag_name} {path:?}: {e}");
+        std::process::exit(1);
+    })
+}
+
+/// Parses the value following flag `name` as a plain owned `String`
+/// (a file path), advancing `*i` past both the flag and its value —
+/// mirrors [`parse_value`] for flags whose value is not a `FromStr` type
+/// this module wants to parse further itself.
+fn parse_path_value(cmd: &str, args: &[String], i: &mut usize, name: &str) -> String {
+    let Some(raw) = args.get(*i + 1) else {
+        eprintln!("{cmd}: {name} requires a value");
+        std::process::exit(2);
+    };
+    let value = raw.clone();
+    *i += 2;
+    value
 }
 
 /// Best-effort machine description via `sysctl` (macOS core count / RAM),

@@ -66,10 +66,12 @@ mod client;
 mod delta;
 mod error;
 mod rewind;
+pub mod timing;
 
 pub use client::{QueryCtx, RisePirClient};
 pub use error::ClientError;
 pub use rewind::ResponseRewind;
+pub use timing::{FinishObserver, FinishPhase, FinishTimings, NoFinishObserver};
 // `Lookup` is defined in `risepir-proto` (ADR-0009: `ValueCodec::decode`
 // returns it directly, and this crate's own scan folds down to the same
 // type) — re-exported here so callers of this crate never need to depend

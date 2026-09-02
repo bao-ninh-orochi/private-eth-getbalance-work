@@ -60,4 +60,4 @@ mod verified;
 
 pub use delta_ring::{DeltaRing, DEFAULT_CAPACITY};
 pub use error::ServerError;
-pub use server::{RisePirServer, SetupBundle};
+pub use server::{BlockApplyReport, RisePirServer, SetupBundle};

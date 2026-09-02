@@ -1050,6 +1050,46 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   persisted), so routine restarts do not invalidate anyone; only a genuine
   re-bootstrap (fresh snapshot ingest) mints a new lineage — which is
   exactly when old clients *must* be refused.
+- **Measurement-campaign flags (off by default, additive, no behavior
+  change when unset)**:
+  - `--block-metrics-csv <path>` (`mainnet`): appends one row per
+    successfully applied block to a plain CSV — mutation counts split
+    insert/update/delete/no-op-delete, the three apply stages
+    (store/fold/patch) plus the whole apply and lock-wait times, delta
+    bytes published, and an `/answer`-traffic interference indicator; see
+    `crate::block_metrics_csv`'s module docs for the exact 19 columns. The
+    header is written once (file creation or an empty existing file) and
+    every row is flushed immediately. No address, no balance, ever.
+  - `--answer-timing-header` (`mainnet`/`mock`): adds
+    `x-risepir-answer-compute-ns` / `x-risepir-answer-handler-ns` response
+    headers to `POST /answer` — both data-independent by construction
+    (ADR-0039's timing-side-channel analysis: the matvec folds over the
+    whole segment regardless of query content), so exposing them adds no
+    new side channel.
+  - `risepir-rpc time-setup --state <file> [--out <json-path>]`: loads a
+    state file exactly like `mainnet --state` does, times a full PIR setup
+    recompute over it (`setup_seconds`, the C13 number), and — the
+    load-bearing check — reproduces the persisted hints **exactly**
+    (`Aᵀ·D`, from the persisted seed via the public deterministic
+    `expand_hint_material` expander and a whole-store patch transcript,
+    never a raw setup with a fresh random seed) and asserts byte-for-byte
+    equality against what is actually persisted
+    (`persisted_hints_exact_match`, its own `exact_check_seconds` timer).
+    Two further fields (`persisted_hints_decode_ok`/
+    `rebuilt_hints_decode_ok`) are sampled-row decode diagnostics, never
+    ANDed together and never part of the exit code. Prints one line per
+    fact and optionally writes the same as JSON (accounts, geometry,
+    `cells_bytes`/`hint_bytes`, `rayon_threads`, …). Exits non-zero only
+    if `persisted_hints_exact_match` is `false` — see
+    `risepir_rpc::time_setup`'s module docs for the full derivation.
+  - `GET /metrics` (ADR-0039) additionally exposes
+    `risepir_store_operations_total{kind}` (insert/update/delete calls,
+    not `SlotMutation`s), `risepir_block_apply_seconds_total`
+    / `risepir_block_apply_total`, `risepir_block_delta_bytes_total`,
+    `risepir_store_cells_bytes`, `risepir_hint_bytes`, and
+    `risepir_process_rss_bytes` (Linux only; `0` elsewhere) — all cheap
+    aggregates or live gauges, same privacy discipline as every other
+    `/metrics` field.
 - **A long catch-up replay: `--prefetch <k>` (ADR-0047)**. The follow loop
   spends nearly all of a replay waiting on the feed (~1–2 s per
   `debug_traceBlockByNumber`, plus dRPC's `408` refusals) against a ~4 ms
@@ -1072,6 +1112,33 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   quietest signals you have are that rate and that name. It changes no
   apply, reconcile, autosave or journal behaviour — only when the
   *fetches* are issued.
+- **Measuring a deployment from the client: `risepir-rpc probe`.** One
+  long-lived product session (one `/setup`, never garbage-collected — the
+  same operating point a real client sits at, ADR-0003) against a running
+  deployment, writing two CSVs: one row per private query and one per delta
+  fetch. It measures end-to-end latency, the query build, each network call's
+  wire time, the server's own reported answer time where the server publishes
+  it, decode broken into ADR-0003's four rewind steps, bytes each way, the
+  per-block delta cost, the hint download, and client RSS — with the latency
+  budget closing *by construction* (`t_total = build + wire + finish +
+  residual`, residual defined as the subtraction, never distributed). Every
+  trial's decoded balance is compared byte-exactly against `--confirm-url`'s
+  `eth_getBalance` **at the same explicit block height**, never
+  `"latest"`-vs-`"latest"` (ADR-0007), and a disagreement is loud. Its
+  privacy stance is the same as `client`'s for the query path — the PIR server
+  sees only LWE query vectors — and the address never enters a CSV, a log line,
+  or an error message either; the only answer-derived fields are `found`,
+  `provider_match` and `provider_hex_match`, one bit each, and every error
+  column is a fixed variant name rather than a message that could quote a
+  provider's body. The correctness check is the deliberate exception: it asks
+  `--confirm-url` for `eth_getBalance(address, block)` **in plaintext**, because
+  there is no way to ask an independent operator whether an answer is right
+  without telling it what was asked. That happens after the trial's clock has
+  stopped, goes to a different operator from the one serving the PIR (so neither
+  sees both halves), and `--no-confirm` disables it entirely.
+  `--resolve host:port:ip` (curl syntax, TLS validation unchanged) lets the
+  origin be measured while public DNS still points elsewhere. Exit code 3 means the run finished but at least one
+  answer disagreed with the independent provider.
 
 ### Log timestamps and rotation
 

@@ -117,6 +117,82 @@ async fn post_answer(app: &axum::Router, epoch: &str, body: Vec<u8>) -> (StatusC
     (status, body)
 }
 
+/// Builds a real, well-formed `POST /answer` request against `app` (the
+/// same query-building steps `setup_head_and_answer_round_trip` uses) and
+/// returns the full response — headers included, unlike [`post_answer`]
+/// above, which discards them.
+async fn answer_response(state: &Arc<NodeState>, app: &axum::Router) -> axum::response::Response {
+    let bundle = state.with_server(|s| s.setup()).await;
+    let epoch = wire::lineage_epoch(&bundle.backend_params);
+    let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
+    let addr = MockFeed::address_for(0);
+    let (queries, _ctx) = client.build_query(&addr);
+    let query_bytes = wire::encode_query_bundle(&queries);
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/answer?epoch={epoch}"))
+                .body(Body::from(query_bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// `--answer-timing-header` off (the default `build_node` leaves it):
+/// neither `x-risepir-answer-compute-ns` nor `x-risepir-answer-handler-ns`
+/// appears on an otherwise-successful `/answer` response.
+#[tokio::test]
+async fn answer_timing_headers_absent_when_flag_is_off() {
+    let (state, _feed) = build_node();
+    let app = NodeState::router(state.clone());
+
+    let resp = answer_response(&state, &app).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().get("x-risepir-answer-compute-ns").is_none());
+    assert!(resp.headers().get("x-risepir-answer-handler-ns").is_none());
+}
+
+/// `--answer-timing-header` on: both headers are present, parse as plain
+/// decimal nanosecond counts, and satisfy `compute-ns <= handler-ns` —
+/// provably true by construction (the handler's own clock starts before,
+/// and stops after, the narrower compute-only clock it contains), not
+/// merely "usually true" — see `crate::node`'s `answer` handler docs.
+#[tokio::test]
+async fn answer_timing_headers_present_and_plausible_when_flag_is_on() {
+    let (state, _feed) = build_node();
+    state.set_answer_timing_header(true);
+    let app = NodeState::router(state.clone());
+
+    let resp = answer_response(&state, &app).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let compute_ns: u64 = resp
+        .headers()
+        .get("x-risepir-answer-compute-ns")
+        .expect("compute-ns header must be present when the flag is on")
+        .to_str()
+        .expect("header value must be plain ASCII")
+        .parse()
+        .expect("header value must be a plain decimal nanosecond count");
+    let handler_ns: u64 = resp
+        .headers()
+        .get("x-risepir-answer-handler-ns")
+        .expect("handler-ns header must be present when the flag is on")
+        .to_str()
+        .expect("header value must be plain ASCII")
+        .parse()
+        .expect("header value must be a plain decimal nanosecond count");
+
+    assert!(
+        compute_ns <= handler_ns,
+        "compute-ns ({compute_ns}) must never exceed handler-ns ({handler_ns}): the handler's \
+         own clock strictly contains the compute-only clock's span"
+    );
+}
+
 // ── (a) endpoint round-trips ────────────────────────────────────────────
 
 #[tokio::test]

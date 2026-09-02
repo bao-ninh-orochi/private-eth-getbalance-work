@@ -20,7 +20,9 @@
 //! (`docs/verification.md` Correction 3) — a deliberate, measured
 //! decision, not a shortcut.
 
-use ikpir_common::{HintPatchMode, IncrementalPirBackend, IndexPirBackend};
+use std::time::{Duration, Instant};
+
+use ikpir_common::{BackendWireSize, HintPatchMode, IncrementalPirBackend, IndexPirBackend};
 use segmented_cuckoo::{CuckooError, CuckooKVStore, CuckooParams, IndexScheme, SchemeMeta};
 
 use risepir_proto::{AddressHash, Balance, BlockDelta, BlockUpdate, SegmentRowDeltas, ValueCodec};
@@ -66,6 +68,77 @@ impl<B: IndexPirBackend> Clone for SetupBundle<B> {
             block: self.block,
         }
     }
+}
+
+/// What one call to [`RisePirServer::apply_change`] actually did to the
+/// store — the classification [`RisePirServer::apply_block_reporting`]
+/// tallies into [`BlockApplyReport`]. Not [`ServerError`]: this is the
+/// *success* outcome, one variant per store op (or lack of one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChangeKind {
+    /// `Located::Absent` + nonzero balance ⇒ [`CuckooKVStore::insert`].
+    Insert,
+    /// `Located::Own` + nonzero balance ⇒ [`CuckooKVStore::update`].
+    Update,
+    /// `Located::Own` + zero balance ⇒ [`CuckooKVStore::delete`].
+    Delete,
+    /// `Located::Absent` + zero balance ⇒ no store op at all (ADR-0017's
+    /// load-bearing no-op arm — see [`RisePirServer::apply_change`]).
+    NoopDelete,
+}
+
+/// Per-block measurement report [`RisePirServer::apply_block_reporting`]
+/// returns alongside the [`BlockDelta`] — everything a measurement
+/// campaign needs about *this one block's* apply cost, with nothing
+/// address- or balance-shaped in it (every field is a count or a
+/// [`Duration`]).
+///
+/// # Invariants
+///
+/// - `inserts + updates + deletes` equals the number of store operations
+///   this block actually performed (`CuckooKVStore::insert`/`update`/
+///   `delete` calls) — `noop_deletes` is deliberately excluded, since a
+///   no-op delete (ADR-0017: a zero-balance change for an address the
+///   store never held) performs no store mutation at all.
+/// - `changes + credits` equals `inserts + updates + deletes +
+///   noop_deletes`: every entry of `BlockUpdate::changes` and
+///   `BlockUpdate::credits` resolves to exactly one `ChangeKind`.
+/// - `touched_cells` is the number of `(row, offset)` delta entries across
+///   every segment's [`SegmentRowDeltas`] in the returned [`BlockDelta`]
+///   — i.e. exactly the size of what a client rewinding through this
+///   block's delta will ingest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockApplyReport {
+    /// Store `insert`s this block performed.
+    pub inserts: u64,
+    /// Store `update`s this block performed.
+    pub updates: u64,
+    /// Store `delete`s this block performed.
+    pub deletes: u64,
+    /// Zero-balance changes for an address the store never held — ADR-0017's
+    /// load-bearing no-op arm; not a store operation.
+    pub noop_deletes: u64,
+    /// `update.changes.len()` — absolute balance changes carried by this
+    /// block, before classification.
+    pub changes: u64,
+    /// `update.credits.len()` — EIP-4895 withdrawal credits carried by
+    /// this block. Each one is additionally counted, by the store op it
+    /// produced, in `inserts`/`updates`/`deletes`/`noop_deletes` above.
+    pub credits: u64,
+    /// Sum, over every segment, of the number of `(row, offset)` delta
+    /// entries in the returned [`BlockDelta`] — the size of what clients
+    /// will ingest to stay in sync with this block.
+    pub touched_cells: u64,
+    /// Wall-clock time of stage (i): the loop applying every change and
+    /// credit through `RisePirServer::apply_change` (store reads/writes
+    /// only — no encoding, no logging, no lock acquisition).
+    pub store_dur: Duration,
+    /// Wall-clock time of stage (ii): `CuckooKVStore::drain_mutations` plus
+    /// the internal row-delta fold (`fold_mutations_into_row_deltas`).
+    pub fold_dur: Duration,
+    /// Wall-clock time of stage (iii): every touched segment's
+    /// `IncrementalPirBackend::server_patch_hint` call.
+    pub patch_dur: Duration,
 }
 
 /// Batched RisePIR server: one epoch and one delta bundle per Ethereum
@@ -286,6 +359,28 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         self.store.num_items()
     }
 
+    /// Sum, over every segment, of that segment's hint size in bytes
+    /// (`BackendWireSize::hint_byte_size`) — `risepir_hint_bytes`
+    /// (ADR-0039) and `time-setup`'s `hint_bytes` field (C13). `O(arity)`:
+    /// reads each hint's own length, never clones or encodes one — unlike
+    /// [`Self::setup`], which clones every hint, this is cheap enough to
+    /// call on every `GET /metrics` scrape.
+    pub fn hint_bytes(&self) -> u64
+    where
+        B: BackendWireSize,
+    {
+        self.hints.iter().map(|h| B::hint_byte_size(h) as u64).sum()
+    }
+
+    /// Every segment's `ServerParams`, borrowed — length equals
+    /// `params().arity()`. Cheap (a slice borrow, no clone): unlike
+    /// [`Self::setup`], which clones every hint *and* every params entry
+    /// just to answer questions that only need the params half (e.g.
+    /// `time-setup`'s `lwe_dim` field), this touches nothing hint-sized.
+    pub fn backend_params(&self) -> &[B::ServerParams] {
+        &self.backend_params
+    }
+
     /// Discards buffered mutations and returns `err` — the single exit
     /// path every [`Self::apply_block`] failure funnels through. See
     /// [`Self::apply_block`]'s documentation for exactly what this does
@@ -296,11 +391,15 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     }
 
     /// Apply one `(address, absolute balance)` mutation through the
-    /// verified-scan dispatch (ADR-0017; see [`Self::apply_block`]'s
-    /// "per-change handling"). Does **not** drain the mutation log on
-    /// failure — the caller funnels every error through
-    /// [`Self::reject_block`].
-    fn apply_change(&mut self, addr: &AddressHash, balance: Balance) -> Result<(), ServerError> {
+    /// verified-scan dispatch (ADR-0017; see [`Self::apply_block_reporting`]'s
+    /// "per-change handling"), reporting which [`ChangeKind`] it performed.
+    /// Does **not** drain the mutation log on failure — the caller funnels
+    /// every error through [`Self::reject_block`].
+    fn apply_change(
+        &mut self,
+        addr: &AddressHash,
+        balance: Balance,
+    ) -> Result<ChangeKind, ServerError> {
         let located = verified::locate(&self.store, &self.value_codec, addr);
 
         if balance == 0 {
@@ -309,7 +408,7 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
             // so zero is a **deletion**, never a stored zero.
             return match located {
                 Located::Own(_) => match self.store.delete(addr) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(ChangeKind::Delete),
                     // `locate` just proved the first fp-match is ours, so
                     // `delete` cannot miss; surfaced defensively.
                     Err(e) => Err(ServerError::Store(format!(
@@ -319,7 +418,7 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
                 // The load-bearing arm: absent means NO-OP even when
                 // foreign fp-matches exist — upstream's fp-only delete
                 // would have destroyed one of them.
-                Located::Absent { .. } => Ok(()),
+                Located::Absent { .. } => Ok(ChangeKind::NoopDelete),
                 Located::Shadowed => Err(ServerError::FingerprintAmbiguity { shadowed: true }),
                 Located::DuplicateTag => Err(ServerError::FingerprintAmbiguity { shadowed: false }),
                 Located::Corrupt => Err(ServerError::CorruptStoredValue),
@@ -333,13 +432,13 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
 
         match located {
             Located::Own(_) => match self.store.update(addr, &encoded) {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(ChangeKind::Update),
                 Err(e) => Err(ServerError::Store(format!(
                     "update failed after verified locate said Own: {e:?}"
                 ))),
             },
             Located::Absent { .. } => match self.store.insert(addr, &encoded) {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(ChangeKind::Insert),
                 Err(CuckooError::TableFull) => Err(ServerError::TableFull),
                 Err(CuckooError::InvalidParams(msg)) => Err(ServerError::Store(msg)),
                 Err(CuckooError::NotFound) => Err(ServerError::Store(
@@ -467,7 +566,67 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// See [`ServerError`]. [`ServerError::NonMonotonicBlock`] if
     /// `update.block` is not strictly greater than [`Self::block`]
     /// (checked before touching the store, so always side-effect-free).
+    ///
+    /// # Measurement report
+    ///
+    /// [`Self::apply_block_reporting`] is the canonical implementation —
+    /// it does everything documented above, plus classifies every change
+    /// and credit into a [`BlockApplyReport`] and times the three stages
+    /// (store mutation, fold, hint patch) with [`Instant`]. This method is
+    /// a thin wrapper that discards the report. Its *outputs* are
+    /// unchanged from before that method existed — same [`BlockDelta`],
+    /// same `Result`/error conditions for every input, same store/hint
+    /// mutations — but its *internal cost* is not byte-for-byte identical:
+    /// every call now also increments the classification counters and
+    /// sums `touched_cells` inside the timed region, and builds (then
+    /// discards) one [`BlockApplyReport`]. That extra work is real, if
+    /// negligible next to the store/fold/patch stages it rides alongside
+    /// — see [`Self::apply_block_reporting`]'s own docs for exactly what
+    /// it costs.
     pub fn apply_block(&mut self, update: &BlockUpdate) -> Result<BlockDelta, ServerError> {
+        self.apply_block_reporting(update)
+            .map(|(delta, _report)| delta)
+    }
+
+    /// [`Self::apply_block`], additionally returning a [`BlockApplyReport`]
+    /// — mutation-kind counts and per-stage timings for a measurement
+    /// campaign (B7/B8: mutations per block split insert/update/delete,
+    /// and server time to apply one block). See [`Self::apply_block`]'s
+    /// docs for the full behavioral contract (per-change handling,
+    /// withdrawal credits, the non-transactional atomicity caveat, and
+    /// error conditions) — this method's *behavior* is identical; only the
+    /// return type differs.
+    ///
+    /// # Timed regions — exactly three, nothing else inside them
+    ///
+    /// 1. **`store_dur`**: the loop applying every entry of
+    ///    `update.changes` through `Self::apply_change`, then every entry
+    ///    of `update.credits` (its verified prior-value read, overflow
+    ///    check, and `Self::apply_change` call). No encoding, no logging,
+    ///    no lock acquisition — this method never acquires a lock itself
+    ///    (the caller, `NodeState::apply_block_reporting`, holds
+    ///    `RisePirServer` behind one).
+    /// 2. **`fold_dur`**: `CuckooKVStore::drain_mutations` plus the
+    ///    internal row-delta fold (`fold_mutations_into_row_deltas`) —
+    ///    nothing else.
+    /// 3. **`patch_dur`**: every touched segment's
+    ///    `IncrementalPirBackend::server_patch_hint` call — nothing else.
+    ///    In particular, encoding the returned [`BlockDelta`] (e.g. via
+    ///    `risepir_proto::codec::encode_block_delta`) never happens inside
+    ///    this method at all, timed or not — callers encode it themselves,
+    ///    outside any of this method's timers.
+    ///
+    /// `report.store_dur + report.fold_dur + report.patch_dur` is slightly
+    /// less than this whole call's own wall-clock time (the classification
+    /// bookkeeping between stages, and the final [`BlockDelta`]
+    /// construction, are real but negligible) — the same "sum of stages
+    /// plus a tiny residual" relationship `risepir_http::node`'s docs
+    /// already describe for `NodeState::apply_block`'s outer timer against
+    /// these three.
+    pub fn apply_block_reporting(
+        &mut self,
+        update: &BlockUpdate,
+    ) -> Result<(BlockDelta, BlockApplyReport), ServerError> {
         if update.block <= self.block {
             return Err(ServerError::NonMonotonicBlock {
                 current: self.block,
@@ -475,18 +634,33 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
             });
         }
 
+        let mut inserts = 0u64;
+        let mut updates = 0u64;
+        let mut deletes = 0u64;
+        let mut noop_deletes = 0u64;
+
+        let store_t0 = Instant::now();
         for (addr, balance) in &update.changes {
-            if let Err(e) = self.apply_change(addr, *balance) {
-                return Err(self.reject_block(e));
+            match self.apply_change(addr, *balance) {
+                Ok(kind) => match kind {
+                    ChangeKind::Insert => inserts += 1,
+                    ChangeKind::Update => updates += 1,
+                    ChangeKind::Delete => deletes += 1,
+                    ChangeKind::NoopDelete => noop_deletes += 1,
+                },
+                Err(e) => return Err(self.reject_block(e)),
             }
         }
 
         // Withdrawal credits (EIP-4895): relative amounts, applied after
-        // every absolute change — see the method docs and
+        // every absolute change — see [`Self::apply_block`]'s docs and
         // `BlockUpdate::credits`. Each resolves against the store's own
         // verified read (the authoritative prior value, ADR-0016), so a
         // fingerprint-colliding foreign entry can neither be misread as
-        // the prior nor be overwritten by the credited write.
+        // the prior nor be overwritten by the credited write. Counted by
+        // the store op it produces, into the same four counters above —
+        // a credit is just a change whose new balance this loop computes
+        // rather than receives directly.
         for (addr, amount) in &update.credits {
             let prior = match verified::get(&self.store, &self.value_codec, addr) {
                 Ok(Some(b)) => b,
@@ -505,15 +679,40 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
                     risepir_proto::ValueError::BalanceOverflow,
                 )));
             };
-            if let Err(e) = self.apply_change(addr, credited) {
-                return Err(self.reject_block(e));
+            match self.apply_change(addr, credited) {
+                Ok(kind) => match kind {
+                    ChangeKind::Insert => inserts += 1,
+                    ChangeKind::Update => updates += 1,
+                    ChangeKind::Delete => deletes += 1,
+                    ChangeKind::NoopDelete => noop_deletes += 1,
+                },
+                Err(e) => return Err(self.reject_block(e)),
             }
         }
+        let store_dur = store_t0.elapsed();
 
         // Whole block succeeded: ONE drain, ONE fold, ONE patch per
         // touched segment — the batching `IkpirServer` cannot do.
+        let fold_t0 = Instant::now();
         let muts = self.store.drain_mutations();
         let row_deltas: Vec<SegmentRowDeltas> = fold_mutations_into_row_deltas(&muts, &self.params);
+        let fold_dur = fold_t0.elapsed();
+
+        // Sum of `(row, offset)` delta entries across every segment — the
+        // size of what a client rewinding through this block's delta will
+        // ingest (B9's per-block numerator). Cheap (a handful of `Vec::len`
+        // reads), and deliberately outside every timed stage: it is not
+        // itself one of the three stages this report measures.
+        let touched_cells: u64 = row_deltas
+            .iter()
+            .map(|seg| {
+                seg.iter()
+                    .map(|(_row, cells)| cells.len() as u64)
+                    .sum::<u64>()
+            })
+            .sum();
+
+        let patch_t0 = Instant::now();
         for (j, deltas) in row_deltas.iter().enumerate() {
             if !deltas.is_empty() {
                 // EntryLevel: Θ(n) per touched cell, independent of the
@@ -531,12 +730,26 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
                 );
             }
         }
+        let patch_dur = patch_t0.elapsed();
 
         self.block = update.block;
-        Ok(BlockDelta {
+        let delta = BlockDelta {
             block: self.block,
             per_segment: row_deltas,
-        })
+        };
+        let report = BlockApplyReport {
+            inserts,
+            updates,
+            deletes,
+            noop_deletes,
+            changes: update.changes.len() as u64,
+            credits: update.credits.len() as u64,
+            touched_cells,
+            store_dur,
+            fold_dur,
+            patch_dur,
+        };
+        Ok((delta, report))
     }
 
     /// Answer a per-segment PIR query bundle at the server's current
@@ -1279,6 +1492,111 @@ mod tests {
             "re-deleting an already-absent key must be a no-op (empty delta)"
         );
         assert_eq!(s.block(), 3);
+    }
+
+    // ── apply_block_reporting: classification + touched_cells (B7/B9) ────
+
+    /// A block mixing every [`ChangeKind`] — an insert, an update, a
+    /// delete, and a no-op delete (a zero-balance change for a key that
+    /// was never present) — classifies each correctly, and the two
+    /// invariants [`BlockApplyReport`]'s own docs state both hold:
+    /// `inserts + updates + deletes` equals the actual number of store
+    /// operations (checked against `balance_of` reads of the resulting
+    /// store, not merely re-derived from the same counters), and
+    /// `changes + credits` equals the sum of all four counters.
+    #[test]
+    fn apply_block_reporting_classifies_every_change_kind() {
+        let geom = geometry();
+        let mut s = server(&geom);
+
+        // Genesis: addr(1), addr(2), addr(3) inserted.
+        let (_delta, report1) = s
+            .apply_block_reporting(&BlockUpdate {
+                block: 1,
+                changes: vec![
+                    (addr(1), 1_000u128),
+                    (addr(2), 2_000u128),
+                    (addr(3), 3_000u128),
+                ],
+                credits: vec![],
+            })
+            .unwrap();
+        assert_eq!(report1.inserts, 3, "three fresh addresses: three inserts");
+        assert_eq!(report1.updates, 0);
+        assert_eq!(report1.deletes, 0);
+        assert_eq!(report1.noop_deletes, 0);
+        assert_eq!(report1.changes, 3, "update.changes.len()");
+        assert_eq!(report1.credits, 0, "update.credits.len()");
+
+        // Block 2: addr(1) -> update; addr(2) -> delete; addr(4) -> no-op
+        // delete (never present); addr(5) -> insert; addr(3) -> credited
+        // (resolves to an update, since addr(3) already exists).
+        let (delta2, report2) = s
+            .apply_block_reporting(&BlockUpdate {
+                block: 2,
+                changes: vec![
+                    (addr(1), 1_500u128),
+                    (addr(2), 0u128),
+                    (addr(4), 0u128),
+                    (addr(5), 5_000u128),
+                ],
+                credits: vec![(addr(3), 300u128)],
+            })
+            .unwrap();
+
+        assert_eq!(report2.inserts, 1, "addr(5) is fresh: one insert");
+        assert_eq!(
+            report2.updates, 2,
+            "addr(1) (a change) and addr(3) (a credit) both resolve to updates"
+        );
+        assert_eq!(report2.deletes, 1, "addr(2) had a balance: one delete");
+        assert_eq!(
+            report2.noop_deletes, 1,
+            "addr(4) was never present: a no-op delete"
+        );
+        assert_eq!(report2.changes, 4, "update.changes.len()");
+        assert_eq!(report2.credits, 1, "update.credits.len()");
+
+        // Invariant 1 (BlockApplyReport's own docs): inserts+updates+deletes
+        // equals the number of actual store operations — verified here
+        // against the resulting store contents, not just re-summed from
+        // the same counters.
+        assert_eq!(report2.inserts + report2.updates + report2.deletes, 4);
+        assert_eq!(s.balance_of(&addr(1)).unwrap(), Some(1_500), "updated");
+        assert_eq!(s.balance_of(&addr(2)).unwrap(), None, "deleted");
+        assert_eq!(s.balance_of(&addr(4)).unwrap(), None, "never present");
+        assert_eq!(s.balance_of(&addr(5)).unwrap(), Some(5_000), "inserted");
+        assert_eq!(
+            s.balance_of(&addr(3)).unwrap(),
+            Some(3_300),
+            "credited: 3_000 prior + 300"
+        );
+
+        // Invariant 2: every change/credit resolves to exactly one
+        // ChangeKind, so the four counters sum to changes + credits.
+        assert_eq!(
+            report2.inserts + report2.updates + report2.deletes + report2.noop_deletes,
+            report2.changes + report2.credits
+        );
+
+        // touched_cells (B9's per-block numerator) equals the sum of
+        // `(row, offset)` delta entries actually present in the returned
+        // BlockDelta — computed independently from the public delta
+        // shape, not from `report`'s own bookkeeping.
+        let counted_from_delta: u64 = delta2
+            .per_segment
+            .iter()
+            .map(|seg| {
+                seg.iter()
+                    .map(|(_row, cells)| cells.len() as u64)
+                    .sum::<u64>()
+            })
+            .sum();
+        assert_eq!(report2.touched_cells, counted_from_delta);
+        assert!(
+            report2.touched_cells > 0,
+            "this block touched real cells; touched_cells must not be trivially zero"
+        );
     }
 
     // ── 4. delta_ring_window ─────────────────────────────────────────────

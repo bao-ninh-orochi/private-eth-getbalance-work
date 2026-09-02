@@ -1053,6 +1053,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "ikpir-common",
+ "rayon",
  "reqwest",
  "risepir-client",
  "risepir-feed",
@@ -1779,6 +1780,7 @@ dependencies = [
  "risepir-proto",
  "risepir-server",
  "segmented-cuckoo",
+ "serde_json",
 ]
 
 [[package]]

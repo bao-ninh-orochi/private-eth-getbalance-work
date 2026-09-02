@@ -97,6 +97,10 @@ pub struct DemoConfig {
     /// Serve the browser front end (ADR-0019) from this directory, on the
     /// PIR port's own origin. `None` leaves the demo headless.
     pub web_dir: Option<PathBuf>,
+    /// `--answer-timing-header` (off by default): see
+    /// `MainnetConfig::answer_timing_header`'s identical docs — the same
+    /// flag, wired the same way, for the mock deployment.
+    pub answer_timing_header: bool,
 }
 
 impl Default for DemoConfig {
@@ -115,6 +119,7 @@ impl Default for DemoConfig {
             block_interval: Duration::from_secs(1),
             ring_capacity: 600,
             web_dir: None,
+            answer_timing_header: false,
         }
     }
 }
@@ -214,6 +219,7 @@ pub async fn spawn(cfg: DemoConfig) -> DemoHandle {
         DeltaRing::new(cfg.ring_capacity),
         true,
     ));
+    node_state.set_answer_timing_header(cfg.answer_timing_header);
 
     // The mock universe is complete, so every address answers — but the
     // front end still offers these as one-click examples, and they are the

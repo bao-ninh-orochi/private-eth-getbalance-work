@@ -9,6 +9,7 @@ use segmented_cuckoo::{unpack_slot_cells, CuckooParams};
 use crate::delta::PendingDelta;
 use crate::error::ClientError;
 use crate::rewind::ResponseRewind;
+use crate::timing::{FinishObserver, FinishPhase, NoFinishObserver};
 
 /// Client-held bridge between [`RisePirClient::build_query`] and
 /// [`RisePirClient::finish`].
@@ -316,8 +317,31 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
         &self,
         key: &AddressHash,
         ctx: &QueryCtx<B>,
+        resp: Vec<B::Response>,
+        at_block: u64,
+    ) -> Result<Lookup, ClientError> {
+        self.finish_observed(key, ctx, resp, at_block, &mut NoFinishObserver)
+    }
+
+    /// [`Self::finish`], with a [`FinishObserver`] notified at each of
+    /// ADR-0003's rewind-step boundaries (see [`crate::timing`]).
+    ///
+    /// Behaviourally identical to [`Self::finish`] — same steps, same
+    /// order, same errors, same constant-time scan. The observer only
+    /// ever *reads* a clock; it can neither reorder nor skip a step, and
+    /// its marks sit outside the per-slot scan loop so the scan stays
+    /// data-independent (see [`crate::timing`]'s module docs).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::finish`]'s.
+    pub fn finish_observed<O: FinishObserver>(
+        &self,
+        key: &AddressHash,
+        ctx: &QueryCtx<B>,
         mut resp: Vec<B::Response>,
         at_block: u64,
+        obs: &mut O,
     ) -> Result<Lookup, ClientError> {
         let arity = self.params.arity();
         if resp.len() != arity || ctx.queries.len() != arity || ctx.rows.len() != arity {
@@ -361,6 +385,7 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
         // form keeps them visibly in lockstep.
         #[allow(clippy::needless_range_loop)]
         for j in 0..arity {
+            obs.mark(FinishPhase::SegmentStart);
             // Step 2: resp -= qᵀ·ΔD[block₀ → E'], this segment's whole delta.
             B::rewind_response(
                 &self.states[j],
@@ -368,9 +393,11 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
                 &mut resp[j],
                 self.delta.segment(j),
             );
+            obs.mark(FinishPhase::Rewind);
 
             // Step 3: decode against the STALE (pinned) hint — the bucket AS OF block₀.
             let mut cells: Vec<u32> = B::client_decode(&self.states[j], &resp[j]);
+            obs.mark(FinishPhase::Decode);
 
             // Step 4: cells += ΔD[row] — the bucket AS OF E'. MUST precede step 5.
             let row = ctx.rows[j];
@@ -393,6 +420,7 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
                 }
                 cells[idx] = corrected as u32;
             }
+            obs.mark(FinishPhase::DeltaApply);
 
             // Step 5 (this segment's share): scan for fp(key) AND
             // key_tag(key), side-channel hardened exactly as
@@ -414,6 +442,7 @@ impl<B: IncrementalPirBackend + ResponseRewind> RisePirClient<B> {
                 }
                 found_mask |= mask;
             }
+            obs.mark(FinishPhase::Scan);
         }
 
         if found_mask == 0 {

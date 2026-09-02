@@ -61,7 +61,9 @@ The one number that mattered: mainnet has **200,503,969** nonzero accounts, not
 the ~100–130 M this file and the runbook had assumed. At the geometry deployed
 then (`arity 3, bucket_size 4`), that made the server DB **35.43 GB** rather
 than 10–13 GB. The "16–24 GB box" advice was wrong by more than 2× regardless;
-the deployment runs on a 64 GB `e2-highmem-8`. ADR-0034 has since retuned the
+the deployment ran on a 64 GB `e2-highmem-8` at the time (migrated
+2026-09-02 to a 128 GB `c3d-highmem-16` in `us-east4-a` — deploy.md §5.11).
+ADR-0034 has since retuned the
 deployed geometry to `(arity 2, bucket_size 4)` at a higher target load, and the
 live box **was re-bootstrapped onto it on 2026-07-27**: 23.62 GB server DB, a
 24.18 GB state file, 16 min end to end (`docs/deploy.md` §5.4). Anything that
@@ -242,8 +244,12 @@ the superseded `(3,4)` lineage is stale.
   use them (`-- --ignored`, and a `--partial` smoke run) after touching the
   feed or the apply path.
 - Commits: signing works (`ssh-add --apple-use-keychain` was run;
-  `commit.gpgsign=true`). **Branch → PR → self-merge** into `main` (the `PGR-###`
-  rules): no fork (`origin` *is* this repo, there is no `upstream`), CI green
-  before merging, then `gh pr merge <#> --squash --delete-branch`. `main` is
-  protected by convention — do **not** push to it directly, which is what an
-  earlier revision of this file said. No AI attribution trailers or footers.
+  `commit.gpgsign=true`). **Fork-based, reviewed and merged by someone else —
+  the flip from an earlier revision of this file, which described a
+  self-merge, no-fork process.** `origin` is a personal fork
+  (`bao-ninh-orochi/private-eth-getbalance-work`); `upstream` is
+  `orochi-network/private-eth-getbalance`. Open PRs from the fork branch
+  against `upstream`'s default branch, as a draft while work is in progress
+  and ready only once implementation-complete **and** CI green; a separate
+  reviewer agent (`on-unknown-fish`) reviews and merges — the author never
+  self-merges. No AI attribution trailers or footers.

@@ -102,9 +102,18 @@ impl Histogram {
     }
 
     /// Total observations folded in — what the `+Inf` bucket (and the
-    /// exposition format's trailing `_count` line) reports.
-    fn count(&self) -> u64 {
+    /// exposition format's trailing `_count` line) reports. `pub(crate)`:
+    /// also read by `crate::node::NodeState::answer_compute_totals`, which
+    /// hands the cumulative `/answer` compute count to the `risepir-rpc`
+    /// follow loop for its per-block CSV (an interference indicator).
+    pub(crate) fn count(&self) -> u64 {
         self.count
+    }
+
+    /// Cumulative seconds across every observation folded in — the other
+    /// half of what [`Self::count`] is read for outside this module.
+    pub(crate) fn sum_seconds(&self) -> f64 {
+        self.sum_seconds
     }
 }
 
@@ -186,6 +195,30 @@ pub(crate) struct Counters {
     /// `crate::node`'s `answer` handler for exactly what is (and is not)
     /// under this clock, and why.
     pub answer_duration: Histogram,
+    /// Cumulative store mutations applied across every block this process
+    /// has applied, keyed by kind (`"insert"`/`"update"`/`"delete"` — a
+    /// fixed, closed set this crate itself chose, same reasoning as
+    /// [`Self::requests`]'s labels). Deliberately excludes no-op deletes
+    /// (ADR-0017): they perform no store mutation, so they are not a
+    /// "kind" of mutation. Folded in once per applied block by
+    /// `NodeState::record_block_apply_metrics`, from
+    /// `risepir_server::BlockApplyReport`.
+    pub store_mutations: BTreeMap<&'static str, u64>,
+    /// Cumulative wall-clock seconds spent inside
+    /// `RisePirServer::apply_block_reporting`, summed over every applied
+    /// block — the numerator a scraper divides by
+    /// [`Self::block_apply_total`] to compute a mean apply time
+    /// (`risepir_block_apply_seconds_total` / `risepir_block_apply_total`,
+    /// ADR-0039's follow-on; the standard Prometheus sum/count-counter
+    /// pair, deliberately not a second histogram — one mean is enough for
+    /// this one).
+    pub block_apply_seconds_total: f64,
+    /// Blocks successfully applied this process — the denominator for the
+    /// mean above.
+    pub block_apply_total: u64,
+    /// Cumulative `BlockDelta::encoded_len()` bytes across every applied
+    /// block — B9's running total.
+    pub block_delta_bytes_total: u64,
 }
 
 impl Counters {
@@ -194,6 +227,10 @@ impl Counters {
             requests: BTreeMap::new(),
             request_errors: BTreeMap::new(),
             answer_duration: Histogram::new(),
+            store_mutations: BTreeMap::new(),
+            block_apply_seconds_total: 0.0,
+            block_apply_total: 0,
+            block_delta_bytes_total: 0,
         }
     }
 }
@@ -226,6 +263,19 @@ pub(crate) struct Snapshot {
     pub store_items: u64,
     /// Total slot capacity (`num_buckets × bucket_size`) of the store.
     pub store_capacity: u64,
+    /// The store's raw cell array length in bytes (`cells().len() * 4`) —
+    /// the "server DB size" (C11). A live gauge, not accumulated: reflects
+    /// the store's *current* size, unlike the cumulative counters below.
+    pub store_cells_bytes: u64,
+    /// Sum, over every segment, of that segment's hint size in bytes
+    /// (`RisePirServer::hint_bytes`, `BackendWireSize::hint_byte_size`) —
+    /// also a live gauge.
+    pub hint_bytes: u64,
+    /// This process's resident set size in bytes (`/proc/self/statm` on
+    /// Linux; `0` elsewhere or on any read failure — see
+    /// `crate::node::process_rss_bytes`'s own docs for the page-size
+    /// assumption this makes).
+    pub process_rss_bytes: u64,
     /// Size, in bytes, of the currently cached `GET /setup` response —
     /// `0` if nothing has been encoded yet this process. Reading this
     /// never *forces* an encode (`NodeState::cached_setup_bytes`).
@@ -245,6 +295,14 @@ pub(crate) struct Snapshot {
     pub request_errors: BTreeMap<(&'static str, &'static str), u64>,
     /// The answer-latency histogram.
     pub answer_duration: Histogram,
+    /// Cumulative store mutations by kind — see [`Counters::store_mutations`].
+    pub store_mutations: BTreeMap<&'static str, u64>,
+    /// See [`Counters::block_apply_seconds_total`].
+    pub block_apply_seconds_total: f64,
+    /// See [`Counters::block_apply_total`].
+    pub block_apply_total: u64,
+    /// See [`Counters::block_delta_bytes_total`].
+    pub block_delta_bytes_total: u64,
 }
 
 /// Escapes a label value per the Prometheus text exposition format:
@@ -386,6 +444,30 @@ pub(crate) fn render(s: &Snapshot) -> String {
         &[],
         load_factor,
     );
+    write_metric(
+        &mut out,
+        "risepir_store_cells_bytes",
+        "The store's raw cell array length in bytes (the server DB size).",
+        "gauge",
+        &[],
+        s.store_cells_bytes,
+    );
+    write_metric(
+        &mut out,
+        "risepir_hint_bytes",
+        "Sum, over every segment, of that segment's hint size in bytes.",
+        "gauge",
+        &[],
+        s.hint_bytes,
+    );
+    write_metric(
+        &mut out,
+        "risepir_process_rss_bytes",
+        "This process's resident set size in bytes (Linux only; 0 elsewhere or on read failure).",
+        "gauge",
+        &[],
+        s.process_rss_bytes,
+    );
 
     // ── setup cache ───────────────────────────────────────────────────────
     write_metric(
@@ -428,6 +510,44 @@ pub(crate) fn render(s: &Snapshot) -> String {
     );
     let _ = writeln!(out, "{name}_sum {}", s.answer_duration.sum_seconds);
     let _ = writeln!(out, "{name}_count {}", s.answer_duration.count());
+
+    // ── store mutations / block apply / delta bytes ──────────────────────
+    let _ = writeln!(
+        out,
+        "# HELP risepir_store_mutations_total Cumulative store mutations applied, by kind. Excludes no-op deletes (ADR-0017), which perform no store mutation."
+    );
+    let _ = writeln!(out, "# TYPE risepir_store_mutations_total counter");
+    for (kind, count) in &s.store_mutations {
+        let _ = writeln!(
+            out,
+            "risepir_store_mutations_total{} {count}",
+            format_labels(&[("kind", kind)])
+        );
+    }
+    write_metric(
+        &mut out,
+        "risepir_block_apply_seconds_total",
+        "Cumulative wall-clock seconds spent applying blocks (RisePirServer::apply_block_reporting). Divide by risepir_block_apply_total for the mean.",
+        "counter",
+        &[],
+        s.block_apply_seconds_total,
+    );
+    write_metric(
+        &mut out,
+        "risepir_block_apply_total",
+        "Blocks successfully applied this process.",
+        "counter",
+        &[],
+        s.block_apply_total,
+    );
+    write_metric(
+        &mut out,
+        "risepir_block_delta_bytes_total",
+        "Cumulative BlockDelta::encoded_len() bytes across every applied block.",
+        "counter",
+        &[],
+        s.block_delta_bytes_total,
+    );
 
     // ── requests / errors ─────────────────────────────────────────────────
     let _ = writeln!(
@@ -605,6 +725,9 @@ mod tests {
             finalized_block: 90,
             store_items: 42,
             store_capacity: 128,
+            store_cells_bytes: 512,
+            hint_bytes: 256,
+            process_rss_bytes: 0,
             setup_bytes: 4096,
             setup_regenerations: 2,
             reconcile: empty_reconcile(),
@@ -612,6 +735,10 @@ mod tests {
             requests: BTreeMap::new(),
             request_errors: BTreeMap::new(),
             answer_duration: Histogram::new(),
+            store_mutations: BTreeMap::new(),
+            block_apply_seconds_total: 0.0,
+            block_apply_total: 0,
+            block_delta_bytes_total: 0,
         }
     }
 
@@ -751,6 +878,36 @@ mod tests {
         assert!(text.contains(
             "risepir_request_errors_total{route=\"answer\",class=\"SegmentLengthMismatch\"} 2"
         ));
+    }
+
+    /// The per-block apply instrumentation (ADR-0039's follow-on):
+    /// mutation-kind counters, the apply-time sum/count pair, the
+    /// cumulative delta-byte counter, and the two live store-size gauges.
+    #[test]
+    fn render_includes_block_apply_and_store_size_metrics() {
+        let mut snap = base_snapshot();
+        snap.store_mutations.insert("insert", 5);
+        snap.store_mutations.insert("update", 3);
+        snap.store_mutations.insert("delete", 1);
+        snap.block_apply_seconds_total = 0.042;
+        snap.block_apply_total = 4;
+        snap.block_delta_bytes_total = 12_345;
+        snap.store_cells_bytes = 1_048_576;
+        snap.hint_bytes = 65_536;
+        let text = render(&snap);
+
+        assert!(text.contains("risepir_store_mutations_total{kind=\"insert\"} 5"));
+        assert!(text.contains("risepir_store_mutations_total{kind=\"update\"} 3"));
+        assert!(text.contains("risepir_store_mutations_total{kind=\"delete\"} 1"));
+        assert!(text.contains("risepir_block_apply_seconds_total 0.042"));
+        assert!(text.contains("risepir_block_apply_total 4"));
+        assert!(text.contains("risepir_block_delta_bytes_total 12345"));
+        assert!(text.contains("risepir_store_cells_bytes 1048576"));
+        assert!(text.contains("risepir_hint_bytes 65536"));
+        // process_rss_bytes is always rendered even when 0 (non-Linux/test
+        // default) — an absent field would read as "healthy"/unmonitored
+        // rather than honestly "unavailable here".
+        assert!(text.contains("risepir_process_rss_bytes 0"));
     }
 
     #[test]

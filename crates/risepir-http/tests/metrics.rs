@@ -416,6 +416,22 @@ async fn request_and_error_counters_reflect_real_traffic() {
 #[tokio::test]
 async fn served_metrics_body_contains_nothing_address_shaped() {
     let state = build_node();
+
+    // Apply one real block touching the known seeded address (ADR-0039's
+    // follow-on: risepir_store_mutations_total/risepir_block_apply_*/
+    // risepir_block_delta_bytes_total are all derived from this call) —
+    // the tripwire below must hold for a block whose addresses are known,
+    // not merely for an untouched, all-zero-counter node.
+    let key = keccak256(&[0x11u8; 20]);
+    state
+        .apply_block_reporting(&risepir_proto::BlockUpdate {
+            block: 1,
+            changes: vec![(key, 99u128), (keccak256(&[0x22u8; 20]), 7u128)],
+            credits: vec![],
+        })
+        .await
+        .expect("apply_block_reporting");
+
     let app = NodeState::router(state);
 
     let (status, body, _) = get(&app, "/setup").await;
@@ -425,7 +441,6 @@ async fn served_metrics_body_contains_nothing_address_shaped() {
     let mut client: RisePirClient<SimplePirBackend> = RisePirClient::from_setup(bundle, codec());
 
     // Query the one real seeded account by name.
-    let key = keccak256(&[0x11u8; 20]);
     let (queries, _ctx) = client.build_query(&key);
     let status = post_answer(&app, &epoch, wire::encode_query_bundle(&queries)).await;
     assert_eq!(status, StatusCode::OK);
@@ -433,6 +448,12 @@ async fn served_metrics_body_contains_nothing_address_shaped() {
     let (status, body, _) = get(&app, "/metrics").await;
     assert_eq!(status, StatusCode::OK);
     let text = String::from_utf8(body).unwrap();
+
+    // Sanity: the block-apply counters this test exists to exercise
+    // actually moved, so the tripwire below is checking a populated body,
+    // not a vacuous all-zero one.
+    assert!(text.contains("risepir_block_apply_total 1"));
+    assert!(text.contains("risepir_store_mutations_total{kind=\"insert\"} 1"));
 
     for token in text.split(|c: char| !c.is_ascii_hexdigit()) {
         assert!(

@@ -625,7 +625,9 @@ impl PrivateEth {
             other => RpcError::from(other),
         })?;
 
-        if let Some(s) = sink.as_deref_mut() {
+        // Last use of `sink` in this method, so it is moved rather than
+        // reborrowed.
+        if let Some(s) = sink {
             s.found = matches!(lookup, Lookup::Found(_));
         }
 

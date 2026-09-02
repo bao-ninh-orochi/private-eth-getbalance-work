@@ -59,6 +59,7 @@ pub mod front;
 pub mod hard_refresh;
 pub mod journal;
 pub mod mainnet;
+pub mod probe;
 pub mod snapshot_audit;
 pub mod snapshot_rewind;
 pub mod state;

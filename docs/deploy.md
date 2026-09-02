@@ -1050,6 +1050,21 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   persisted), so routine restarts do not invalidate anyone; only a genuine
   re-bootstrap (fresh snapshot ingest) mints a new lineage — which is
   exactly when old clients *must* be refused.
+- **A long catch-up replay: `--prefetch <k>` (ADR-0047)**. The follow loop
+  spends nearly all of a replay waiting on the feed (~1–2 s per
+  `debug_traceBlockByNumber`, plus dRPC's `408` refusals) against a ~4 ms
+  apply — measured 2026-09-02, ~1.1 blocks/s, so a week-old state file
+  (~52,000 blocks) is ~13 h of catch-up. `--prefetch <k>` fetches up to `k`
+  blocks concurrently while still applying them in strictly increasing block
+  order, never past `finalized`, retrying a failed block exactly as before
+  and skipping nothing. It defaults to **1** (the old behaviour, byte for
+  byte) and is capped at **32**; the startup log always names the depth in
+  force (`block prefetch: ...`). Use single digits — 4–8 — and only for a
+  catch-up: the other end is a keyless free tier that rate-limits, each
+  in-flight fetch holds a block's raw JSON, and once caught up `finalized`
+  is a block or two ahead so the lookahead collapses to 0–1 and the flag
+  does nothing. It changes no apply, reconcile, autosave or journal
+  behaviour — only when the *fetches* are issued.
 
 ### Log timestamps and rotation
 

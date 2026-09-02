@@ -96,7 +96,7 @@
 //!
 //! # Between batches: following head, and what a block row means
 //!
-//! Every `--poll-secs` the probe runs [`PrivateEth::follow_once`], which
+//! Every `--poll-secs` the probe runs `PrivateEth::follow_once`, which
 //! is the same catch-up `get_balance` performs inline: `GET /head`, then,
 //! if the server advanced, **one `GET /sync?from=&to=`** for the whole
 //! gap. That is what the product does — `/sync` serves a *coalesced*

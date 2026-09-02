@@ -209,7 +209,8 @@ impl RpcClient {
     ///
     /// # Why the raw string is worth keeping
     ///
-    /// [`parse_hex_u128`] normalises: `"0x0de0b6b3a7640000"`,
+    /// The crate's own `parse_hex_u128` normalises:
+    /// `"0x0de0b6b3a7640000"`,
     /// `"0xDE0B6B3A7640000"` and `"0xde0b6b3a7640000"` all parse to the
     /// same `u128`, so a comparison made *after* parsing can only ever
     /// test the number. A caller checking that this service is

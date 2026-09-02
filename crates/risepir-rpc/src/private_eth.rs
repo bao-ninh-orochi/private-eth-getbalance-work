@@ -18,7 +18,7 @@ use crate::error::RpcError;
 /// Exactly one of these is produced per `GET /sync` the session
 /// performs, wherever that fetch was issued from: the catch-up inside a
 /// balance lookup (twice per lookup at most) or a standalone
-/// [`PrivateEth::follow_once`]. A caller that writes one row per fetch
+/// `PrivateEth::follow_once`. A caller that writes one row per fetch
 /// therefore has complete coverage with no double-counting — which is
 /// what makes the per-block delta series continuous rather than gapped
 /// at every trial.

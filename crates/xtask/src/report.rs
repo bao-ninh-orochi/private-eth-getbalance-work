@@ -55,15 +55,15 @@
 //! # Parsing
 //!
 //! Every CSV is parsed by header name, not column position (a
-//! [`ColumnMap`] built from the header line), and fails loudly — naming
+//! `ColumnMap` built from the header line), and fails loudly — naming
 //! the file and the missing column — if the header does not carry every
-//! column this module expects (see e.g. [`TRIALS_COLUMNS`]). Column
+//! column this module expects (see e.g. `TRIALS_COLUMNS`). Column
 //! lookups are table-driven (a `const &[&str]` list of expected names per
 //! file) specifically so a renamed column, such as the server-blocks CSV
 //! is expected to see once its own branch lands, is a one-line change
 //! rather than a hunt through positional indices. The hand-rolled parser
 //! (`str::split(',')`, no quoting) assumes no field contains an
-//! unescaped comma — [`split_row`] turns any row that does not split into
+//! unescaped comma — `split_row` turns any row that does not split into
 //! exactly the header's column count into a loud parse error, which is
 //! this module's way of "asserting" that invariant rather than silently
 //! misaligning every column after the offending one.
@@ -339,7 +339,7 @@ const TRIALS_COLUMNS: &[&str] = &[
 /// see [`render_markdown`]'s §A). Fields this module never reports a
 /// statistic for (`batch`, `started_at_unix_ms`, `delta_cells`,
 /// `provider_error`, `provider_rtt_us`) are still validated present in
-/// the header ([`TRIALS_COLUMNS`]) but not extracted into this struct.
+/// the header (`TRIALS_COLUMNS`) but not extracted into this struct.
 #[derive(Clone, Debug)]
 pub struct TrialRow {
     /// Trial index within its batch — identifies a row in §D's
@@ -415,7 +415,7 @@ pub struct TrialRow {
 /// Parses `--trials` content into one [`TrialRow`] per data line. Fails
 /// loudly (naming the file, the line, and the column) on a missing
 /// header column, a row whose field count does not match the header
-/// (see [`split_row`]), or a value that does not parse as its documented
+/// (see `split_row`), or a value that does not parse as its documented
 /// type.
 pub fn parse_trials_csv(content: &str) -> Result<Vec<TrialRow>, String> {
     const FILE: &str = "--trials";

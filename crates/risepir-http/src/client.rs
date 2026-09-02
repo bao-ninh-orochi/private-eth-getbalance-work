@@ -244,7 +244,7 @@ impl PirHttpClient {
     /// client is not merely convenient.
     ///
     /// The caller owns the configuration, including the guardrails
-    /// [`Self::new`] sets ([`CONNECT_TIMEOUT`], [`READ_STALL_TIMEOUT`]):
+    /// [`Self::new`] sets (`CONNECT_TIMEOUT`, `READ_STALL_TIMEOUT`):
     /// a client built without them has no timeout at all. The
     /// per-endpoint response-size caps are enforced here regardless, so
     /// the "validate every length before allocating" half of the

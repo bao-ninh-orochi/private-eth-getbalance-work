@@ -207,7 +207,10 @@ impl<F: BlockSource> BlockPrefetch<F> {
         // Awaited through `&mut` rather than by removing the handle
         // first: if this future is ever dropped mid-await, the handle
         // stays in the map and the fetch is collected by the next call
-        // instead of being lost and re-issued.
+        // instead of being lost and re-issued. That cannot leave a
+        // *completed* handle behind to be awaited twice (which panics):
+        // there is no await point between the join resolving and the
+        // `remove` below, so the two always happen in the same poll.
         let handle = self
             .inflight
             .get_mut(&n)

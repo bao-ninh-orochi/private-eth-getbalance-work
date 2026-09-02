@@ -3705,3 +3705,251 @@ laptop `--partial` replay of 85 blocks; the complete-set box has not run a
 multi-thousand-block catch-up under this flag yet, so treat 1.86× as the
 shape of the effect, not as the number to quote for a 52,000-block
 replay.
+
+### ADR-0048 — Measure the deployment from inside it: per-block CSV, flag-gated `/answer` timing headers, `time-setup`, and a client probe that never garbage-collects **[NEW]**
+
+**1. Per-block server instrumentation: an opt-in CSV in the follow loop.**
+
+**Context.** B7 (mutation counts), B8 (apply time) and B9 (delta bytes) are
+per-block quantities, but nothing before this ADR recorded them per block:
+`GET /metrics` (ADR-0039) exposes only cumulative counters and a
+request-latency histogram, neither of which can be un-summed back to
+"block 25,900,113 took 4.2 ms and inserted 37 keys," and the operational
+log line names only the current head and periodic save/replay summaries,
+not a stable per-field schema a script could parse without re-deriving
+column meaning from prose that has already changed once (the RFC 3339
+timestamp prefix).
+
+**Chosen:** `--block-metrics-csv <path>` (mainnet, off by default;
+`crates/risepir-rpc/src/block_metrics_csv.rs`). The follow loop already
+calls `NodeState::apply_block_reporting` — not the older `apply_block` —
+for every block, under the one write-lock acquisition it always needed
+anyway; `--block-metrics-csv` gates only whether a row is appended, so
+leaving it off costs nothing beyond the outcome the loop already computes.
+One row per successfully applied block:
+`block,applied_at_unix_ms,changes,credits,inserts,updates,deletes,noop_deletes,touched_cells,store_ms,fold_ms,patch_ms,apply_ms,lock_wait_ms,delta_bytes,answers_since_prev_block,answer_compute_ms_since_prev_block,feed_fetch_ms,finalized_block`.
+B8 is timed exactly as `NodeState::apply_block` already timed it —
+wall-clock around the inner `RisePirServer::apply_block_reporting` call only,
+starting after the write lock is already held — so `apply_ms` excludes
+lock wait by construction, and `lock_wait_ms` (time queued behind another
+writer or a slow reader under tokio's write-preferring `RwLock`) is its
+own column, never folded in. `delta_bytes` is `BlockDelta::encoded_len()`,
+the exact byte count `encode_block_delta` would produce for this block —
+the same bytes served at `GET /delta/{block}` — computed after the write
+lock releases, so it is never itself timed. The interference columns are
+`answers_since_prev_block` (this block's cumulative `/answer` count minus
+the previous applied block's) and `lock_wait_ms`, so B8 can later be split
+quiet-vs-probe-adjacent.
+
+**Rejected:** deriving per-block numbers from `/metrics` scrapes — a
+poller sampling a cumulative counter on some external cadence cannot
+attribute a delta to one specific block once more than one block applies
+between two scrapes, and the follow loop's own pace varies by orders of
+magnitude (several blocks per second during a catch-up replay, roughly
+one every ~12 s once caught up to head), so no fixed scrape interval
+reliably lands exactly one sample per block; and parsing the operational
+log — its format is prose for
+a human, has already changed once with no stable per-field contract, and
+a future wording change would silently break a scraper with no error,
+exactly the "silently wrong" failure class the binding rules exist to
+prevent, here applied to a measurement rather than a balance.
+
+**Why one row per block, not one row per probe trial.** The two
+client-side CSVs (`--queries-csv`, `--blocks-csv`) already capture what
+one query costs; B7/B8/B9 are what one block application costs, an event
+with its own cadence — once per mainnet block, independent of whether any
+query ever asks about it — so folding them into the trial schema would
+force every trial row to carry mostly-empty apply-time columns or every
+block row to carry mostly-empty query columns. Keeping them separate,
+joined only by `block`, is what lets `xtask report` treat "one private
+query" (§A) and "one block" (§B) as the independent axes the report
+actually measures.
+
+**2. Flag-gated `/answer` timing headers for A3 and A4.**
+
+**Context.** A3 (network time attributable to the wire, not the server)
+can only be recovered by subtraction —
+`answer_wire_us − server_handler_ns/1000` — if the server reports its own
+handler time on the same response the client already receives; without it
+A3 collapses into A5/finish, misattributed to the client. A4 (the
+server's own answer-compute time) is the input to that subtraction and a
+number worth reporting in its own right.
+
+**Chosen:** `--answer-timing-header` (mock/mainnet, off by default). When
+set, `POST /answer` carries `x-risepir-answer-compute-ns` and
+`x-risepir-answer-handler-ns` response headers, timed once inside
+`NodeState` and read by the client through the same
+`risepir_http::NetSink` instant pair that already brackets the call — no
+second timer, no second code path. Both are safe to expose: `/answer`'s
+cost is a dense matvec over the whole database for every query regardless
+of which account was asked, so nothing about answer-compute time depends
+on the query's content (ADR-0039's non-side-channel argument applies
+unchanged). What is not automatically safe is making any new per-request
+server timing a standing public default; a flag defaulting off keeps the
+public deployment's normal response shape unchanged and turns the headers
+on only for a campaign's duration.
+
+**Rejected:** a separate timing ping alongside each `/answer` call to ask
+the server how long the real call took — it would travel its own path
+(its own TCP round trip, or, even with keep-alive, its own framing with
+no guarantee of the same connection reuse the timed call got), so any gap
+between the ping's report and the real call's wire time would be an
+unexplained residual with no way to attribute it to network jitter versus
+the ping's own overhead — exactly the ambiguity headers on the real
+response avoid by construction.
+
+**Why headers, not a body field.** `/answer`'s response body is the
+wire-format PIR answer, decoded on the hot path by both the CLI rewind
+client and the wasm-in-browser client; a timing field in the body would
+mean either a wire-format version every campaign has to reconcile or a
+client-side branch to skip a field it does not use. Headers reach
+`NetSink`'s instrumentation without touching the body decode at all, and
+are absent by default exactly like the flag producing them.
+
+**3. `time-setup`: the real setup cost, and a byte-for-byte proof for the
+incrementally patched hints.**
+
+**Context.** C13 is "how long does this deployment's setup cost," but
+`SimplePirBackend::server_setup` samples a fresh random seed on every
+call, so a live re-run can never be compared byte-for-byte against what a
+years-old snapshot bootstrap actually persisted — and the number that
+matters more for a deployment that has been patching incrementally ever
+since is not "does a fresh setup look plausible" but "do the hints
+actually being served still equal `Aⱼᵀ·Dⱼ` for the store as it stands
+today," which nothing checked before this.
+
+**Chosen:** `risepir-rpc time-setup --state <file> [--out <json-path>]`
+loads a state file exactly as `mainnet --state` does, then times
+`RisePirServer::full_rebuild()` — the same
+`O(arity × n_rows × lwe_dim × row_width)` setup computation the original
+snapshot bootstrap ran, now over the currently loaded, already-patched
+store — for `setup_seconds`. Separately, and alone gating the tool's exit
+code, `persisted_hints_exact_match` reproduces each segment's hint from
+public data alone: `SimpleParams::seed` (persisted in every
+`ServerParams`) is expanded via the deterministic
+`IndexPirBackend::expand_hint_material`, and a zero-initialized hint is
+patched with the entire store's cells expressed as deltas from zero,
+chunked (`EXACT_CHECK_CHUNK_ROWS` cuckoo-bucket rows at a time,
+`HintPatchMode::RowLevel`) so the transcript never materializes the whole
+multi-GB store at once — verified at three shapes, including a ragged
+tail, that chunking does not change the final hint. The result is a
+literal `Vec<u32>` equality against what is actually on disk.
+
+**Rejected:** comparing against a fresh `server_setup` byte-for-byte —
+impossible by construction, since it samples a new seed every call, so
+"differs" would be true even for a perfectly healthy deployment; and
+reporting the sampled per-row decode check (a handful of representative
+rows per segment, decode-verified against the store's raw cells) as the
+headline correctness number, the original plan — it only proves some
+independent path agrees the data looks right, not that the persisted
+hints equal what patching should have produced, so it is kept as
+`persisted_hints_decode_ok`/`rebuilt_hints_decode_ok`, reported for
+diagnostics and never ANDed into the exit code.
+
+**Why this is exact, not approximate.** `server_patch_hint`'s row-level
+realization is linear and its updates are associative wrapping-`u32`
+addition, so any chunking of the same total delta set reaches the
+identical final hint — the chunking is a memory bound, not an
+approximation — and `RowLevel` (rather than the per-block `EntryLevel`
+`apply_block_reporting` uses day to day) is the cheaper realization once
+nearly every row of the store is touched, which the whole-store-from-zero
+transcript always is.
+
+**4. The client probe: one pinned session, the product's own code path,
+no garbage collection.**
+
+**Context.** A1–A6 have to describe what a real client of this product
+experiences, not a purpose-built benchmark harness's best case; the two
+things a benchmark harness typically does differently from a real client
+— a fresh, freshly warmed session per measurement, and periodic garbage
+collection to keep memory flat — are exactly the two things neither the
+CLI `client` nor the wasm-in-browser client does today.
+
+**Chosen:** `risepir-rpc probe --pir-url <url> --queries-csv <p>
+--blocks-csv <p>` drives `PrivateEth::get_balance` — the crate's own core
+call, the same one every deployment mode's JSON-RPC surface reaches into
+for `eth_getBalance` — now sharing `risepir_http::NetSink`'s
+instrumentation instead of the probe re-implementing timing around a
+separate copy of the client logic. One session is built at the run's
+start, pinned at its `/setup` (block₀), and followed forward for the
+whole run; `RisePirClient::collect_garbage` is never called. Every
+network call is timed client-side; A3 is the client-measured
+head+sync+answer wire time minus the server's
+`x-risepir-answer-handler-ns` (decision 2), and `residual_us` is written
+as an explicit column, defined as the
+subtraction and never distributed over the other terms, so
+`t_total_us = build_us + head_wire_us + sync_wire_us + answer_wire_us +
+setup_wire_us + finish_us + residual_us` closes by construction. Every
+row carries `stale_blocks` and `delta_cells`, so A5 is reported over a
+stated, growing staleness range and binned by it, rather than pretending
+the client stays freshly synced. Every successful trial's decoded balance
+is compared against `--confirm-url`'s `eth_getBalance` at the same
+explicit block height, in plaintext, after the trial's clock has already
+stopped, so the check never enters A1; `found`, `provider_match`, and
+`provider_hex_match` (numeric and exact-string agreement) are the only
+address-or-balance-derived bits any row carries — no address, balance, or
+formatted error body is ever written to a CSV, a log line, or an error
+message.
+
+**Rejected:** probing purely over JSON-RPC instead of the library call
+directly — the JSON-RPC response never carries the block height the
+answer was actually decoded against, only the balance, so there would be
+no way to ask the confirm provider about the same height the PIR answer
+used, only "latest," which ADR-0007 already establishes is roughly 13
+minutes stale and therefore the wrong comparison; a fresh session per
+trial — the complete-set client holds 553.82 MB of hint and roughly
+1.11 GB resident once `A` is expanded, so a fresh `/setup` per trial
+would multiply the run's own bandwidth and memory cost past what the
+campaign window could afford, and would measure re-sync cost instead of
+steady-state query cost; and a garbage-collecting client — neither
+shipped client ever calls `collect_garbage`, so a GC'd probe would report
+a staleness operating point no real user of this product experiences.
+
+**Why the `--confirm-url` exception does not weaken the privacy claim.**
+The PIR query itself never carries the address to any party able to also
+learn which account was asked; the confirm call is a second, independent
+request to a different operator, made in plaintext by design, because
+there is no way to ask "was this answer right" without telling someone
+what was asked — `--no-confirm` turns it off entirely, leaving a run
+where the address reaches no network peer at all.
+
+**5. Report data discipline (`xtask report`).**
+
+**Context.** A campaign run produces four raw files (trials, client
+blocks, server blocks, one setup measurement) that only become a citable
+number once someone decides how to summarize them; every one of those
+decisions — which percentile method, what a violated budget identity
+means, whether a byte count was timed or computed from geometry — is
+exactly the kind of silent-methodology gap that makes a number impossible
+to audit later.
+
+**Chosen:** `xtask report` fixes every one of those decisions as code
+rather than as a per-run judgment call. Percentiles are nearest-rank —
+the 1-based rank `ceil(q·n)`, an actual sample, never interpolated — for
+every `p50`/`p95` in the document. `n` counts only `--trials` rows whose
+`error` column is empty (the block CSVs carry no `error` column, so their
+`n` is every parsed row, filtered further to single-block fetches for
+B9/B10). Every rendered number is labelled `measured` (read off a raw
+column), `computed` (a closed-form function of `Geometry::sizes`, never
+timed), or `derived` (arithmetic on other reported rows). The budget
+identity is asserted per row, with the worst violation and its trial id
+surfaced rather than averaged away. B8 is reported both as a whole and
+split quiet-vs-probe-adjacent using `answers_since_prev_block` (decision
+1). Every raw CSV the report was built from is committed alongside it, so
+any statistic in the write-up can be recomputed independently of this
+tool.
+
+**Rejected:** a report that prints summary statistics without a raw-file
+trail — it would make every number in the paper a claim to be trusted
+rather than a computation to be checked, exactly backwards from this
+repo's own standard that the log is what makes a decision auditable,
+applied here to data instead of decisions.
+
+**Why nearest-rank specifically.** It always names a sample that was
+actually observed, never a value interpolated between two real
+measurements, so a reported `p95` traces to one real trial or block — the
+same standard the budget-identity check and the
+`measured`/`computed`/`derived` labelling hold every other number in the
+report to.
+
+**Status:** decided 2026-09-02 for orochi-network/private-eth-getbalance#4; instrumentation in this PR, the campaign data and report in a follow-up.

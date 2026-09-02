@@ -338,6 +338,46 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
         prev = b;
     }
 
+    // The tiling identity — the actual property the coverage fix is for,
+    // and strictly stronger than "increasing". Each fetch covers
+    // `(from, to]` with `from` equal to the previous fetch's `to`, so:
+    //
+    //     block[i] - blocks_in_fetch[i] == block[i-1]
+    //     block[0] - blocks_in_fetch[0] == the session's pinned block
+    //
+    // Any dropped fetch leaves a gap and any duplicated one an overlap;
+    // either breaks this equality, whereas both can hide behind a merely
+    // increasing column.
+    //
+    // Scoped per pass, because each `probe::run` bootstraps its own
+    // session from its own `/setup` and therefore starts a fresh chain
+    // at *its* pinned block — a restart, not a gap. Segmenting by the
+    // summaries' own row counts is also what proves those counts
+    // describe the rows actually written.
+    assert_eq!(
+        brows.len(),
+        s1.block_rows + s2.block_rows,
+        "the two summaries must account for every row in the file"
+    );
+    let (pass1, pass2) = brows.split_at(s1.block_rows);
+    for (pass, rows, pinned) in [(1, pass1, s1.pinned_block), (2, pass2, s2.pinned_block)] {
+        let mut from = pinned;
+        for (i, r) in rows.iter().enumerate() {
+            let block = num(r, BLOCK_COLUMNS, "block");
+            let span = num(r, BLOCK_COLUMNS, "blocks_in_fetch");
+            // `checked_sub`, so a span wider than the block it ends at
+            // reports *this* diagnostic rather than an unrelated
+            // subtract-with-overflow panic.
+            assert_eq!(
+                block.checked_sub(span),
+                Some(from),
+                "pass {pass} block row {i}: a fetch ending at {block} covering {span} block(s) \
+                 must begin at {from} — a mismatch is a dropped or double-counted fetch"
+            );
+            from = block;
+        }
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

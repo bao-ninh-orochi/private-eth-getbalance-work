@@ -543,8 +543,8 @@ dependencies = [
 
 [[package]]
 name = "ikpir-common"
-version = "0.1.0"
-source = "git+https://github.com/bao-ninh-orochi/IKPIR?tag=v0.1.0-perf#adecd9c2a66344f0dd94cdc9a6d896f62d47b440"
+version = "0.2.0"
+source = "git+https://github.com/bao-ninh-orochi/IKPIR?tag=v0.2.0-perf#d91c75fb807d25807104c29b1931f846f007379a"
 dependencies = [
  "rand 0.9.5",
  "rand_chacha",
@@ -554,8 +554,8 @@ dependencies = [
 
 [[package]]
 name = "ikpir-server"
-version = "0.1.0"
-source = "git+https://github.com/bao-ninh-orochi/IKPIR?tag=v0.1.0-perf#adecd9c2a66344f0dd94cdc9a6d896f62d47b440"
+version = "0.2.0"
+source = "git+https://github.com/bao-ninh-orochi/IKPIR?tag=v0.2.0-perf#d91c75fb807d25807104c29b1931f846f007379a"
 dependencies = [
  "ikpir-common",
  "rand 0.9.5",
@@ -1178,8 +1178,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "segmented-cuckoo"
-version = "0.1.0"
-source = "git+https://github.com/bao-ninh-orochi/IKPIR?tag=v0.1.0-perf#adecd9c2a66344f0dd94cdc9a6d896f62d47b440"
+version = "0.2.0"
+source = "git+https://github.com/bao-ninh-orochi/IKPIR?tag=v0.2.0-perf#d91c75fb807d25807104c29b1931f846f007379a"
 dependencies = [
  "rand 0.9.5",
  "xxhash-rust",

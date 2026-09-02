@@ -3539,3 +3539,48 @@ then `bao-ninh-orochi/IKPIR` must not be deleted, renamed, or made private.
 
 **Status:** decided 2026-08-19, with the import of this project into
 `orochi-network/private-eth-getbalance`. `v0.1.0-perf` = commit `adecd9c`.
+
+### ADR-0046 — Take the `v0.2.0-perf` pin bump (true discrete-Gaussian LWE error); nothing here moves **[NEW — re-affirms ADR-0045's pinning mechanism; the tag value advances from `v0.1.0-perf` to `v0.2.0-perf`]**
+
+**Context.** IKPIR's SimplePIR / Row-KOPIR backend changed its LWE error
+sampler on the fork's `perf/optimized` line (`orochi-network/IKPIR#33`): a
+rounded continuous Gaussian (`z ~ N(0, σ²)` drawn by Box–Muller, then rounded
+to the nearest integer) becomes a true discrete Gaussian `D_σ` with
+`P(X = x) ∝ exp(−x²/(2σ²))` — the distribution the lattice-estimator call
+this repo's security posture rests on actually names (`Xe =
+ND.DiscreteGaussian(6.4)`), and the one both SimplePIR reference
+implementations sample (ahenzinger/simplepir `pir/gauss.go`; mpc4j
+`IntVector.createGaussian`). Exactly two commits sit on top of `v0.1.0-perf`
+(`adecd9c`): the sampler change and a version bump to workspace version
+0.2.0, tagged `v0.2.0-perf` (commit
+`d91c75fb807d25807104c29b1931f846f007379a`). σ is unchanged at 6.4; the
+public API (`IkpirServer`/`IkpirClient` and every trait method this repo
+calls) is unchanged.
+
+**Chosen:** take the bump — move `ikpir-common` / `segmented-cuckoo` /
+`ikpir-server` (root `Cargo.toml`) and the fuzz workspace's matching pins
+(`fuzz/Cargo.toml`) from `tag = "v0.1.0-perf"` to `tag = "v0.2.0-perf"`,
+re-resolve both lockfiles to the same commit, and change nothing else. This
+is ADR-0045's own tag-immutability rule doing exactly what it was built for:
+"a future perf revision gets a new tag, never a moved one."
+
+**Rejected:** staying on `v0.1.0-perf`. Its rounded-continuous-Gaussian
+sampler is a common practical shortcut, but it is not the distribution the
+security estimate assumes — there is no reason to keep drawing from the
+wrong one once the right one is a no-cost pin bump away.
+
+**Why nothing else moves.** The diff is contained to error sampling: no
+kernel, no hash lineage (`xxh3_128`/`RPST3`), no PIR geometry, no
+`plaintext_bits`/`fingerprint_bits` selection touched. So ADR-0042's
+derivation (κ ≈ 61) stands, every size in `docs/numbers.md` §4 stands, and a
+state file written by a `v0.1.0-perf` build still loads — `STORE_ARITY` and
+the `RPST3` format gate on hash lineage and geometry, neither of which
+moved. What does *not* carry over automatically: `docs/numbers.md`'s
+answer-latency figures were measured against `v0.1.0-perf` and are not
+re-measured here (no kernel touched, so no material delta is expected, but
+expected is not measured) — regenerating them is left for whoever next runs
+`xtask bench --write` against this tag.
+
+**Status:** decided 2026-09-02, closing
+`orochi-network/private-eth-getbalance#2`. `v0.2.0-perf` = commit
+`d91c75fb807d25807104c29b1931f846f007379a`.

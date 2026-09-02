@@ -1427,15 +1427,19 @@ fn render_section_a(out: &mut String, data: &ReportData, successful: &[&TrialRow
     .unwrap();
     writeln!(out).unwrap();
 
-    // ── A3 / server handler overhead ──
-    writeln!(out, "### A3 and server handler overhead ({DERIVED})").unwrap();
+    // ── A4 / A3 / server handler overhead ──
+    writeln!(
+        out,
+        "### A3, A4, and server handler overhead ({MEASURED}, {DERIVED})"
+    )
+    .unwrap();
     writeln!(out).unwrap();
     let with_headers = rows_with_server_headers(successful);
     if with_headers.is_empty() {
         writeln!(
             out,
             "No row in this dataset carries both `server_compute_ns` and `server_handler_ns`; \
-             A3 and server handler overhead are not computed."
+             A4, A3, and server handler overhead are not computed."
         )
         .unwrap();
     } else {
@@ -1446,6 +1450,27 @@ fn render_section_a(out: &mut String, data: &ReportData, successful: &[&TrialRow
             successful.len()
         )
         .unwrap();
+        writeln!(out).unwrap();
+
+        // A4 is the only *measured* distribution in this section — the
+        // server's own `x-risepir-answer-compute-ns` header, rendered in
+        // milliseconds (not microseconds, unlike the wire components
+        // above) to match B8's stage-timer convention for compute costs.
+        writeln!(out, "**A4 ({MEASURED}):**").unwrap();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "| quantity | n | mean (ms) | p50 (ms) | p95 (ms) | min (ms) | max (ms) |"
+        )
+        .unwrap();
+        writeln!(out, "|---|---:|---:|---:|---:|---:|---:|").unwrap();
+        let a4 = stats_from(with_headers.iter().copied(), |r| {
+            r.server_compute_ns.expect("filtered above") as f64 / 1_000_000.0
+        });
+        write_stats_row(out, "A4 (server_compute_ns)", a4, 4);
+        writeln!(out).unwrap();
+
+        writeln!(out, "**A3 and server handler overhead ({DERIVED}):**").unwrap();
         writeln!(out).unwrap();
         writeln!(
             out,
@@ -1883,17 +1908,18 @@ fn write_byte_metric_row(out: &mut String, label: &str, stats: Option<Stats>) {
     match stats {
         Some(s) => writeln!(
             out,
-            "| {label} | {} | {} | {} | {} | {} |",
+            "| {label} | {} | {} | {} | {} | {} | {} |",
             s.n,
             fmt_bytes(s.mean.round() as u64),
             fmt_bytes(s.p50.round() as u64),
             fmt_bytes(s.p95.round() as u64),
             fmt_bytes(s.min.round() as u64),
+            fmt_bytes(s.max.round() as u64),
         )
         .unwrap(),
         None => writeln!(
             out,
-            "| {label} | 0 | \u{2014} | \u{2014} | \u{2014} | \u{2014} |"
+            "| {label} | 0 | \u{2014} | \u{2014} | \u{2014} | \u{2014} | \u{2014} |"
         )
         .unwrap(),
     }
@@ -2565,7 +2591,7 @@ mod tests {
             "## A. One private query",
             "### A1\u{2013}A6: per-query timing (measured)",
             "### Budget identity (derived)",
-            "### A3 and server handler overhead (derived)",
+            "### A3, A4, and server handler overhead (measured, derived)",
             "### A5 sub-timers (measured)",
             "### A1 and A5 binned by `stale_blocks` (measured)",
             "### A6: wire bytes (measured) vs. computed sizes (computed)",
@@ -2588,6 +2614,110 @@ mod tests {
                 "missing expected heading {heading:?} in:\n{markdown}"
             );
         }
+    }
+
+    // ── B9 byte-row cell count (regression: `max` was silently dropped) ──
+
+    #[test]
+    fn write_byte_metric_row_emits_a_cell_for_every_header_column() {
+        let header = "| source | n | mean | p50 | p95 | min | max |";
+        let header_cells = header.matches('|').count();
+
+        let mut some_out = String::new();
+        write_byte_metric_row(&mut some_out, "label", compute_stats(&[10.0, 20.0, 30.0]));
+        assert_eq!(
+            some_out.trim_end().matches('|').count(),
+            header_cells,
+            "Some(stats) row must match the header's cell count: {some_out:?}"
+        );
+
+        let mut none_out = String::new();
+        write_byte_metric_row(&mut none_out, "label", None);
+        assert_eq!(
+            none_out.trim_end().matches('|').count(),
+            header_cells,
+            "None row must match the header's cell count: {none_out:?}"
+        );
+    }
+
+    #[test]
+    fn b9_rows_have_as_many_cells_as_their_header() {
+        let data = golden_report_data();
+        let markdown = render_markdown(&data);
+        let header = markdown
+            .lines()
+            .find(|l| l.starts_with("| source |"))
+            .expect("B9 header present");
+        let header_cells = header.matches('|').count();
+        let server_row = markdown
+            .lines()
+            .find(|l| l.starts_with("| server delta_bytes |"))
+            .expect("B9 server row present");
+        let client_row = markdown
+            .lines()
+            .find(|l| l.starts_with("| client wire_bytes"))
+            .expect("B9 client row present");
+        assert_eq!(server_row.matches('|').count(), header_cells);
+        assert_eq!(client_row.matches('|').count(), header_cells);
+    }
+
+    // ── A4 (measured), gated on server timing headers being present ──────
+
+    #[test]
+    fn a4_row_present_with_ms_stats_when_server_timing_headers_exist() {
+        let data = golden_report_data();
+        let markdown = render_markdown(&data);
+        assert!(markdown.contains("### A3, A4, and server handler overhead (measured, derived)"));
+        assert!(markdown.contains("**A4 (measured):**"));
+        assert!(markdown
+            .contains("| quantity | n | mean (ms) | p50 (ms) | p95 (ms) | min (ms) | max (ms) |"));
+        // Only trial 1 carries server_compute_ns (100_000 ns = 0.1 ms); trial
+        // 2's header columns are blank and trial 3 is an errored row, excluded
+        // from `successful` entirely.
+        assert!(markdown.contains(
+            "| A4 (server_compute_ns) | 1 | 0.1000 | 0.1000 | 0.1000 | 0.1000 | 0.1000 |"
+        ));
+    }
+
+    #[test]
+    fn a4_and_a3_absent_with_a_note_when_no_row_carries_server_timing_headers() {
+        let trials_csv = trials_csv_with_rows(&[trial_csv_row(&[
+            ("server_compute_ns", ""),
+            ("server_handler_ns", ""),
+        ])]);
+        let client_blocks_csv = format!("{CLIENT_BLOCKS_HEADER}\n");
+        let server_blocks_csv = format!("{SERVER_BLOCKS_HEADER}\n");
+        let setup_json = r#"{
+            "accounts": 1000,
+            "buckets": 1024,
+            "cells_bytes": 111111,
+            "hint_bytes": 222222,
+            "arity": 2,
+            "bucket_size": 4,
+            "lwe_dim": 999,
+            "plaintext_bits": 8,
+            "setup_seconds": 3.0,
+            "persisted_hints_exact_match": true,
+            "state_block": 300,
+            "rayon_threads": 8
+        }"#;
+        let data = ReportData::parse(
+            &trials_csv,
+            &client_blocks_csv,
+            &server_blocks_csv,
+            setup_json,
+            None,
+            "",
+            false,
+        )
+        .expect("valid fixture");
+        let markdown = render_markdown(&data);
+        assert!(markdown.contains(
+            "No row in this dataset carries both `server_compute_ns` and `server_handler_ns`; \
+             A4, A3, and server handler overhead are not computed."
+        ));
+        assert!(!markdown.contains("A4 (server_compute_ns)"));
+        assert!(!markdown.contains("**A4 (measured):**"));
     }
 
     #[test]

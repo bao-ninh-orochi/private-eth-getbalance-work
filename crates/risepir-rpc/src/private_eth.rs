@@ -92,8 +92,18 @@ pub struct BalanceTimings {
     /// `GET /sync`, so a caller can write one blocks-CSV row per fetch
     /// with no gaps and no double-counting. Empty (the common case) for
     /// a caller that already follows head between queries; at most two
-    /// entries otherwise (the pre-answer catch-up and the one to the
+    /// entries per attempt (the pre-answer catch-up and the one to the
     /// answered block).
+    ///
+    /// This vec is reset once, at the start of the call, not once per
+    /// attempt (unlike every other field here — see
+    /// [`BalanceTimings::attempts`]): on an `attempts = 2` row it holds
+    /// whatever the failed first attempt already pushed *plus* the
+    /// retry's own fetches, up to four entries spanning both attempts.
+    /// That accumulation is deliberate, the same reason a single
+    /// attempt's two fetches both get kept — it is what keeps the
+    /// per-block delta series continuous across a rebootstrap-and-retry
+    /// instead of gapped at it.
     pub sync: Vec<SyncFetch>,
     /// The block the server answered at.
     pub at_block: u64,
@@ -111,9 +121,13 @@ pub struct BalanceTimings {
     /// itself never enters this struct.
     pub found: bool,
     /// How many attempts the call took: `1` normally, `2` when a
-    /// `Stalled` forced one re-bootstrap-and-retry. Only the last
-    /// attempt's timers are recorded, so a `2` marks a row whose timers
-    /// do not account for the whole wall time.
+    /// `Stalled` forced one re-bootstrap-and-retry. Every field here
+    /// except [`BalanceTimings::sync`] records only the last attempt's
+    /// timers: on a `2` row, `build`, `finish`, `finish_parts`,
+    /// `at_block`, `pinned_block`, `delta_cells`, and `found` are the
+    /// retry's values alone, so they still do not account for the whole
+    /// wall time. `sync` is the exception — it accumulates across both
+    /// attempts rather than being reset for the retry; see its own docs.
     pub attempts: u32,
 }
 

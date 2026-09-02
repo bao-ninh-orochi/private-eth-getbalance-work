@@ -1275,6 +1275,14 @@ impl NodeState {
 // query-processing errors both map to a clean `400 Bad Request` with the
 // error's `Display` text, never a 500 or a panic.
 
+/// Response header names for the optional per-request answer-timing
+/// instrumentation (`--answer-timing-header`, ADR-0039's follow-on) — see
+/// the comment inside the `answer` handler, just above where these
+/// headers are inserted, for what each carries and why both are safe to
+/// expose.
+const ANSWER_COMPUTE_NS_HEADER: HeaderName = HeaderName::from_static("x-risepir-answer-compute-ns");
+const ANSWER_HANDLER_NS_HEADER: HeaderName = HeaderName::from_static("x-risepir-answer-handler-ns");
+
 /// `POST /answer?epoch=<lineage>`: decode the query bundle, answer at the
 /// server's current head, encode the response bundle. Read lock only.
 ///
@@ -1286,13 +1294,6 @@ impl NodeState {
 /// client's pipeline forces the `/sync` that would catch the mismatch —
 /// the garbage decodes straight to a fingerprint miss, which complete
 /// mode maps to `0x0`.
-/// Response header names for the optional per-request answer-timing
-/// instrumentation (`--answer-timing-header`, ADR-0039's follow-on) — see
-/// the `answer` handler's own doc comment for what each carries and why
-/// both are safe to expose.
-const ANSWER_COMPUTE_NS_HEADER: HeaderName = HeaderName::from_static("x-risepir-answer-compute-ns");
-const ANSWER_HANDLER_NS_HEADER: HeaderName = HeaderName::from_static("x-risepir-answer-handler-ns");
-
 async fn answer(
     State(state): State<Arc<NodeState>>,
     RawQuery(raw): RawQuery,

@@ -1535,8 +1535,7 @@ impl BenchReport {
              (rayon matvec/GEMM kernels). `v0.2.0-perf` differs from `v0.1.0-perf` (`0f3b99b`) \
              only in the SimplePIR error sampler — a true discrete Gaussian `D_σ` in place of a \
              rounded continuous one (ADR-0046) — plus a version bump; no kernel, hash lineage, or \
-             geometry moved, so these figures are expected to carry over unchanged, but they are \
-             not measured until this generator is next run. A `--no-default-features` build \
+             geometry moved. A `--no-default-features` build \
              reports substantially slower, single-threaded rebuild/answer times (the sizes and \
              delta-byte figures are unaffected). `xtask bench` prints to stdout by default; pass \
              `--write` to overwrite this file, and only do so from a build against the pinned tag \

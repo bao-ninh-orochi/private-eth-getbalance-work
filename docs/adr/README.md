@@ -3579,7 +3579,11 @@ moved. What does *not* carry over automatically: `docs/numbers.md`'s
 answer-latency figures were measured against `v0.1.0-perf` and are not
 re-measured here (no kernel touched, so no material delta is expected, but
 expected is not measured) — regenerating them is left for whoever next runs
-`xtask bench --write` against this tag.
+`xtask bench --write` against this tag. That generator's own provenance
+string (`crates/xtask/src/bench.rs`'s `BenchReport` output, the paragraph
+`docs/numbers.md` opens with) is corrected in this same PR, so the next
+`--write` names `v0.2.0-perf` and this ADR instead of silently repeating
+the `v0.1.0-perf`/bit-identical claims being corrected here.
 
 **Status:** decided 2026-09-02, closing
 `orochi-network/private-eth-getbalance#2`. `v0.2.0-perf` = commit

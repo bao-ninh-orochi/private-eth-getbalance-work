@@ -1529,16 +1529,18 @@ impl BenchReport {
         writeln!(out).unwrap();
         writeln!(
             out,
-            "**IKPIR build (read before reproducing).** The full-rebuild and answer-latency numbers \
-             here are measured against the workspace's pinned IKPIR `perf/optimized` tag \
-             (`v0.1.0-perf` — see the root `Cargo.toml`), with the default-on `parallel` feature \
-             (rayon matvec/GEMM kernels). The tag replaced the `0f3b99b` rev these were originally \
-             measured on; its `crates/` tree is bit-identical to that rev, so the measurements \
-             carry over unchanged. A `--no-default-features` build reports substantially slower, \
-             single-threaded rebuild/answer times (the sizes and delta-byte figures are \
-             unaffected). `xtask bench` prints to stdout by default; pass `--write` to overwrite \
-             this file, and only do so from a build against the pinned tag — bump the pin and \
-             these numbers together, never separately."
+            "**IKPIR build (read before reproducing).** The full-rebuild and answer-latency \
+             numbers here are measured against the workspace's pinned IKPIR `perf/optimized` tag \
+             (`v0.2.0-perf` — see the root `Cargo.toml`), with the default-on `parallel` feature \
+             (rayon matvec/GEMM kernels). `v0.2.0-perf` differs from `v0.1.0-perf` (`0f3b99b`) \
+             only in the SimplePIR error sampler — a true discrete Gaussian `D_σ` in place of a \
+             rounded continuous one (ADR-0046) — plus a version bump; no kernel, hash lineage, or \
+             geometry moved, so these figures are expected to carry over unchanged, but they are \
+             not measured until this generator is next run. A `--no-default-features` build \
+             reports substantially slower, single-threaded rebuild/answer times (the sizes and \
+             delta-byte figures are unaffected). `xtask bench` prints to stdout by default; pass \
+             `--write` to overwrite this file, and only do so from a build against the pinned tag \
+             — bump the pin and these numbers together, never separately."
         )
         .unwrap();
         if let Some(reason) = &self.top_scale_fallback_reason {

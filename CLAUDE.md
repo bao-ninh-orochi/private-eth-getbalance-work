@@ -159,9 +159,17 @@ probe --pir-url <url> --queries-csv <p> --blocks-csv <p>
                               host:port:ip is curl-style DNS override with TLS
                               validation left ON. --no-confirm skips the
                               provider check; exit 3 = a real mismatch.
-                              The address never leaves the machine and never
-                              enters a CSV, log line, or error message — only
-                              `found` and `provider_match`, one bit each.
+                              The PIR server never learns the address, and it
+                              never enters a CSV, log line, or error message —
+                              only `found` / `provider_match` /
+                              `provider_hex_match`, one bit each. The confirm
+                              call is the one exception: it asks the INDEPENDENT
+                              provider about the same address in plaintext,
+                              which is the check itself (--no-confirm skips it).
+                              Budget: t_total = build + head + sync + answer +
+                              setup + finish + residual, residual defined as the
+                              subtraction. Blocks CSV covers every delta fetch,
+                              follow-loop and in-trial alike.
 ```
 
 The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind

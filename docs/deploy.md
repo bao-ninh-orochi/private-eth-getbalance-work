@@ -1063,14 +1063,19 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   trial's decoded balance is compared byte-exactly against `--confirm-url`'s
   `eth_getBalance` **at the same explicit block height**, never
   `"latest"`-vs-`"latest"` (ADR-0007), and a disagreement is loud. Its
-  privacy stance is the same as `client`'s and is not weakened by the
-  measurement: the queried address never leaves the machine, and it never
-  enters a CSV, a log line, or an error message either — the only
-  answer-derived fields are `found` and `provider_match`, one bit each, and
-  every error column is a fixed variant name rather than a message that could
-  quote a provider's body. `--resolve host:port:ip` (curl syntax, TLS
-  validation unchanged) lets the origin be measured while public DNS still
-  points elsewhere. Exit code 3 means the run finished but at least one
+  privacy stance is the same as `client`'s for the query path — the PIR server
+  sees only LWE query vectors — and the address never enters a CSV, a log line,
+  or an error message either; the only answer-derived fields are `found`,
+  `provider_match` and `provider_hex_match`, one bit each, and every error
+  column is a fixed variant name rather than a message that could quote a
+  provider's body. The correctness check is the deliberate exception: it asks
+  `--confirm-url` for `eth_getBalance(address, block)` **in plaintext**, because
+  there is no way to ask an independent operator whether an answer is right
+  without telling it what was asked. That happens after the trial's clock has
+  stopped, goes to a different operator from the one serving the PIR (so neither
+  sees both halves), and `--no-confirm` disables it entirely.
+  `--resolve host:port:ip` (curl syntax, TLS validation unchanged) lets the
+  origin be measured while public DNS still points elsewhere. Exit code 3 means the run finished but at least one
   answer disagreed with the independent provider.
 
 ### Log timestamps and rotation

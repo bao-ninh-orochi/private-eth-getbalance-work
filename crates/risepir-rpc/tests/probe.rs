@@ -152,10 +152,18 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
     );
     assert_eq!(s1.provider_matched, 0);
     assert_eq!(s1.provider_mismatched, 0, "a mismatch is never acceptable");
+    assert_eq!(s1.provider_hex_matched, 0);
+    assert_eq!(s1.provider_hex_diverged, 0);
     assert_eq!(
-        s1.provider_unavailable, 3,
-        "the check was disabled, so every trial is 'unavailable'"
+        s1.provider_failed, 0,
+        "the check was disabled, so no provider call could fail"
     );
+    assert_eq!(
+        s1.provider_skipped, 3,
+        "--no-confirm is 'not asked', which must never be reported as a provider failure"
+    );
+    assert_eq!(s1.trial_errors, 0);
+    assert!(s1.errors_by_class.is_empty());
     assert!(s1.setup_bytes > 0, "the hint download must have been sized");
     assert!(s1.query_bytes_total > 0 && s1.response_bytes_total > 0);
     assert!(s1.max_at_block >= s1.pinned_block);
@@ -203,6 +211,7 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
             + num(r, c, "head_wire_us")
             + num(r, c, "sync_wire_us")
             + num(r, c, "answer_wire_us")
+            + num(r, c, "setup_wire_us")
             + num(r, c, "finish_us")
             + num(r, c, "residual_us");
         assert_eq!(total, parts, "row {i}: A1 must equal its parts + residual");
@@ -235,6 +244,10 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
             "1",
             "row {i}: no re-bootstrap expected"
         );
+        // No re-bootstrap means no `/setup` inside the trial, so its
+        // budget term is exactly zero rather than merely "small".
+        assert_eq!(num(r, c, "setup_wire_us"), 0, "row {i}");
+        assert_eq!(num(r, c, "setup_bytes"), 0, "row {i}");
 
         // (d) found/absent agree with which pass this row came from.
         let absent = field(r, c, "absent_probe");
@@ -248,6 +261,7 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
         // (e) The provider check was off, so both its columns are empty
         //     — never a defaulted 0, which would read as "mismatch".
         assert_eq!(field(r, c, "provider_match"), "");
+        assert_eq!(field(r, c, "provider_hex_match"), "");
         assert_eq!(field(r, c, "provider_error"), "");
 
         // (f) Nothing address- or balance-shaped anywhere in the row.
@@ -303,11 +317,26 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
         );
         assert!(longest_hex_run(&r.join(",")) < 40);
     }
-    assert_eq!(
-        s2.block_rows, 0,
-        "--follow-secs 0 means no follow, so pass 2 adds no block rows"
+    // Pass 2 never followed (`follow_secs: 0`), so every block row it
+    // produced came from a *trial's own* catch-up — exactly the coverage
+    // that used to be missing. Against a 15 ms mock chain a trial is
+    // essentially always behind, so this is the normal case, not a
+    // flaky expectation.
+    assert!(
+        s2.block_rows > 0,
+        "a trial's own catch-up fetches must produce block rows too"
     );
     assert!(s1.block_rows > 0 && s1.blocks_ingested > 0);
+
+    // Complete coverage without double-counting: fetches are disjoint
+    // `(from, to]` ranges, so the block column is strictly increasing
+    // across the whole file, whichever source wrote each row.
+    let mut prev = 0u64;
+    for (i, r) in brows.iter().enumerate() {
+        let b = num(r, BLOCK_COLUMNS, "block");
+        assert!(b > prev, "block row {i}: {b} must advance past {prev}");
+        prev = b;
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -3,29 +3,43 @@
 //! query timed from the client, every trial's answer checked byte-exactly
 //! against an independent provider at the same explicit block height.
 //!
-//! # Privacy stance (the binding rule, restated because this module
-//! writes files)
+//! # Privacy stance — stated precisely, because one call is an exception
 //!
-//! The queried address never leaves this machine, exactly as in
-//! [`crate::front`] — the probe drives the *same*
-//! [`PrivateEth::get_balance`] path, so what crosses the network is
-//! precisely the LWE query bundle the privacy claim covers.
+//! **The PIR server never learns the address.** The probe drives the
+//! *same* [`PrivateEth::get_balance`] path as [`crate::front`], so what
+//! crosses the network to `--pir-url` is precisely the LWE query bundle
+//! the privacy claim covers, and nothing else.
 //!
-//! It also never leaves this *process*. No column of either CSV, no log
-//! line, and no error message this module emits carries an address, a
-//! balance, or anything derived from them, with exactly two deliberate
-//! exceptions — [`TrialRow::found`] (one bit: did the scan match) and
-//! [`TrialRow::provider_match`] (one bit: did an independent provider
-//! agree). Both are answers *about* the answer, not the answer. Error
-//! text is always a fixed variant name from a closed set, never a
-//! formatted message that could quote a body. A tripwire test
+//! **The independent-provider check is different, and deliberately so.**
+//! With `--confirm-url` set, every successful trial asks that provider
+//! `eth_getBalance(addr, block)` **in plaintext** — the address and the
+//! block, in the clear, to a third party. That is not a leak in the
+//! query path; it is the correctness check itself, and there is no way
+//! to ask "is this answer right" of an independent operator without
+//! telling it what was asked. Three consequences worth being explicit
+//! about: it happens *after* the trial's clock has stopped, so it never
+//! enters A1; it is what `--no-confirm` turns off, leaving a run in
+//! which the address genuinely reaches no network peer at all; and it
+//! goes to a *different* operator from the one serving the PIR, so
+//! neither sees both halves.
+//!
+//! **Nothing address- or balance-derived is ever written down.** No
+//! column of either CSV, no log line, and no error message this module
+//! emits carries an address, a balance, or anything derived from them,
+//! with exactly three deliberate exceptions — [`TrialRow::found`] (one
+//! bit: did the scan match), [`TrialRow::provider_match`] and
+//! [`TrialRow::provider_hex_match`] (one bit each: did the independent
+//! provider agree, numerically and byte-for-byte). All three are answers
+//! *about* the answer, not the answer. Error text is always a fixed
+//! variant name from a closed set, never a formatted message that could
+//! quote a body. A tripwire test
 //! (`no_row_can_carry_an_address_or_a_balance`) pins this.
 //!
 //! # The latency budget closes by construction
 //!
 //! ```text
 //! t_total_us = build_us + head_wire_us + sync_wire_us + answer_wire_us
-//!            + finish_us + residual_us
+//!            + setup_wire_us + finish_us + residual_us
 //! ```
 //!
 //! This is arithmetic, not luck. Every term is measured, and
@@ -45,15 +59,23 @@
 //!   is `answer_wire_us − server_handler_ns/1000` whenever the server
 //!   reports its handler time; the two raw numbers are recorded rather
 //!   than the subtraction, so the arithmetic stays visible.
+//! * `setup_wire_us` is `0` on a normal trial and the whole
+//!   re-bootstrap `/setup` (plus any `/mode` fallback) download on a row
+//!   with `attempts = 2`. It is a budget term rather than part of the
+//!   residual precisely because it is enormous when it is nonzero — at
+//!   the complete mainnet set a re-bootstrap is hundreds of megabytes,
+//!   and parking that in "everything else" would make one row's residual
+//!   dwarf the entire campaign's.
 //! * `finish_us` (**A5**) is `RisePirClient::finish`, with
 //!   `rewind_us`/`decode_us`/`delta_apply_us`/`scan_us` the four
 //!   ADR-0003 steps inside it (their sum is slightly under `finish_us`;
 //!   the rest is the argument checks, the re-hash, and the value
 //!   decode).
 //! * `residual_us` is everything else the client did: wire
-//!   encode/decode, the `/sync` ingest, mutex acquisition, and — on the
-//!   rare row with `attempts = 2` — an entire re-bootstrap `/setup`
-//!   download, which is why that column exists to flag such rows.
+//!   encode/decode, the `/sync` ingest, mutex acquisition, and — on a
+//!   trial that had to sync — one O(cells fetched) pass counting the
+//!   delta's cells for the blocks CSV (it must run before the ingest
+//!   consumes the delta, so it cannot be hoisted off the clock).
 //!
 //! Truncation cannot break the identity: each part is floored to
 //! microseconds independently, and `floor(a) + floor(b) ≤ floor(a + b)`,
@@ -91,6 +113,16 @@
 //! 1 are range totals and must not be divided down, since a coalesced
 //! delta telescopes (ADR-0005) and is strictly smaller than the sum of
 //! its parts.
+//!
+//! **Every** fetch gets a row, including the one or two a *trial* issues
+//! from inside [`PrivateEth::get_balance`]'s own catch-up. Those are not
+//! a rounding error: a trial that runs while the server has advanced
+//! syncs exactly the blocks the follow loop would otherwise have picked
+//! up, so counting only follow-loop fetches would leave a hole in the
+//! block series at every batch — precisely where query load is highest.
+//! [`crate::SyncFetch`] is the unit: the session emits one per `GET
+//! /sync` wherever it was issued, so the coverage is complete and
+//! nothing is counted twice.
 //!
 //! # Transient failures
 //!
@@ -289,10 +321,25 @@ pub struct TrialRow {
     pub sync_wire_us: u64,
     /// `POST /answer` wire time: before send → last body byte.
     pub answer_wire_us: u64,
+    /// The re-bootstrap `GET /setup` (plus any `/mode` fallback) wire
+    /// time. `0` on every normal trial; the whole download on a row
+    /// with `attempts = 2`. A budget term in its own right — see the
+    /// module docs for why it must not hide in the residual.
+    pub setup_wire_us: u64,
+    /// Bytes of that re-bootstrap `/setup` body. `0` on a normal trial.
+    pub setup_bytes: u64,
     /// **A5**: `finish` (rewind + decode + delta apply + scan).
     pub finish_us: u64,
     /// `t_total_us` minus every term above. Client-side bookkeeping no
     /// timer covers — written explicitly, never distributed.
+    ///
+    /// It is mostly the wire codec's encode/decode and the mutex
+    /// acquisition. On a trial that had to sync it also carries the
+    /// `/sync` ingest and one O(cells fetched) pass counting the
+    /// delta's cells for the blocks CSV; that count has to run before
+    /// the ingest consumes the delta, so it cannot be hoisted off the
+    /// clock, and a syncing trial's residual is correspondingly larger
+    /// than a caught-up one's.
     pub residual_us: u64,
     /// **A5** step 2: `rewind_response`, summed over segments.
     pub rewind_us: u64,
@@ -329,10 +376,25 @@ pub struct TrialRow {
     /// Whether the scan matched. Empty when the trial errored.
     pub found: Option<bool>,
     /// `1` when the independent provider's `eth_getBalance(addr,
-    /// at_block)` equalled the decoded balance byte-exactly (canonical
-    /// hex string **and** integer value), `0` when it did not, empty
-    /// when the check did not run or the provider call failed.
+    /// at_block)` equalled the decoded balance **numerically**, `0` when
+    /// it did not, empty when the check did not run or the provider call
+    /// failed.
     pub provider_match: Option<bool>,
+    /// `1` when the provider's **raw, untouched** `result` string is
+    /// byte-identical to `format!("0x{balance:x}")` — the exact string
+    /// [`crate::rpc`]'s `eth_getBalance` would have returned for this
+    /// answer.
+    ///
+    /// Strictly stronger than [`Self::provider_match`], and separate
+    /// from it on purpose. The numeric check parses the provider's hex
+    /// first, which normalises case and leading zeros away, so it can
+    /// only ever compare the *number*. This one compares the bytes a
+    /// caller would actually receive, which is what "byte-exactly
+    /// substitutable for a public RPC" has to mean. A row where the two
+    /// disagree is not a wrong balance — it is a provider that renders
+    /// the same quantity differently, worth knowing and worth not
+    /// silently folding into a match count.
+    pub provider_hex_match: Option<bool>,
     /// A short class name for why the provider call failed. Never a
     /// body, never a message.
     pub provider_error: Option<&'static str>,
@@ -362,6 +424,7 @@ pub const TRIAL_COLUMNS: &[&str] = &[
     "head_wire_us",
     "sync_wire_us",
     "answer_wire_us",
+    "setup_wire_us",
     "finish_us",
     "residual_us",
     "rewind_us",
@@ -373,12 +436,14 @@ pub const TRIAL_COLUMNS: &[&str] = &[
     "query_bytes",
     "response_bytes",
     "response_content_length",
+    "setup_bytes",
     "at_block",
     "pinned_block",
     "stale_blocks",
     "delta_cells",
     "found",
     "provider_match",
+    "provider_hex_match",
     "provider_error",
     "provider_rtt_us",
     "client_rss_bytes",
@@ -422,6 +487,7 @@ impl TrialRow {
             self.head_wire_us.to_string(),
             self.sync_wire_us.to_string(),
             self.answer_wire_us.to_string(),
+            self.setup_wire_us.to_string(),
             self.finish_us.to_string(),
             self.residual_us.to_string(),
             self.rewind_us.to_string(),
@@ -433,12 +499,14 @@ impl TrialRow {
             self.query_bytes.to_string(),
             self.response_bytes.to_string(),
             opt(self.response_content_length),
+            self.setup_bytes.to_string(),
             self.at_block.to_string(),
             self.pinned_block.to_string(),
             self.stale_blocks.to_string(),
             self.delta_cells.to_string(),
             optb(self.found).to_string(),
             optb(self.provider_match).to_string(),
+            optb(self.provider_hex_match).to_string(),
             self.provider_error.unwrap_or("").to_string(),
             opt(self.provider_rtt_us),
             opt(self.client_rss_bytes),
@@ -449,8 +517,8 @@ impl TrialRow {
         f.join(",")
     }
 
-    /// Whether this row's latency budget closes exactly:
-    /// `t_total_us == build + head + sync + answer + finish + residual`.
+    /// Whether this row's latency budget closes exactly: `t_total_us ==
+    /// build + head + sync + answer + setup + finish + residual`.
     ///
     /// True by construction for every row [`run`] writes — [`run`]
     /// *defines* `residual_us` as the subtraction. Exposed so a test can
@@ -461,6 +529,7 @@ impl TrialRow {
             + self.head_wire_us
             + self.sync_wire_us
             + self.answer_wire_us
+            + self.setup_wire_us
             + self.finish_us
             + self.residual_us;
         parts == self.t_total_us
@@ -478,6 +547,7 @@ impl TrialRow {
             + self.head_wire_us
             + self.sync_wire_us
             + self.answer_wire_us
+            + self.setup_wire_us
             + self.finish_us;
         self.residual_us = self.t_total_us.saturating_sub(parts);
     }
@@ -515,6 +585,26 @@ pub struct BlockRow {
     pub blocks_in_fetch: u64,
 }
 
+impl From<&crate::SyncFetch> for BlockRow {
+    /// One row per delta fetch, whoever issued it — the follow loop or a
+    /// trial's own catch-up. Having exactly one constructor is what
+    /// guarantees the two sources cannot drift into reporting different
+    /// things under the same column names.
+    fn from(f: &crate::SyncFetch) -> Self {
+        Self {
+            block: f.to_block,
+            received_at_unix_ms: f.received_at_unix_ms,
+            wire_bytes: f.wire_bytes,
+            decode_us: us(f.decode),
+            ingest_us: us(f.ingest),
+            cells_in_block: f.cells_in_delta as u64,
+            delta_cells_total: f.delta_cells_total as u64,
+            fetch_wire_us: us(f.wire),
+            blocks_in_fetch: f.blocks,
+        }
+    }
+}
+
 /// The blocks CSV header, in the order [`BlockRow::to_csv`] writes.
 pub const BLOCK_COLUMNS: &[&str] = &[
     "block",
@@ -547,6 +637,24 @@ impl BlockRow {
         debug_assert_eq!(f.len(), BLOCK_COLUMNS.len());
         f.join(",")
     }
+}
+
+/// Write one delta fetch's row and fold it into the running totals.
+///
+/// Every fetch the session performs goes through here exactly once, from
+/// either source, which is what makes the blocks series complete without
+/// double-counting.
+fn write_fetch(
+    fetch: &crate::SyncFetch,
+    blocks_csv: &mut CsvWriter,
+    acc: &mut Accumulators,
+) -> std::io::Result<()> {
+    let row = BlockRow::from(fetch);
+    acc.ingest_us.push(row.ingest_us);
+    acc.delta_wire_bytes.push(row.wire_bytes);
+    acc.blocks_ingested += row.blocks_in_fetch;
+    acc.block_rows += 1;
+    blocks_csv.write_row(&row.to_csv())
 }
 
 // ─── CSV sink ───────────────────────────────────────────────────────────
@@ -893,12 +1001,34 @@ pub struct ProbeSummary {
     pub found: usize,
     /// Trials that queried a random address.
     pub absent_probes: usize,
-    /// Provider comparisons that matched byte-exactly.
+    /// Trials that failed (an `error` column was written).
+    pub trial_errors: usize,
+    /// One `(class, count)` per distinct trial-error class seen, so a
+    /// campaign can tell "the server was briefly unreachable" from "the
+    /// deployment is partial and these accounts are untracked" without
+    /// re-reading the CSV.
+    pub errors_by_class: Vec<(&'static str, usize)>,
+    /// Provider comparisons that agreed **numerically**.
     pub provider_matched: usize,
-    /// Provider comparisons that disagreed — every one is loud.
+    /// Provider comparisons that disagreed numerically — every one is
+    /// loud, and every one is a correctness defect.
     pub provider_mismatched: usize,
-    /// Trials with no usable provider answer.
-    pub provider_unavailable: usize,
+    /// Provider comparisons whose **raw hex string** was byte-identical
+    /// to what this service's own `eth_getBalance` would return.
+    pub provider_hex_matched: usize,
+    /// Comparisons where the quantities agreed but the rendered strings
+    /// did not. Not a wrong answer; a claim about drop-in
+    /// substitutability that would be false.
+    pub provider_hex_diverged: usize,
+    /// Trials where the check ran but the *provider* failed to answer
+    /// (timeout, archive-depth refusal, a malformed result).
+    pub provider_failed: usize,
+    /// Trials where the check never ran at all: `--no-confirm`, or the
+    /// trial itself errored before there was anything to compare.
+    /// Deliberately separate from [`Self::provider_failed`] — "we did
+    /// not ask" and "we asked and got nothing" are different facts, and
+    /// merging them makes a disabled check look like a flaky provider.
+    pub provider_skipped: usize,
     /// Total `/answer` request bytes over the run.
     pub query_bytes_total: u64,
     /// Total `/answer` response bytes over the run.
@@ -986,14 +1116,14 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
     let (bundle, header_mode) = pir
         .setup_with_mode()
         .await
-        .map_err(|e| ProbeError::Bootstrap(format!("GET /setup: {e}")))?;
+        .map_err(|e| ProbeError::Bootstrap(format!("GET /setup: {}", short(e))))?;
     let setup_net = sink.take();
     let complete = match header_mode {
         Some(m) => m,
         None => pir
             .mode()
             .await
-            .map_err(|e| ProbeError::Bootstrap(format!("GET /mode: {e}")))?,
+            .map_err(|e| ProbeError::Bootstrap(format!("GET /mode: {}", short(e))))?,
     };
     let pinned_block = bundle.block;
 
@@ -1052,7 +1182,7 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
         }
         // Follow head until this batch is due, so the session is at the
         // operating point a real long-lived client would be at.
-        follow_until(&session, &sink, batch_at, &cfg, &mut blocks_csv, &mut acc).await?;
+        follow_until(&session, batch_at, &cfg, &mut blocks_csv, &mut acc).await?;
 
         let pool: Vec<[u8; 20]> = match &fixed {
             Some(v) => v.clone(),
@@ -1090,7 +1220,7 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
             };
             let sample_rss = cfg.rss_every > 0 && trial_index.is_multiple_of(cfg.rss_every);
 
-            let row = one_trial(
+            let (row, fetches) = one_trial(
                 &session,
                 &sink,
                 confirm.as_ref(),
@@ -1102,6 +1232,11 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
             )
             .await?;
 
+            // The trial's own catch-up fetches, written with the same
+            // columns and the same accounting as the follow loop's.
+            for f in &fetches {
+                write_fetch(f, &mut blocks_csv, &mut acc)?;
+            }
             record(&mut summary, &mut acc, &row);
             trials_csv.write_row(&row.to_csv())?;
             trial_index += 1;
@@ -1113,7 +1248,7 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
     }
 
     // Tail: keep following until the configured lifetime is up.
-    follow_until(&session, &sink, deadline, &cfg, &mut blocks_csv, &mut acc).await?;
+    follow_until(&session, deadline, &cfg, &mut blocks_csv, &mut acc).await?;
 
     summary.trials = trial_index;
     if summary.min_at_block == u64::MAX {
@@ -1131,7 +1266,6 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
 /// next query's own catch-up will re-bootstrap if it must.
 async fn follow_until(
     session: &PrivateEth,
-    sink: &NetSink,
     until: Instant,
     cfg: &ProbeConfig,
     blocks_csv: &mut CsvWriter,
@@ -1139,27 +1273,11 @@ async fn follow_until(
 ) -> Result<(), ProbeError> {
     let poll = Duration::from_secs(cfg.poll_secs.max(1));
     while Instant::now() < until {
-        sink.reset();
         match session.follow_once().await {
-            Ok(Some(t)) => {
-                let net = sink.take();
-                let row = BlockRow {
-                    block: t.to_block,
-                    received_at_unix_ms: unix_ms(),
-                    wire_bytes: net.sync.response_bytes,
-                    decode_us: net.sync.decode_ns / 1_000,
-                    ingest_us: u64::try_from(t.ingest.as_micros()).unwrap_or(u64::MAX),
-                    cells_in_block: t.cells_in_delta as u64,
-                    delta_cells_total: t.delta_cells_total as u64,
-                    fetch_wire_us: net.sync.wire_ns / 1_000,
-                    blocks_in_fetch: t.blocks,
-                };
-                acc.ingest_us.push(row.ingest_us);
-                acc.delta_wire_bytes.push(row.wire_bytes);
-                acc.blocks_ingested += row.blocks_in_fetch;
-                acc.block_rows += 1;
-                blocks_csv.write_row(&row.to_csv())?;
-            }
+            // The fetch carries its own wire/decode/byte attribution
+            // (`SyncFetch`), so this path and the in-trial one build the
+            // identical row from the identical numbers.
+            Ok(Some(fetch)) => write_fetch(&fetch, blocks_csv, acc)?,
             Ok(None) => {}
             Err(e) => logln!(
                 "risepir-rpc probe: follow step failed ({}); continuing",
@@ -1187,7 +1305,7 @@ async fn one_trial(
     trial: usize,
     absent: bool,
     sample_rss: bool,
-) -> Result<TrialRow, ProbeError> {
+) -> Result<(TrialRow, Vec<crate::SyncFetch>), ProbeError> {
     let mut timings = crate::private_eth::BalanceTimings::default();
 
     // ── A1 starts here ────────────────────────────────────────────────
@@ -1209,6 +1327,12 @@ async fn one_trial(
         head_wire_us: net.head.wire_ns / 1_000,
         sync_wire_us: net.sync.wire_ns / 1_000,
         answer_wire_us: net.answer.wire_ns / 1_000,
+        // Zero on a normal trial; a whole re-bootstrap download on a
+        // row with `attempts = 2` (`/mode` folded in, since it is the
+        // same recovery). Never left to the residual — see the module
+        // docs.
+        setup_wire_us: (net.setup.wire_ns + net.mode.wire_ns) / 1_000,
+        setup_bytes: net.setup.response_bytes,
         finish_us: us(timings.finish),
         rewind_us: us(timings.finish_parts.rewind),
         decode_us: us(timings.finish_parts.decode),
@@ -1228,6 +1352,11 @@ async fn one_trial(
         ..TrialRow::default()
     };
     row.close_budget();
+    // Handed back so the caller writes one blocks-CSV row per fetch: a
+    // trial's own catch-up syncs the very blocks the follow loop would
+    // otherwise have picked up, so dropping them would leave a hole in
+    // the block series exactly where query load is highest.
+    let fetches = timings.sync.clone();
 
     let balance = match outcome {
         Ok(b) => {
@@ -1243,7 +1372,7 @@ async fn one_trial(
                 });
             }
             row.error = Some(rpc_error_class(&e));
-            return Ok(row);
+            return Ok((row, fetches));
         }
     };
 
@@ -1254,21 +1383,41 @@ async fn one_trial(
     // report a mismatch that is not one.
     if let Some(rpc) = confirm {
         let t = Instant::now();
-        let got = rpc.balance_at(&addr, row.at_block).await;
+        let got = rpc.balance_at_raw(&addr, row.at_block).await;
         row.provider_rtt_us = Some(u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX));
         match got {
-            Ok(theirs) => {
-                // Both halves, deliberately: the integers must agree AND
-                // their canonical `0x`-hex renderings must be the same
-                // string, which is what "byte-exact" means for a value
-                // that crosses the wire as hex.
-                let same = theirs == balance && format!("{theirs:x}") == format!("{balance:x}");
-                row.provider_match = Some(same);
-                if !same {
+            Ok((theirs, raw)) => {
+                // Two independent questions, kept apart on purpose.
+                //
+                // The numeric one: do the quantities agree? Comparing
+                // the parsed values is the whole of it — re-rendering
+                // both sides to hex and comparing *those* strings could
+                // never fail once the integers matched, so it would be
+                // theatre, not evidence.
+                row.provider_match = Some(theirs == balance);
+                // The byte one: is the provider's raw `result` — as it
+                // arrived, unparsed and un-normalised — the same string
+                // this service's own `eth_getBalance` would have
+                // returned? That is what "byte-exactly substitutable"
+                // has to mean, and parsing destroys the evidence for it
+                // (case and leading zeros normalise away), which is why
+                // the raw string is carried out of the client.
+                row.provider_hex_match = Some(hex_matches(&raw, balance));
+                if row.provider_match == Some(false) {
                     // Loud, and still address-free and balance-free.
                     logln!(
                         "risepir-rpc probe: MISMATCH trial {trial} block {} \
                          (decoded balance disagrees with the independent provider)",
+                        row.at_block
+                    );
+                } else if row.provider_hex_match == Some(false) {
+                    // Not a wrong answer — the same quantity, rendered
+                    // differently — but it means this service is not a
+                    // byte-for-byte drop-in for that provider, which is
+                    // a claim worth not making by accident.
+                    logln!(
+                        "risepir-rpc probe: HEX-FORM DIFFERS trial {trial} block {} \
+                         (same quantity, different canonical rendering)",
                         row.at_block
                     );
                 }
@@ -1277,7 +1426,7 @@ async fn one_trial(
         }
     }
 
-    Ok(row)
+    Ok((row, fetches))
 }
 
 /// Per-column samples for the end-of-run distributions.
@@ -1288,6 +1437,7 @@ struct Accumulators {
     head_wire_us: Vec<u64>,
     sync_wire_us: Vec<u64>,
     answer_wire_us: Vec<u64>,
+    setup_wire_us: Vec<u64>,
     finish_us: Vec<u64>,
     residual_us: Vec<u64>,
     rewind_us: Vec<u64>,
@@ -1314,7 +1464,15 @@ fn record(summary: &mut ProbeSummary, acc: &mut Accumulators, row: &TrialRow) {
     match row.provider_match {
         Some(true) => summary.provider_matched += 1,
         Some(false) => summary.provider_mismatched += 1,
-        None => summary.provider_unavailable += 1,
+        None if row.provider_error.is_some() => summary.provider_failed += 1,
+        None => summary.provider_skipped += 1,
+    }
+    match row.provider_hex_match {
+        Some(true) => summary.provider_hex_matched += 1,
+        // Only counted as a divergence when the numbers *did* agree —
+        // otherwise it is just the numeric mismatch reported twice.
+        Some(false) if row.provider_match == Some(true) => summary.provider_hex_diverged += 1,
+        _ => {}
     }
     if let Some(rtt) = row.provider_rtt_us {
         acc.provider_rtt_us.push(rtt);
@@ -1323,7 +1481,16 @@ fn record(summary: &mut ProbeSummary, acc: &mut Accumulators, row: &TrialRow) {
         acc.rss_bytes.push(rss);
         summary.last_rss_bytes = Some(rss);
     }
-    if row.error.is_some() {
+    if let Some(class) = row.error {
+        summary.trial_errors += 1;
+        match summary
+            .errors_by_class
+            .iter_mut()
+            .find(|(c, _)| *c == class)
+        {
+            Some((_, n)) => *n += 1,
+            None => summary.errors_by_class.push((class, 1)),
+        }
         return;
     }
     summary.ok += 1;
@@ -1340,6 +1507,7 @@ fn record(summary: &mut ProbeSummary, acc: &mut Accumulators, row: &TrialRow) {
     acc.head_wire_us.push(row.head_wire_us);
     acc.sync_wire_us.push(row.sync_wire_us);
     acc.answer_wire_us.push(row.answer_wire_us);
+    acc.setup_wire_us.push(row.setup_wire_us);
     acc.finish_us.push(row.finish_us);
     acc.residual_us.push(row.residual_us);
     acc.rewind_us.push(row.rewind_us);
@@ -1387,6 +1555,7 @@ fn distributions(mut acc: Accumulators) -> NamedDists {
         ("head_wire_us", Dist::of(&mut acc.head_wire_us)),
         ("sync_wire_us", Dist::of(&mut acc.sync_wire_us)),
         ("answer_wire_us", Dist::of(&mut acc.answer_wire_us)),
+        ("setup_wire_us", Dist::of(&mut acc.setup_wire_us)),
         ("finish_us   (A5)", Dist::of(&mut acc.finish_us)),
         ("  rewind_us", Dist::of(&mut acc.rewind_us)),
         ("  decode_us", Dist::of(&mut acc.decode_us)),
@@ -1410,16 +1579,35 @@ fn distributions(mut acc: Accumulators) -> NamedDists {
 pub fn print_summary(s: &ProbeSummary) {
     println!();
     println!("RisePIR client probe — summary");
-    println!("  trials              {} ({} ok)", s.trials, s.ok);
+    println!(
+        "  trials              {} ({} ok, {} errored)",
+        s.trials, s.ok, s.trial_errors
+    );
     println!(
         "  found / not-found   {} / {}   (absent probes: {})",
         s.found,
         s.ok.saturating_sub(s.found),
         s.absent_probes
     );
+    if !s.errors_by_class.is_empty() {
+        let by_class: Vec<String> = s
+            .errors_by_class
+            .iter()
+            .map(|(c, n)| format!("{c} x{n}"))
+            .collect();
+        println!("  trial errors        {}", by_class.join(" · "));
+    }
     println!(
-        "  provider            {} matched / {} MISMATCHED / {} unavailable",
-        s.provider_matched, s.provider_mismatched, s.provider_unavailable
+        "  provider (numeric)  {} matched / {} MISMATCHED",
+        s.provider_matched, s.provider_mismatched
+    );
+    println!(
+        "  provider (raw hex)  {} byte-identical / {} same value, different rendering",
+        s.provider_hex_matched, s.provider_hex_diverged
+    );
+    println!(
+        "  provider not asked  {} provider failed / {} skipped (--no-confirm or trial errored)",
+        s.provider_failed, s.provider_skipped
     );
     println!(
         "  blocks              pinned {} · answered {}..{} · {} fetches covering {} blocks",
@@ -1464,7 +1652,50 @@ pub fn print_summary(s: &ProbeSummary) {
             s.provider_mismatched
         );
     }
+    if s.provider_hex_diverged > 0 {
+        println!();
+        println!(
+            "  *** {} row(s) where the value matched but the raw hex string did not — \
+             every balance was correct, but this service is NOT a byte-for-byte \
+             drop-in for that provider's rendering ***",
+            s.provider_hex_diverged
+        );
+    }
     println!();
+}
+
+/// Is the provider's **raw** `result` string byte-identical to the
+/// string this service's own `eth_getBalance` would return for
+/// `balance`?
+///
+/// `format!("0x{balance:x}")` is copied from [`crate::rpc`]'s
+/// `eth_get_balance` deliberately, not approximated: Ethereum's quantity
+/// encoding is minimal-digits, no leading zeros, lowercase, and `"0x0"`
+/// for zero, which is exactly what `{:x}` on a `u128` produces. `raw` is
+/// compared unparsed, because parsing is what would normalise the very
+/// differences this check exists to find.
+fn hex_matches(raw: &str, balance: u128) -> bool {
+    raw == format!("0x{balance:x}")
+}
+
+/// A server-supplied error rendered for a fatal probe message, capped.
+///
+/// `risepir_http::ClientError::Status`'s `Display` embeds the server's
+/// own response body, which is attacker-influenced, arbitrarily long,
+/// and of no diagnostic value past the first line or two. Capped on a
+/// character boundary so a multi-byte sequence is never split.
+fn short(e: impl std::fmt::Display) -> String {
+    const MAX: usize = 200;
+    let mut text = e.to_string();
+    if text.len() > MAX {
+        let cut = (0..=MAX)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
+        text.truncate(cut);
+        text.push_str("... (truncated)");
+    }
+    text
 }
 
 /// Milliseconds since the Unix epoch, `0` if the clock is before it.
@@ -1487,11 +1718,11 @@ mod tests {
     /// added, removed, or reordered fails the suite rather than silently
     /// shifting every downstream parser by one field.
     const EXPECTED_TRIAL_HEADER: &str = "batch,trial,started_at_unix_ms,absent_probe,\
-t_total_us,build_us,head_wire_us,sync_wire_us,answer_wire_us,finish_us,residual_us,\
-rewind_us,decode_us,delta_apply_us,scan_us,server_compute_ns,server_handler_ns,\
-query_bytes,response_bytes,response_content_length,at_block,pinned_block,stale_blocks,\
-delta_cells,found,provider_match,provider_error,provider_rtt_us,client_rss_bytes,\
-attempts,error";
+t_total_us,build_us,head_wire_us,sync_wire_us,answer_wire_us,setup_wire_us,finish_us,\
+residual_us,rewind_us,decode_us,delta_apply_us,scan_us,server_compute_ns,\
+server_handler_ns,query_bytes,response_bytes,response_content_length,setup_bytes,\
+at_block,pinned_block,stale_blocks,delta_cells,found,provider_match,provider_hex_match,\
+provider_error,provider_rtt_us,client_rss_bytes,attempts,error";
 
     const EXPECTED_BLOCK_HEADER: &str = "block,received_at_unix_ms,wire_bytes,decode_us,\
 ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
@@ -1507,6 +1738,8 @@ ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
             head_wire_us: 4_000,
             sync_wire_us: 0,
             answer_wire_us: 900_000,
+            setup_wire_us: 0,
+            setup_bytes: 0,
             finish_us: 60_000,
             rewind_us: 20_000,
             decode_us: 25_000,
@@ -1523,6 +1756,7 @@ ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
             delta_cells: 220_400,
             found: Some(true),
             provider_match: Some(true),
+            provider_hex_match: Some(true),
             provider_error: None,
             provider_rtt_us: Some(88_000),
             client_rss_bytes: Some(1_190_000_000),
@@ -1545,9 +1779,10 @@ ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
                 + row.head_wire_us
                 + row.sync_wire_us
                 + row.answer_wire_us
+                + row.setup_wire_us
                 + row.finish_us
                 + row.residual_us,
-            "A1 must equal A2 + all wire + A5 + residual, by construction"
+            "A1 must equal A2 + all wire (setup included) + A5 + residual, by construction"
         );
         assert!(row.budget_closes());
         // The residual really is the leftover, not a fudge factor.
@@ -1555,6 +1790,34 @@ ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
             row.residual_us,
             1_000_000 - (12_345 + 4_000 + 900_000 + 60_000)
         );
+    }
+
+    #[test]
+    fn a_rebootstrap_row_charges_setup_to_its_own_term_not_the_residual() {
+        // What an `attempts = 2` row looks like: the retry paid a full
+        // `/setup` download, which must appear as `setup_wire_us` rather
+        // than swelling the residual past every other row in the run.
+        let mut row = TrialRow {
+            t_total_us: 9_000_000,
+            build_us: 12_000,
+            head_wire_us: 4_000,
+            sync_wire_us: 1_000,
+            answer_wire_us: 900_000,
+            setup_wire_us: 8_000_000,
+            setup_bytes: 553_819_345,
+            finish_us: 60_000,
+            attempts: 2,
+            ..TrialRow::default()
+        };
+        row.close_budget();
+        assert!(row.budget_closes());
+        assert_eq!(
+            row.residual_us,
+            9_000_000 - (12_000 + 4_000 + 1_000 + 900_000 + 8_000_000 + 60_000)
+        );
+        // Without the dedicated term the residual would have been the
+        // whole download — larger than every other row's total.
+        assert!(row.residual_us < row.setup_wire_us);
     }
 
     #[test]
@@ -1613,8 +1876,11 @@ ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
         assert_eq!(f[idx("server_compute_ns")], "");
         assert_eq!(f[idx("found")], "");
         assert_eq!(f[idx("provider_match")], "");
+        assert_eq!(f[idx("provider_hex_match")], "");
         assert_eq!(f[idx("provider_error")], "DepthRefused");
         assert_eq!(f[idx("attempts")], "0");
+        assert_eq!(f[idx("setup_wire_us")], "0");
+        assert_eq!(f[idx("setup_bytes")], "0");
     }
 
     #[test]
@@ -1845,6 +2111,47 @@ ingest_us,cells_in_block,delta_cells_total,fetch_wire_us,blocks_in_fetch";
         assert!(err.contains("line 1"), "{err}");
         assert!(!err.contains("nope"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hex_match_is_strictly_stronger_than_the_numeric_one() {
+        const ONE_ETH: u128 = 1_000_000_000_000_000_000;
+        // The exact string `crate::rpc`'s eth_getBalance returns.
+        assert!(hex_matches("0xde0b6b3a7640000", ONE_ETH));
+        // Same *number*, three renderings a provider might legitimately
+        // send — each of which parses to an equal `u128`, so the numeric
+        // check would pass while this one correctly does not.
+        assert!(!hex_matches("0x0de0b6b3a7640000", ONE_ETH));
+        assert!(!hex_matches("0xDE0B6B3A7640000", ONE_ETH));
+        assert!(!hex_matches("de0b6b3a7640000", ONE_ETH));
+        // Zero is "0x0", never "0x" or "0x00".
+        assert!(hex_matches("0x0", 0));
+        assert!(!hex_matches("0x00", 0));
+        assert!(!hex_matches("0x", 0));
+        // A genuinely different quantity fails both checks.
+        assert!(!hex_matches("0xde0b6b3a7640001", ONE_ETH));
+    }
+
+    #[test]
+    fn a_server_error_body_is_capped_before_it_reaches_a_message() {
+        // A hostile or merely verbose server can put megabytes in an
+        // error body; `ClientError::Status`'s Display embeds it.
+        let huge = risepir_http::ClientError::Status {
+            status: 500,
+            body: "A".repeat(10_000),
+        };
+        let text = short(huge);
+        assert!(text.len() < 260, "capped, got {} bytes", text.len());
+        assert!(text.ends_with("... (truncated)"));
+        // Short messages pass through untouched.
+        let small = risepir_http::ClientError::Wire("bad magic".to_string());
+        assert_eq!(short(small), "wire decode error: bad magic");
+        // Multi-byte characters are never split.
+        let wide = risepir_http::ClientError::Status {
+            status: 500,
+            body: "\u{00e9}".repeat(5_000),
+        };
+        assert!(short(wide).is_char_boundary(0));
     }
 
     #[test]

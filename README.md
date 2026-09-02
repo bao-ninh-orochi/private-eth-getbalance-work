@@ -41,9 +41,11 @@ server's own reported answer time / decode's four rewind steps / an explicit
 residual (the budget closes by construction, never by distributing a
 remainder), bytes each way, per-block delta cost, hint size, and client RSS —
 with every decoded balance checked byte-exactly against an independent
-provider at the *same explicit block height*. Measuring changes nothing about
-the privacy claim: the address never leaves the machine, and it never reaches
-a CSV, a log line, or an error message either.
+provider at the *same explicit block height*. The PIR server still never learns
+the address, and it never reaches a CSV, a log line, or an error message; the
+one exception is the correctness check itself, which necessarily asks that
+independent provider about the same address in plaintext (after the trial's
+clock has stopped) — `--no-confirm` turns it off.
 A **browser front end** (`--web web`) runs that same rewind client as
 WebAssembly *in the page*, so the address never leaves the browser either: a
 real mainnet balance was fetched this way and confirmed byte-exact against an

@@ -271,10 +271,23 @@ async fn run_probe(cfg: ProbeConfig) {
         cfg.batches, cfg.batch_size, cfg.batch_interval_secs, cfg.trial_gap_ms, cfg.follow_secs
     );
     println!();
+    println!("The PIR server NEVER learns the queried address: it sees only LWE query vectors,");
+    println!("exactly as in `client` mode.");
+    if cfg.no_confirm {
+        println!("--no-confirm is set, so the address reaches no network peer at all in any form.");
+    } else {
+        println!("The independent check is the one exception, and it is the point of the check:");
+        println!(
+            "each successful trial asks {} for eth_getBalance(address, block) in PLAINTEXT,",
+            cfg.confirm_url
+        );
+        println!("after the trial's clock has stopped. That operator is deliberately a different");
+        println!("one from the PIR server, so neither sees both halves. --no-confirm disables it.");
+    }
     println!(
-        "The queried address NEVER leaves this machine, and never enters either CSV \
-         (only `found` / `provider_match`, one bit each)."
+        "Neither CSV ever records the address or the balance — only `found`, `provider_match`"
     );
+    println!("and `provider_hex_match`, one bit each.");
     println!();
 
     let mismatches = match probe::run(cfg).await {

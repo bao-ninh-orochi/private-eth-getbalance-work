@@ -372,6 +372,15 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
         self.hints.iter().map(|h| B::hint_byte_size(h) as u64).sum()
     }
 
+    /// Every segment's `ServerParams`, borrowed — length equals
+    /// `params().arity()`. Cheap (a slice borrow, no clone): unlike
+    /// [`Self::setup`], which clones every hint *and* every params entry
+    /// just to answer questions that only need the params half (e.g.
+    /// `time-setup`'s `lwe_dim` field), this touches nothing hint-sized.
+    pub fn backend_params(&self) -> &[B::ServerParams] {
+        &self.backend_params
+    }
+
     /// Discards buffered mutations and returns `err` — the single exit
     /// path every [`Self::apply_block`] failure funnels through. See
     /// [`Self::apply_block`]'s documentation for exactly what this does
@@ -564,9 +573,16 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// it does everything documented above, plus classifies every change
     /// and credit into a [`BlockApplyReport`] and times the three stages
     /// (store mutation, fold, hint patch) with [`Instant`]. This method is
-    /// a thin wrapper that discards the report, kept byte-for-byte
-    /// behavior-identical to before that method existed, for the many
-    /// existing callers that only ever wanted the [`BlockDelta`].
+    /// a thin wrapper that discards the report. Its *outputs* are
+    /// unchanged from before that method existed — same [`BlockDelta`],
+    /// same `Result`/error conditions for every input, same store/hint
+    /// mutations — but its *internal cost* is not byte-for-byte identical:
+    /// every call now also increments the classification counters and
+    /// sums `touched_cells` inside the timed region, and builds (then
+    /// discards) one [`BlockApplyReport`]. That extra work is real, if
+    /// negligible next to the store/fold/patch stages it rides alongside
+    /// — see [`Self::apply_block_reporting`]'s own docs for exactly what
+    /// it costs.
     pub fn apply_block(&mut self, update: &BlockUpdate) -> Result<BlockDelta, ServerError> {
         self.apply_block_reporting(update)
             .map(|(delta, _report)| delta)

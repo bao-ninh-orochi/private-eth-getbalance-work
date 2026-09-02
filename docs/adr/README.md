@@ -3660,6 +3660,18 @@ the lookahead fails the ordering/concurrency and held-blocks tests;
 removing the head clip fails the head-bound test; forcing `depth >= 2`
 fails the `k = 1` equivalence test.
 
+**Measured against real mainnet** (`docs/deploy.md` §5.10, 2026-09-02):
+one saved `--partial` state file replayed four times over the same
+85-block gap — **0.69 / 0.75 blocks/s at `--prefetch 1`** against
+**1.29 / 1.39 at `--prefetch 8`**, ≈**1.86×**, with the order reversed
+between the pairs so a warmed provider cache cannot explain it. Not 8×:
+the endpoint's own concurrency limit and per-call latency are what the
+window runs into. And the part that matters more — the three runs that
+stopped at the same block produced **byte-identical** state files
+(`sha256 0b550ff4…`, 116,526,275 B), one sequential and two 8-deep
+concurrent. Same cells, same encoded hints; the lookahead moved when the
+fetches were issued and nothing else.
+
 **Cost accepted:** up to `k` blocks' raw JSON responses in memory at once,
 and up to `k` concurrent connections to a keyless provider that may rate-
 limit — which is why the flag is opt-in, capped, and documented as a
@@ -3668,7 +3680,8 @@ catch-up tool rather than a permanent setting. While caught up,
 degenerates to 0–1 and `--prefetch 8` behaves like `--prefetch 1`.
 
 **Status:** decided 2026-09-03, closing
-`orochi-network/private-eth-getbalance#5`. Not yet exercised against a
-real multi-thousand-block replay — the measured claim above is the
-*problem*, not the fix; the speedup is stated as an expectation until a
-live catch-up run records it in `docs/deploy.md` §5.
+`orochi-network/private-eth-getbalance#5`. The live measurement above is a
+laptop `--partial` replay of 85 blocks; the complete-set box has not run a
+multi-thousand-block catch-up under this flag yet, so treat 1.86× as the
+shape of the effect, not as the number to quote for a 52,000-block
+replay.

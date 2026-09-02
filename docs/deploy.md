@@ -2314,6 +2314,38 @@ verification round — start, both certificate issuances, both gates, the CLI
 client, the DuckDNS fix, and the stop — cost roughly **$0.66**, against the
 ~$7 a full catch-up alone would have added.
 
+### 5.10 `--prefetch` measured against real mainnet (2026-09-02)
+
+The ADR-0047 lookahead, exercised on a laptop against the real feed rather
+than a mock. A `--partial` deployment (`--partial-capacity 500000`)
+bootstrapped at finalized **25,891,222**, followed to **25,891,233**,
+reconciled clean against publicnode (`8 account(s) exact vs independent
+provider`) and saved a 116,526,275 B state file on Ctrl-C. That one file was
+then copied and replayed three times, at different prefetch depths, with
+`--reconcile-every 0` so only the fetch/apply path was being timed:
+
+| run | depth | replayed | wall | blocks/s |
+|---|---|---|---|---|
+| 1 | `--prefetch 1` | 25,891,233 → 25,891,318 (85 blocks) | 123 s | 0.69 |
+| 2 | `--prefetch 8` | 25,891,233 → 25,891,318 (85 blocks) | 66 s | 1.29 |
+| 3 | `--prefetch 8` | 25,891,233 → 25,891,318 (85 blocks) | 61 s | 1.39 |
+| 4 | `--prefetch 1` | 25,891,233 → 25,891,350 (117 blocks) | 155 s | 0.75 |
+
+**≈1.86× at depth 8**, and the order was reversed between the pairs
+deliberately: a provider-side cache warmed by the first run would have
+inflated the second, and it does not — depth 1 is the slower of the two
+whichever runs first (0.69 / 0.75 vs 1.29 / 1.39). It is not 8×, because
+the endpoint's own concurrency limits and per-call latency are what the
+window is bounded by; the useful reading is that a 13-hour catch-up becomes
+a ~7-hour one, not a 100-minute one.
+
+**The part that matters more than the speed.** Runs 1, 2 and 3 all stopped at
+the same block, and their three saved state files are **byte-identical** —
+`sha256 0b550ff4c9a5403e7d8722e54f17e8f81d9fbb0543cc92716e29876d838bcce9`,
+116,526,275 B each. Same cells, same encoded hints, from a sequential replay
+and from two 8-deep concurrent ones. Prefetching moved when the fetches were
+issued and nothing else.
+
 ## 6. Who does what, explicitly
 
 | step | who | needs |

@@ -1057,14 +1057,21 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   (~52,000 blocks) is ~13 h of catch-up. `--prefetch <k>` fetches up to `k`
   blocks concurrently while still applying them in strictly increasing block
   order, never past `finalized`, retrying a failed block exactly as before
-  and skipping nothing. It defaults to **1** (the old behaviour, byte for
-  byte) and is capped at **32**; the startup log always names the depth in
-  force (`block prefetch: ...`). Use single digits — 4–8 — and only for a
-  catch-up: the other end is a keyless free tier that rate-limits, each
-  in-flight fetch holds a block's raw JSON, and once caught up `finalized`
-  is a block or two ahead so the lookahead collapses to 0–1 and the flag
-  does nothing. It changes no apply, reconcile, autosave or journal
-  behaviour — only when the *fetches* are issued.
+  and skipping nothing. It defaults to **1** — the old call sequence and
+  retry semantics; a panicking fetch is now contained and retried rather
+  than stopping the loop — and is capped at **32**; the startup log always
+  names the depth in force (`block prefetch: ...`). Use single digits and
+  only for a catch-up: the other end is a keyless free tier that
+  rate-limits, each in-flight fetch holds a block's raw JSON, and once
+  caught up `finalized` is a block or two ahead so the lookahead collapses
+  to 0–1 and the flag does nothing. **Start a big catch-up at
+  `--prefetch 4` and raise to 8 only after checking the fetch-failure rate
+  and which endpoint names appear in the `fetch failed` lines** —
+  concurrency pushes more blocks onto the fallback provider (ADR-0024)
+  precisely while reconcile is deferred by lag (ADR-0036), so the two
+  quietest signals you have are that rate and that name. It changes no
+  apply, reconcile, autosave or journal behaviour — only when the
+  *fetches* are issued.
 
 ### Log timestamps and rotation
 

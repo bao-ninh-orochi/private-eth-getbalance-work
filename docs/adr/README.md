@@ -3638,16 +3638,36 @@ code would be unsound.
 3. **Never past the head.** `set_head(finalized)` is called once per poll;
    the sweep there also aborts anything above a (theoretically) regressed
    head, so the invariant holds unconditionally.
-4. **`k = 1` is the old loop.** One fetch issued and awaited per applied
-   block, in block order — pinned by
+4. **`k = 1` is the old loop's call sequence and retry semantics.** One
+   fetch issued and awaited per applied block, in block order, retried the
+   same way on failure — pinned by
    `depth_one_reproduces_the_pre_prefetch_call_sequence`, which runs a
    driver written the way the loop's body was before this ADR against the
-   same mock and asserts the two call sequences are *equal*.
+   same mock and asserts the two call sequences are *equal*. It is not
+   "byte for byte" in every observable, and the difference is worth
+   naming: at any depth the fetch now runs in a spawned task, so a
+   **panic inside `block_update` is contained** and becomes a
+   `FetchFailure::Task` retried every `RETRY_INTERVAL` with a loud log
+   line, where before it unwound out of `follow_loop` and stopped
+   following silently. That is strictly the safer direction — a panicking
+   fetch never applied a block, so no answer can be wrong, and the loud
+   retry is visible where the silent stop was not — but it is a change,
+   not an identity.
 
 **A fetch task that panics is a failed fetch, not a skipped block**
 (`FetchFailure::Task`): it retries like any other failure. Giving up on
 the block is the one thing that is never allowed, and a panic in a fetch
-is evidence about the fetch, not about the chain.
+is evidence about the fetch, not about the chain. This is also the one
+place `--prefetch 1` is not literally the old loop — see invariant 4.
+
+**The follow loop re-checks the block number it got** (`mainnet.rs`,
+immediately after the `FetchedBlock` destructure): `update.block != n`
+is a `CRITICAL` halt. It cannot fire against this implementation —
+`fetch(n)` returns block `n`'s own task or an error — and it is there
+anyway, because the prefetcher schedules without validating the payload
+(`a_mislabelled_block_is_passed_through_for_the_caller_to_reject`) and
+because applying one block's *absolute* post-state as another's is
+exactly a silently wrong balance, which nothing downstream would catch.
 
 **Evidence.** Eight unit tests in `prefetch.rs` drive a mock
 `BlockSource` with scripted per-block latencies, failures and panics under

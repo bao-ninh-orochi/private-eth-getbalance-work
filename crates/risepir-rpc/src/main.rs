@@ -544,7 +544,10 @@ fn print_usage() {
         "in strictly increasing block order, never past finalized (ADR-0047) — a catch-up accelerator:"
     );
     eprintln!(
-        "a replay waits ~1-2 s per block on the feed against a ~4 ms apply. 1 is the old behaviour."
+        "a replay waits ~1-2 s per block on the feed against a ~4 ms apply. 1 keeps the old call"
+    );
+    eprintln!(
+        "sequence and retry semantics (a panicking fetch is now contained and retried, not fatal)."
     );
     eprintln!(
         "client runs the JSON-RPC front end + rewind client on THIS machine against a remote"

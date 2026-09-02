@@ -585,11 +585,15 @@ fn print_usage() {
         "time-setup loads --state exactly like mainnet does, times a full PIR setup recompute over"
     );
     eprintln!(
-        "it (C13), decode-verifies the persisted hints against the store, and reports the result —"
+        "it (C13, setup_seconds), and exactly reproduces the persisted hints from the persisted"
     );
     eprintln!(
-        "see time_setup's own module docs for exactly what \"decode-verifies\" checks and why."
+        "seed and the store's cells, asserting byte-for-byte equality against what is actually"
     );
+    eprintln!(
+        "persisted (persisted_hints_exact_match, exits non-zero if false) — see time_setup's own"
+    );
+    eprintln!("module docs for the full derivation and the two (non-gating) decode diagnostics.");
     eprintln!("See docs/deploy.md for the full runbook.");
 }
 

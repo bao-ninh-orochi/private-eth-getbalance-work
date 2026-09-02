@@ -1068,15 +1068,23 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
     new side channel.
   - `risepir-rpc time-setup --state <file> [--out <json-path>]`: loads a
     state file exactly like `mainnet --state` does, times a full PIR setup
-    recompute over it (the C13 number), decode-verifies the persisted
-    hints against the store, and prints/optionally writes a JSON report
-    (accounts, geometry, `cells_bytes`/`hint_bytes`, `setup_seconds`,
-    `hints_match_persisted`, `rayon_threads`, …). Exits non-zero if the
-    decode check fails — see `risepir_rpc::time_setup`'s module docs for
-    exactly what that check does (and does not) compare, and why it is not
-    a raw hint-byte comparison.
+    recompute over it (`setup_seconds`, the C13 number), and — the
+    load-bearing check — reproduces the persisted hints **exactly**
+    (`Aᵀ·D`, from the persisted seed via the public deterministic
+    `expand_hint_material` expander and a whole-store patch transcript,
+    never a raw setup with a fresh random seed) and asserts byte-for-byte
+    equality against what is actually persisted
+    (`persisted_hints_exact_match`, its own `exact_check_seconds` timer).
+    Two further fields (`persisted_hints_decode_ok`/
+    `rebuilt_hints_decode_ok`) are sampled-row decode diagnostics, never
+    ANDed together and never part of the exit code. Prints one line per
+    fact and optionally writes the same as JSON (accounts, geometry,
+    `cells_bytes`/`hint_bytes`, `rayon_threads`, …). Exits non-zero only
+    if `persisted_hints_exact_match` is `false` — see
+    `risepir_rpc::time_setup`'s module docs for the full derivation.
   - `GET /metrics` (ADR-0039) additionally exposes
-    `risepir_store_mutations_total{kind}`, `risepir_block_apply_seconds_total`
+    `risepir_store_operations_total{kind}` (insert/update/delete calls,
+    not `SlotMutation`s), `risepir_block_apply_seconds_total`
     / `risepir_block_apply_total`, `risepir_block_delta_bytes_total`,
     `risepir_store_cells_bytes`, `risepir_hint_bytes`, and
     `risepir_process_rss_bytes` (Linux only; `0` elsewhere) — all cheap

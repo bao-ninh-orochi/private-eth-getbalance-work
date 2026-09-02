@@ -33,8 +33,8 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 PAT, IKPIR repo only, Contents read-only — deploy keys are *disabled* on
 that repo). Until the user mints it, every CI job fails early with an
 explicit `::error`.~~ **Closed** — `bao-ninh-orochi/IKPIR` is public now,
-pinned at the `v0.1.0-perf` tag; CI needs no secret, and the
-`IKPIR_TOKEN`/`insteadOf` plumbing is gone (ADR-0045).
+pinned at the `v0.2.0-perf` tag (was `v0.1.0-perf`; ADR-0046); CI needs no
+secret, and the `IKPIR_TOKEN`/`insteadOf` plumbing is gone (ADR-0045).
 
 ## 1. Done — with the finding that motivated each
 

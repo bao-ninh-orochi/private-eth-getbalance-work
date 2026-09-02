@@ -33,11 +33,19 @@
 //!    lookahead is clipped to it. Prefetching is only safe *because* of
 //!    that clip: `finalized` cannot reorg (ADR-0007), so a block fetched
 //!    ahead of time can never turn out to have been the wrong block.
-//! 4. **`depth == 1` is the pre-prefetch loop.** One fetch is issued, and
-//!    awaited, per applied block, in block order, with the identical retry
-//!    behaviour — see `depth_one_reproduces_the_pre_prefetch_call_sequence`,
-//!    which pins that against a driver written the way the loop was before
-//!    this module existed.
+//! 4. **`depth == 1` is the pre-prefetch loop's call sequence and retry
+//!    semantics.** One fetch is issued, and awaited, per applied block, in
+//!    block order, retried the same way on failure — see
+//!    `depth_one_reproduces_the_pre_prefetch_call_sequence`, which pins
+//!    that against a driver written the way the loop was before this
+//!    module existed. One thing genuinely differs at every depth, and it
+//!    is not a regression: the fetch now runs in a spawned task, so a
+//!    **panic inside it is contained** and surfaces as
+//!    [`FetchFailure::Task`] — retried every `RETRY_INTERVAL`, loudly —
+//!    where before it unwound out of `follow_loop` and stopped the loop
+//!    silently. Retrying is the safe direction (a panic in a fetch is
+//!    evidence about the fetch, never about the chain), but "byte for
+//!    byte" would be overstating it.
 //!
 //! # What it deliberately does not touch
 //!
@@ -286,6 +294,10 @@ mod tests {
         fails: Mutex<HashMap<u64, usize>>,
         /// Remaining scripted task panics per block, consumed one per call.
         panics: Mutex<HashMap<u64, usize>>,
+        /// Blocks this source answers with a *different* block number
+        /// than the one asked for — a feed (or a scheduler) that has
+        /// lost track of which block it is on.
+        mislabel: HashMap<u64, u64>,
         /// Every `block_update` call, in the order the calls were issued.
         calls: Mutex<Vec<u64>>,
         in_flight: AtomicUsize,
@@ -307,6 +319,11 @@ mod tests {
 
         fn failing(self, n: u64, times: usize) -> Self {
             self.fails.lock().unwrap().insert(n, times);
+            self
+        }
+
+        fn mislabelling(mut self, asked: u64, answered_as: u64) -> Self {
+            self.mislabel.insert(asked, answered_as);
             self
         }
 
@@ -369,7 +386,7 @@ mod tests {
             if fails {
                 return Err(FeedError::Internal(format!("scripted failure block {n}")));
             }
-            Ok(block(n))
+            Ok(block(self.mislabel.get(&n).copied().unwrap_or(n)))
         }
     }
 
@@ -519,9 +536,11 @@ mod tests {
 
     /// Invariant 4, pinned against the pre-ADR-0047 loop body itself: with
     /// `--prefetch 1` the sequence of `block_update` calls — including the
-    /// retry of a failing block — is byte-for-byte the sequence the loop
-    /// issued before this module existed, and exactly one fetch is ever
-    /// outstanding.
+    /// retry of a failing block — is exactly the sequence the loop issued
+    /// before this module existed, and exactly one fetch is ever
+    /// outstanding. (Call sequence and retry semantics, not every
+    /// observable: a panicking fetch is now contained and retried rather
+    /// than stopping the loop — see the module docs' invariant 4.)
     #[tokio::test(start_paused = true)]
     async fn depth_one_reproduces_the_pre_prefetch_call_sequence() {
         let reference = MockSource::with_default_latency(5).failing(3, 2);
@@ -557,6 +576,32 @@ mod tests {
 
         assert_eq!(applied, vec![1, 2, 3, 4]);
         assert_eq!(feed.call_count(2), 2, "the panicking fetch was re-issued");
+    }
+
+    /// The prefetcher schedules; it does not validate the payload. A
+    /// source that answers a request for block `n` with a *different*
+    /// block's update has that update handed straight back — so the
+    /// rejection has to live in the follow loop, which is where the
+    /// block number is finally trusted (`mainnet.rs`'s
+    /// `update.block != n` CRITICAL guard, right after the destructure).
+    /// This test is that guard's justification: without it, a scheduler
+    /// or feed that lost track of which block it was on would apply one
+    /// block's absolute post-state as another's — a silently wrong
+    /// balance, which is the one outcome this deployment may never
+    /// produce.
+    #[tokio::test(start_paused = true)]
+    async fn a_mislabelled_block_is_passed_through_for_the_caller_to_reject() {
+        let feed = Arc::new(MockSource::with_default_latency(5).mislabelling(2, 7));
+        let mut pf = BlockPrefetch::new(Arc::clone(&feed), 4);
+        pf.set_head(6);
+
+        assert_eq!(pf.fetch(1).await.map(|b| b.update.block).ok(), Some(1));
+        assert_eq!(
+            pf.fetch(2).await.map(|b| b.update.block).ok(),
+            Some(7),
+            "the prefetcher must not silently repair or hide a mislabelled block; \
+             the follow loop's own guard is what refuses it"
+        );
     }
 
     /// `depth` is clamped, never zero: a window of zero blocks would be a

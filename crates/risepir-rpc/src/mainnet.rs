@@ -285,9 +285,14 @@ pub struct MainnetConfig {
     pub proxy_upstream: Option<String>,
     /// `--prefetch <k>` (ADR-0047): how many block updates the follow
     /// loop may fetch **concurrently** while it applies them in strictly
-    /// increasing block order. `1` (the default) is the pre-ADR-0047
-    /// behaviour exactly — one fetch issued and awaited per applied
-    /// block. Capped at [`MAX_PREFETCH`].
+    /// increasing block order. `1` (the default) reproduces the
+    /// pre-ADR-0047 **call sequence and retry semantics** — one fetch
+    /// issued and awaited per applied block, retried the same way on
+    /// failure. One observable does change, at every depth, and it is a
+    /// containment rather than a regression: the fetch runs in a spawned
+    /// task, so a panic inside it is caught and retried every
+    /// `RETRY_INTERVAL` with a loud log line, where before it unwound out
+    /// of the follow loop and stopped it. Capped at [`MAX_PREFETCH`].
     ///
     /// This only ever buys catch-up speed: a replay is bottlenecked on
     /// the feed (~1–2 s per `debug_traceBlockByNumber`) against a ~4 ms
@@ -382,7 +387,8 @@ impl Default for MainnetConfig {
             partial: false,
             partial_capacity: 4_000_000,
             proxy_upstream: None,
-            // 1 = the pre-ADR-0047 loop, byte for byte. Prefetching is
+            // 1 = the pre-ADR-0047 loop's call sequence and retry
+            // semantics (see `MainnetConfig::prefetch`). Prefetching is
             // opt-in: it is a catch-up accelerator, and the default
             // deployment posture is "following the head", where it does
             // nothing. An operator facing a long replay asks for it.
@@ -1294,7 +1300,8 @@ struct FollowConfig {
     /// unconditionally rather than branching on an `Option` every block.
     corrections: Arc<CorrectionQueue>,
     /// Block-fetch lookahead depth (ADR-0047) — see
-    /// [`MainnetConfig::prefetch`]. `1` is the pre-ADR-0047 loop.
+    /// [`MainnetConfig::prefetch`]. `1` is the pre-ADR-0047 loop's call
+    /// sequence and retry semantics.
     prefetch: usize,
 }
 
@@ -1412,8 +1419,9 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
     // The block fetches, and only the fetches, may run ahead (ADR-0047).
     // Everything below — apply, journal, reconcile, autosave — still runs
     // on this task, one block at a time, in block order. At
-    // `cfg.prefetch == 1` this issues exactly the calls the loop issued
-    // before it existed; see `crate::prefetch`.
+    // `cfg.prefetch == 1` this issues exactly the calls, in the same
+    // order and with the same retries, that the loop issued before it
+    // existed; see `crate::prefetch`.
     let mut prefetch = BlockPrefetch::new(Arc::clone(&feed), cfg.prefetch);
     let mut last = cfg.start_at;
     let mut patch_stats = PatchStats::default();
@@ -1475,6 +1483,26 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
                 changed,
                 credited,
             } = fetched;
+            // Defence in depth, not a fix: `BlockPrefetch::fetch(n)`
+            // returns block `n`'s own task or nothing, so this cannot
+            // diverge today. It is here because the cost of being wrong
+            // is the one failure this repo does not tolerate — applying
+            // block m's absolute post-state as if it were block n's
+            // would be a silently wrong balance for every account the
+            // two blocks disagree on, and nothing downstream re-checks
+            // the number. A CRITICAL halt is the correct response to a
+            // scheduler that has lost track of which block it is on
+            // (the prefetcher passes a feed's payload through
+            // unmodified — `prefetch::tests::a_mislabelled_block_is_
+            // passed_through_for_the_caller_to_reject`).
+            if update.block != n {
+                critical(&format!(
+                    "prefetch returned block {} while applying block {n} — serving stays at block {last}; \
+                     re-bootstrap required",
+                    update.block
+                ));
+                return;
+            }
 
             // Partial mode cannot honestly resolve a credit for an
             // account it has no prior for — see the module docs.

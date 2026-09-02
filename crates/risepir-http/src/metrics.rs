@@ -195,15 +195,20 @@ pub(crate) struct Counters {
     /// `crate::node`'s `answer` handler for exactly what is (and is not)
     /// under this clock, and why.
     pub answer_duration: Histogram,
-    /// Cumulative store mutations applied across every block this process
-    /// has applied, keyed by kind (`"insert"`/`"update"`/`"delete"` — a
-    /// fixed, closed set this crate itself chose, same reasoning as
-    /// [`Self::requests`]'s labels). Deliberately excludes no-op deletes
-    /// (ADR-0017): they perform no store mutation, so they are not a
-    /// "kind" of mutation. Folded in once per applied block by
+    /// Cumulative store *operations* — `CuckooKVStore::insert`/`update`/
+    /// `delete` **calls**, one per classified change or credit — across
+    /// every block this process has applied, keyed by kind
+    /// (`"insert"`/`"update"`/`"delete"` — a fixed, closed set this crate
+    /// itself chose, same reasoning as [`Self::requests`]'s labels).
+    /// **Not** a count of `segmented_cuckoo::SlotMutation`s: a single
+    /// `insert` that provokes a cuckoo kick chain writes several slots
+    /// but is counted here exactly once, under `"insert"`. Deliberately
+    /// excludes no-op deletes (ADR-0017): they perform no store
+    /// operation at all, so they are not a "kind" of this counter.
+    /// Folded in once per applied block by
     /// `NodeState::record_block_apply_metrics`, from
     /// `risepir_server::BlockApplyReport`.
-    pub store_mutations: BTreeMap<&'static str, u64>,
+    pub store_operations: BTreeMap<&'static str, u64>,
     /// Cumulative wall-clock seconds spent inside
     /// `RisePirServer::apply_block_reporting`, summed over every applied
     /// block — the numerator a scraper divides by
@@ -227,7 +232,7 @@ impl Counters {
             requests: BTreeMap::new(),
             request_errors: BTreeMap::new(),
             answer_duration: Histogram::new(),
-            store_mutations: BTreeMap::new(),
+            store_operations: BTreeMap::new(),
             block_apply_seconds_total: 0.0,
             block_apply_total: 0,
             block_delta_bytes_total: 0,
@@ -271,10 +276,9 @@ pub(crate) struct Snapshot {
     /// (`RisePirServer::hint_bytes`, `BackendWireSize::hint_byte_size`) —
     /// also a live gauge.
     pub hint_bytes: u64,
-    /// This process's resident set size in bytes (`/proc/self/statm` on
-    /// Linux; `0` elsewhere or on any read failure — see
-    /// `crate::node::process_rss_bytes`'s own docs for the page-size
-    /// assumption this makes).
+    /// This process's resident set size in bytes (`VmRSS:` from
+    /// `/proc/self/status` on Linux; `0` elsewhere or on any read/parse
+    /// failure — see `crate::node::process_rss_bytes`'s own docs).
     pub process_rss_bytes: u64,
     /// Size, in bytes, of the currently cached `GET /setup` response —
     /// `0` if nothing has been encoded yet this process. Reading this
@@ -295,8 +299,9 @@ pub(crate) struct Snapshot {
     pub request_errors: BTreeMap<(&'static str, &'static str), u64>,
     /// The answer-latency histogram.
     pub answer_duration: Histogram,
-    /// Cumulative store mutations by kind — see [`Counters::store_mutations`].
-    pub store_mutations: BTreeMap<&'static str, u64>,
+    /// Cumulative store operations (insert/update/delete calls) by kind
+    /// — see [`Counters::store_operations`].
+    pub store_operations: BTreeMap<&'static str, u64>,
     /// See [`Counters::block_apply_seconds_total`].
     pub block_apply_seconds_total: f64,
     /// See [`Counters::block_apply_total`].
@@ -511,16 +516,16 @@ pub(crate) fn render(s: &Snapshot) -> String {
     let _ = writeln!(out, "{name}_sum {}", s.answer_duration.sum_seconds);
     let _ = writeln!(out, "{name}_count {}", s.answer_duration.count());
 
-    // ── store mutations / block apply / delta bytes ──────────────────────
+    // ── store operations / block apply / delta bytes ─────────────────────
     let _ = writeln!(
         out,
-        "# HELP risepir_store_mutations_total Cumulative store mutations applied, by kind. Excludes no-op deletes (ADR-0017), which perform no store mutation."
+        "# HELP risepir_store_operations_total Cumulative store operations (insert/update/delete calls); not slot mutations — one cuckoo insert can write several slots but counts once here. Excludes no-op deletes (ADR-0017), which make no call at all."
     );
-    let _ = writeln!(out, "# TYPE risepir_store_mutations_total counter");
-    for (kind, count) in &s.store_mutations {
+    let _ = writeln!(out, "# TYPE risepir_store_operations_total counter");
+    for (kind, count) in &s.store_operations {
         let _ = writeln!(
             out,
-            "risepir_store_mutations_total{} {count}",
+            "risepir_store_operations_total{} {count}",
             format_labels(&[("kind", kind)])
         );
     }
@@ -735,7 +740,7 @@ mod tests {
             requests: BTreeMap::new(),
             request_errors: BTreeMap::new(),
             answer_duration: Histogram::new(),
-            store_mutations: BTreeMap::new(),
+            store_operations: BTreeMap::new(),
             block_apply_seconds_total: 0.0,
             block_apply_total: 0,
             block_delta_bytes_total: 0,
@@ -886,9 +891,9 @@ mod tests {
     #[test]
     fn render_includes_block_apply_and_store_size_metrics() {
         let mut snap = base_snapshot();
-        snap.store_mutations.insert("insert", 5);
-        snap.store_mutations.insert("update", 3);
-        snap.store_mutations.insert("delete", 1);
+        snap.store_operations.insert("insert", 5);
+        snap.store_operations.insert("update", 3);
+        snap.store_operations.insert("delete", 1);
         snap.block_apply_seconds_total = 0.042;
         snap.block_apply_total = 4;
         snap.block_delta_bytes_total = 12_345;
@@ -896,9 +901,9 @@ mod tests {
         snap.hint_bytes = 65_536;
         let text = render(&snap);
 
-        assert!(text.contains("risepir_store_mutations_total{kind=\"insert\"} 5"));
-        assert!(text.contains("risepir_store_mutations_total{kind=\"update\"} 3"));
-        assert!(text.contains("risepir_store_mutations_total{kind=\"delete\"} 1"));
+        assert!(text.contains("risepir_store_operations_total{kind=\"insert\"} 5"));
+        assert!(text.contains("risepir_store_operations_total{kind=\"update\"} 3"));
+        assert!(text.contains("risepir_store_operations_total{kind=\"delete\"} 1"));
         assert!(text.contains("risepir_block_apply_seconds_total 0.042"));
         assert!(text.contains("risepir_block_apply_total 4"));
         assert!(text.contains("risepir_block_delta_bytes_total 12345"));

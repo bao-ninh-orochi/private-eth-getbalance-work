@@ -418,7 +418,7 @@ async fn served_metrics_body_contains_nothing_address_shaped() {
     let state = build_node();
 
     // Apply one real block touching the known seeded address (ADR-0039's
-    // follow-on: risepir_store_mutations_total/risepir_block_apply_*/
+    // follow-on: risepir_store_operations_total/risepir_block_apply_*/
     // risepir_block_delta_bytes_total are all derived from this call) —
     // the tripwire below must hold for a block whose addresses are known,
     // not merely for an untouched, all-zero-counter node.
@@ -453,7 +453,7 @@ async fn served_metrics_body_contains_nothing_address_shaped() {
     // actually moved, so the tripwire below is checking a populated body,
     // not a vacuous all-zero one.
     assert!(text.contains("risepir_block_apply_total 1"));
-    assert!(text.contains("risepir_store_mutations_total{kind=\"insert\"} 1"));
+    assert!(text.contains("risepir_store_operations_total{kind=\"insert\"} 1"));
 
     for token in text.split(|c: char| !c.is_ascii_hexdigit()) {
         assert!(

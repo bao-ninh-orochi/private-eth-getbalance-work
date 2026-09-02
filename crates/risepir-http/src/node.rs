@@ -176,28 +176,30 @@ fn unix_now() -> u64 {
 }
 
 /// This process's resident set size, in bytes — `risepir_process_rss_bytes`
-/// (ADR-0039's follow-on). Linux only: parses the second (`resident`)
-/// field of `/proc/self/statm`, which reports page counts, and assumes a
-/// 4 KiB page (the default on the x86_64/aarch64 hosts this deployment
-/// actually runs on, including the live GCP `e2-highmem-8` VM) — a kernel
-/// with a different page size would misreport this one gauge, not panic.
-/// `0` on any read/parse failure and on every non-Linux target: this is a
-/// best-effort operational gauge, never something `GET /metrics` should
-/// fail or block over. Plain file I/O, no `unsafe` `sysconf` FFI call
-/// (every crate here forbids `unsafe_code`) and no new dependency for
-/// something this small — the same "hand-roll it" precedent ADR-0039
-/// itself sets.
+/// (ADR-0039's follow-on). Linux only: parses the `VmRSS:` line of
+/// `/proc/self/status`, which the kernel already reports in kibibytes
+/// (`kB` in that file is actually 1024 bytes, a long-standing `/proc`
+/// naming quirk) — no page-size assumption needed, unlike
+/// `/proc/self/statm`'s page-count fields. `0` on any read/parse failure
+/// and on every non-Linux target: this is a best-effort operational
+/// gauge, never something `GET /metrics` should fail or block over.
+/// Plain file I/O, no `unsafe` `sysconf` FFI call (every crate here
+/// forbids `unsafe_code`) and no new dependency for something this small
+/// — the same "hand-roll it" precedent ADR-0039 itself sets.
 #[cfg(target_os = "linux")]
 fn process_rss_bytes() -> u64 {
-    const ASSUMED_PAGE_BYTES: u64 = 4096;
-    let Ok(contents) = std::fs::read_to_string("/proc/self/statm") else {
+    let Ok(contents) = std::fs::read_to_string("/proc/self/status") else {
         return 0;
     };
-    contents
-        .split_whitespace()
+    let Some(line) = contents.lines().find(|l| l.starts_with("VmRSS:")) else {
+        return 0;
+    };
+    // `VmRSS:` <whitespace> <kB count> <whitespace> `kB` — the count is
+    // always the line's second whitespace-separated field.
+    line.split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|pages| pages.saturating_mul(ASSUMED_PAGE_BYTES))
+        .map(|kib| kib.saturating_mul(1024))
         .unwrap_or(0)
 }
 
@@ -765,8 +767,9 @@ impl NodeState {
 
     /// Folds one applied block's [`BlockApplyReport`] into the cumulative
     /// `GET /metrics` series ADR-0039's follow-on adds: per-kind store
-    /// mutation counters (`risepir_store_mutations_total`), the apply-time
-    /// sum/count pair a scraper needs to compute a mean
+    /// operation counters (`risepir_store_operations_total` — insert/
+    /// update/delete calls, not `segmented_cuckoo::SlotMutation`s), the
+    /// apply-time sum/count pair a scraper needs to compute a mean
     /// (`risepir_block_apply_seconds_total`/`risepir_block_apply_total`),
     /// and the cumulative delta-byte counter
     /// (`risepir_block_delta_bytes_total`). Called once per applied block,
@@ -780,9 +783,9 @@ impl NodeState {
         delta_bytes: u64,
     ) {
         let mut counters = self.counters_lock();
-        *counters.store_mutations.entry("insert").or_insert(0) += report.inserts;
-        *counters.store_mutations.entry("update").or_insert(0) += report.updates;
-        *counters.store_mutations.entry("delete").or_insert(0) += report.deletes;
+        *counters.store_operations.entry("insert").or_insert(0) += report.inserts;
+        *counters.store_operations.entry("update").or_insert(0) += report.updates;
+        *counters.store_operations.entry("delete").or_insert(0) += report.deletes;
         counters.block_apply_seconds_total += apply_duration.as_secs_f64();
         counters.block_apply_total += 1;
         counters.block_delta_bytes_total += delta_bytes;
@@ -847,7 +850,7 @@ impl NodeState {
             requests: counters.requests,
             request_errors: counters.request_errors,
             answer_duration: counters.answer_duration,
-            store_mutations: counters.store_mutations,
+            store_operations: counters.store_operations,
             block_apply_seconds_total: counters.block_apply_seconds_total,
             block_apply_total: counters.block_apply_total,
             block_delta_bytes_total: counters.block_delta_bytes_total,
@@ -932,9 +935,16 @@ impl NodeState {
     /// it does everything documented above, under the identical single
     /// write-lock acquisition, plus measures lock-wait time and a
     /// [`risepir_server::BlockApplyReport`]. This method is a thin
-    /// wrapper kept byte-for-byte behavior-identical to before that
-    /// method existed, for the many existing callers (tests, the mock
-    /// deployment) that only ever wanted `(delta, patch_time)`.
+    /// wrapper whose *outputs* are unchanged from before that method
+    /// existed — same `(delta, patch_time)` pair, same `Result`/error
+    /// conditions, same ring/`per_block` bookkeeping — for the many
+    /// existing callers (tests, the mock deployment) that only ever
+    /// wanted that pair. Its *internal cost* is not byte-for-byte
+    /// identical: the call it delegates to also classifies every change
+    /// and credit, measures `lock_wait`, and computes `delta_bytes`
+    /// (outside the write lock — see [`Self::apply_block_reporting`]'s
+    /// own docs) before this wrapper discards everything but the two
+    /// fields it returns.
     pub async fn apply_block(
         &self,
         update: &BlockUpdate,
@@ -977,9 +987,12 @@ impl NodeState {
     /// block's delta (the same bytes served at `GET /delta/{block}` and
     /// folded into `/sync`, and appended to the on-disk journal),
     /// computed without allocating or actually encoding — see
-    /// [`BlockDelta::encoded_len`]. Computed once, after the timed apply
-    /// call, so it is never itself timed and never doubles as a second
-    /// encode of anything the ring/journal/`/delta` path also encodes.
+    /// [`BlockDelta::encoded_len`]. Computed once, after both the timed
+    /// apply call *and* `self.inner`'s write lock have been released (it
+    /// depends only on the already-cloned `delta`), so it is never
+    /// itself timed, never holds up a concurrent reader or the next
+    /// writer, and never doubles as a second encode of anything the
+    /// ring/journal/`/delta` path also encodes.
     pub async fn apply_block_reporting(
         &self,
         update: &BlockUpdate,
@@ -991,7 +1004,6 @@ impl NodeState {
         let t0 = Instant::now();
         let (delta, report) = inner.server.apply_block_reporting(update)?;
         let apply_duration = t0.elapsed();
-        let delta_bytes = delta.encoded_len() as u64;
 
         inner.ring.push(delta.clone());
         inner.per_block.insert(delta.block, delta.clone());
@@ -1002,6 +1014,12 @@ impl NodeState {
             }
         }
         drop(inner);
+
+        // Computed outside the write lock: `encoded_len()` is cheap (no
+        // allocation) but there is no reason to make any other writer, or
+        // a concurrent `/answer` reader, queue behind it when it has no
+        // dependency on `inner` at all beyond the already-cloned `delta`.
+        let delta_bytes = delta.encoded_len() as u64;
 
         self.record_block_apply_metrics(&report, apply_duration, delta_bytes);
 

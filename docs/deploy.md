@@ -1050,6 +1050,38 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   persisted), so routine restarts do not invalidate anyone; only a genuine
   re-bootstrap (fresh snapshot ingest) mints a new lineage — which is
   exactly when old clients *must* be refused.
+- **Measurement-campaign flags (off by default, additive, no behavior
+  change when unset)**:
+  - `--block-metrics-csv <path>` (`mainnet`): appends one row per
+    successfully applied block to a plain CSV — mutation counts split
+    insert/update/delete/no-op-delete, the three apply stages
+    (store/fold/patch) plus the whole apply and lock-wait times, delta
+    bytes published, and an `/answer`-traffic interference indicator; see
+    `crate::block_metrics_csv`'s module docs for the exact 19 columns. The
+    header is written once (file creation or an empty existing file) and
+    every row is flushed immediately. No address, no balance, ever.
+  - `--answer-timing-header` (`mainnet`/`mock`): adds
+    `x-risepir-answer-compute-ns` / `x-risepir-answer-handler-ns` response
+    headers to `POST /answer` — both data-independent by construction
+    (ADR-0039's timing-side-channel analysis: the matvec folds over the
+    whole segment regardless of query content), so exposing them adds no
+    new side channel.
+  - `risepir-rpc time-setup --state <file> [--out <json-path>]`: loads a
+    state file exactly like `mainnet --state` does, times a full PIR setup
+    recompute over it (the C13 number), decode-verifies the persisted
+    hints against the store, and prints/optionally writes a JSON report
+    (accounts, geometry, `cells_bytes`/`hint_bytes`, `setup_seconds`,
+    `hints_match_persisted`, `rayon_threads`, …). Exits non-zero if the
+    decode check fails — see `risepir_rpc::time_setup`'s module docs for
+    exactly what that check does (and does not) compare, and why it is not
+    a raw hint-byte comparison.
+  - `GET /metrics` (ADR-0039) additionally exposes
+    `risepir_store_mutations_total{kind}`, `risepir_block_apply_seconds_total`
+    / `risepir_block_apply_total`, `risepir_block_delta_bytes_total`,
+    `risepir_store_cells_bytes`, `risepir_hint_bytes`, and
+    `risepir_process_rss_bytes` (Linux only; `0` elsewhere) — all cheap
+    aggregates or live gauges, same privacy discipline as every other
+    `/metrics` field.
 
 ### Log timestamps and rotation
 

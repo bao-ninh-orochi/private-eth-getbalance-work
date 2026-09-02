@@ -30,6 +30,13 @@
 //! - Transient RPC failures retry forever (same finalized block —
 //!   idempotent); the server keeps serving its last applied block,
 //!   labelled, meanwhile.
+//! - Block *fetches* may run ahead of the applier (ADR-0047,
+//!   `--prefetch`, [`crate::prefetch`]) — nothing else does. The applier
+//!   still asks for exactly `last + 1` and gets that block or an error,
+//!   so blocks are applied in strictly increasing order, exactly once
+//!   each, with the same retry on failure; the lookahead is clipped to
+//!   the `finalized` head, which cannot reorg (ADR-0007). At the default
+//!   `--prefetch 1` there is no lookahead at all.
 //! - Any [`risepir_server::ServerError`] from `apply_block`, and any
 //!   reconciliation **value mismatch**, permanently stops the follow loop
 //!   (serving continues at the last good block) with a `CRITICAL` log —
@@ -79,6 +86,7 @@ use segmented_cuckoo::Segmented2aryCuckooKVStore;
 use crate::autosave::{SaveOutcome, StateSaver};
 use crate::hard_refresh::{self, CorrectionQueue};
 use crate::journal::{self, JournalWriter, ScanStop};
+use crate::prefetch::BlockPrefetch;
 use crate::private_eth::PrivateEth;
 use crate::snapshot_audit::{self, ReservoirSampler};
 use crate::snapshot_rewind;
@@ -161,6 +169,21 @@ const DEFERRED_RESERVOIR_CAP: usize = 256;
 /// once the provider is reachable again, not a burst that would recreate
 /// the very request storm ADR-0036 exists to stop.
 const RESERVOIR_DRAIN_PER_CHECKPOINT: usize = 2;
+
+/// Hard ceiling on `--prefetch` (ADR-0047): how many block fetches the
+/// follow loop may have in flight at once.
+///
+/// A bound on someone else's keyless endpoint, not on this box: the feed
+/// providers this deployment depends on (dRPC, merkle.io — ADR-0024) are
+/// free tiers being asked for ~7 MB `debug_traceBlockByNumber` results,
+/// and a deployment that opened an unbounded number of parallel
+/// connections to them would be rate-limited into exactly the wedge the
+/// fallback chain exists to prevent. It also bounds peak memory: each
+/// in-flight fetch holds one block's raw JSON response and its parsed
+/// form. 32 is far above the useful range (the catch-up bottleneck is
+/// ~1–2 s per call against a ~4 ms apply, so single-digit depths already
+/// saturate the applier) and is a refusal threshold, not a recommendation.
+pub const MAX_PREFETCH: usize = 32;
 
 /// How often the follow loop logs a patch-time summary, in blocks — never
 /// per block, which at this deployment's ~12 s block time would be a log
@@ -260,6 +283,19 @@ pub struct MainnetConfig {
     pub partial_capacity: u64,
     /// Opt-in proxy for non-private methods (ADR-0012).
     pub proxy_upstream: Option<String>,
+    /// `--prefetch <k>` (ADR-0047): how many block updates the follow
+    /// loop may fetch **concurrently** while it applies them in strictly
+    /// increasing block order. `1` (the default) is the pre-ADR-0047
+    /// behaviour exactly — one fetch issued and awaited per applied
+    /// block. Capped at [`MAX_PREFETCH`].
+    ///
+    /// This only ever buys catch-up speed: a replay is bottlenecked on
+    /// the feed (~1–2 s per `debug_traceBlockByNumber`) against a ~4 ms
+    /// apply, so overlapping the fetches is the whole difference between
+    /// a 13-hour and a ~2-hour replay of 52,000 blocks. While *caught
+    /// up*, `finalized` is at most a block or two ahead, so the lookahead
+    /// naturally degenerates to 0–1 and this changes nothing.
+    pub prefetch: usize,
     /// Reconcile every N applied blocks (`0` disables — not recommended).
     pub reconcile_every: u64,
     /// Sampled addresses per reconciliation.
@@ -346,6 +382,11 @@ impl Default for MainnetConfig {
             partial: false,
             partial_capacity: 4_000_000,
             proxy_upstream: None,
+            // 1 = the pre-ADR-0047 loop, byte for byte. Prefetching is
+            // opt-in: it is a catch-up accelerator, and the default
+            // deployment posture is "following the head", where it does
+            // nothing. An operator facing a long replay asks for it.
+            prefetch: 1,
             reconcile_every: 30,
             reconcile_samples: 8,
             ring_capacity: 600,
@@ -1169,6 +1210,21 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
     });
 
     // ── Follow loop ────────────────────────────────────────────────────
+    // One line, always, naming the depth actually in force — an operator
+    // reading a catch-up log must be able to tell whether the flag they
+    // passed took effect without inferring it from fetch timings.
+    if cfg.prefetch > 1 {
+        logln!(
+            "risepir-rpc mainnet: block prefetch: up to {} block(s) fetched concurrently, \
+             applied strictly in block order, never past finalized (--prefetch, ADR-0047)",
+            cfg.prefetch
+        );
+    } else {
+        logln!(
+            "risepir-rpc mainnet: block prefetch: off (--prefetch 1) — one block fetched at a time; \
+             raise it to speed up a long catch-up replay (ADR-0047)"
+        );
+    }
     tokio::spawn(follow_loop(
         feed,
         RpcClient::new(cfg.confirm_url.clone()),
@@ -1180,6 +1236,7 @@ pub async fn spawn(cfg: MainnetConfig) -> MainnetHandle {
             start_at: head_at_start,
             saver: saver.clone(),
             corrections: corrections.clone(),
+            prefetch: cfg.prefetch,
         },
     ));
 
@@ -1236,6 +1293,9 @@ struct FollowConfig {
     /// `--hard-refresh` was never set), so the follow loop can drain it
     /// unconditionally rather than branching on an `Option` every block.
     corrections: Arc<CorrectionQueue>,
+    /// Block-fetch lookahead depth (ADR-0047) — see
+    /// [`MainnetConfig::prefetch`]. `1` is the pre-ADR-0047 loop.
+    prefetch: usize,
 }
 
 /// Pure aggregation of [`NodeState::apply_block`]'s measured hint-patch
@@ -1348,6 +1408,13 @@ async fn record_save_tick(saver: &StateSaver, node: &NodeState) {
 /// reconcile, so a state that just failed reconciliation is never the
 /// one being persisted (the loop exits before the next trigger).
 async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cfg: FollowConfig) {
+    let feed = Arc::new(feed);
+    // The block fetches, and only the fetches, may run ahead (ADR-0047).
+    // Everything below — apply, journal, reconcile, autosave — still runs
+    // on this task, one block at a time, in block order. At
+    // `cfg.prefetch == 1` this issues exactly the calls the loop issued
+    // before it existed; see `crate::prefetch`.
+    let mut prefetch = BlockPrefetch::new(Arc::clone(&feed), cfg.prefetch);
     let mut last = cfg.start_at;
     let mut patch_stats = PatchStats::default();
     // Persists across every checkpoint for the life of the loop (ADR-0036
@@ -1377,6 +1444,12 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
         // `GET /metrics`, published from the only place that ever learns
         // this value.
         node.set_finalized(finalized);
+        // The prefetch window is clipped to this head, so a lookahead
+        // fetch can never run past the block this loop is following
+        // (ADR-0047). That clip is also what makes prefetching safe at
+        // all: `finalized` cannot reorg (ADR-0007), so a block fetched
+        // ahead of time can never turn out to be the wrong block.
+        prefetch.set_head(finalized);
 
         while last < finalized {
             if let Some(saver) = &cfg.saver {
@@ -1384,7 +1457,12 @@ async fn follow_loop(feed: RpcFeed, confirm: RpcClient, node: Arc<NodeState>, cf
             }
 
             let n = last + 1;
-            let fetched = match feed.block_update(n).await {
+            // Always block `n`, never whichever prefetched block happened
+            // to finish first: a failure here retries the same `n` (the
+            // same `block_update(n)` call, down the same endpoint chain),
+            // and every later block already in flight simply waits. A
+            // skipped block is a wrong balance.
+            let fetched = match prefetch.fetch(n).await {
                 Ok(f) => f,
                 Err(e) => {
                     logln!("risepir-rpc mainnet: follow: block {n} fetch failed ({e}); retrying");

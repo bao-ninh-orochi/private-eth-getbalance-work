@@ -9,6 +9,7 @@
 //!                     [--state <file>] [--save-interval <secs>] [--partial] [--partial-capacity <N>]
 //!                     [--feed-url <url>]... [--confirm-url <url>]
 //!                     [--rpc-port <u16>] [--pir-port <u16>] [--proxy-upstream <url>]
+//!                     [--prefetch <k>]
 //!                     [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>]
 //!                     [--web <dir>]
 //! ```
@@ -371,6 +372,27 @@ fn parse_mainnet(args: &[String]) -> MainnetConfig {
             "--proxy-upstream" => {
                 cfg.proxy_upstream = Some(next_value(args, &mut i, "--proxy-upstream"))
             }
+            "--prefetch" => {
+                cfg.prefetch = parse_next(args, &mut i, "--prefetch");
+                // 0 would be a follow loop that fetches nothing; above the
+                // cap is a request storm against someone else's keyless
+                // endpoint (ADR-0047, ADR-0024). Both are refused by name
+                // rather than silently clamped — an operator who typed a
+                // number should learn it was not the number used.
+                if cfg.prefetch == 0 {
+                    eprintln!(
+                        "risepir-rpc: --prefetch must be >= 1 (1 = one block fetched at a time, the default)"
+                    );
+                    std::process::exit(2);
+                }
+                if cfg.prefetch > mainnet::MAX_PREFETCH {
+                    eprintln!(
+                        "risepir-rpc: --prefetch must be <= {} (it bounds concurrent requests to the feed provider)",
+                        mainnet::MAX_PREFETCH
+                    );
+                    std::process::exit(2);
+                }
+            }
             "--reconcile-every" => {
                 cfg.reconcile_every = parse_next(args, &mut i, "--reconcile-every")
             }
@@ -447,6 +469,7 @@ fn print_usage() {
     eprintln!("                      [--partial] [--partial-capacity <N>]");
     eprintln!("                      [--feed-url <url>]... [--confirm-url <url>]");
     eprintln!("                      [--rpc-port <u16>] [--pir-port <u16>] [--bind <ip>] [--proxy-upstream <url>]");
+    eprintln!("                      [--prefetch <k>]");
     eprintln!("                      [--reconcile-every <blocks>] [--reconcile-samples <N>] [--lwe-dim <N>] [--web <dir>]");
     eprintln!(
         "  risepir-rpc client  --pir-url <http://server:8645> [--rpc-port <u16>] [--bind <ip>]"
@@ -514,6 +537,15 @@ fn print_usage() {
     );
     eprintln!("configured provider agrees on a value differing from what is stored — runs in the background,");
     eprintln!("never blocking serving or following; corrections drain into blocks 2000 at a time (ADR-0040).");
+    eprintln!(
+        "--prefetch <k> (default 1, max 32) fetches up to k blocks concurrently while applying them"
+    );
+    eprintln!(
+        "in strictly increasing block order, never past finalized (ADR-0047) — a catch-up accelerator:"
+    );
+    eprintln!(
+        "a replay waits ~1-2 s per block on the feed against a ~4 ms apply. 1 is the old behaviour."
+    );
     eprintln!(
         "client runs the JSON-RPC front end + rewind client on THIS machine against a remote"
     );
@@ -781,6 +813,33 @@ mod tests {
             parse_mainnet(&args(&["--partial", "--snapshot-rewind", "0"])).snapshot_rewind,
             0
         );
+    }
+
+    // ── ADR-0047: --prefetch ────────────────────────────────────────────
+
+    /// `--prefetch` defaults to **1** — the pre-ADR-0047 follow loop, one
+    /// block fetched at a time. A default above 1 would silently change
+    /// how every existing deployment talks to its feed provider, so this
+    /// pins it: prefetching is opt-in.
+    #[test]
+    fn prefetch_defaults_to_one_and_parses_a_depth() {
+        assert_eq!(parse_mainnet(&args(&["--partial"])).prefetch, 1);
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--prefetch", "8"])).prefetch,
+            8
+        );
+        assert_eq!(
+            parse_mainnet(&args(&["--partial", "--prefetch", "32"])).prefetch,
+            mainnet::MAX_PREFETCH
+        );
+    }
+
+    /// The cap is a real bound on concurrent requests to a third party's
+    /// keyless endpoint, so it lives next to the flag that has to respect
+    /// it — an accidentally-huge `MAX_PREFETCH` is a request storm.
+    #[test]
+    fn prefetch_cap_is_small_enough_to_be_a_bound() {
+        assert!((1..=32).contains(&mainnet::MAX_PREFETCH));
     }
 
     /// `--snapshot-audit-samples` parses and defaults to 512 (ADR-0040).

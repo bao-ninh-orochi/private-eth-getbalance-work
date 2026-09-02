@@ -75,7 +75,7 @@ use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 /// `xtask::conformance` and every other crate's shared test geometry.
 const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
-const FINGERPRINT_BITS: u32 = 32;
+pub(crate) const FINGERPRINT_BITS: u32 = 32;
 /// This deployment's fixed value-codec knobs — the ADR-0009 layout:
 /// 32-bit `key_tag` / 96-bit balance / 16-bit checksum = 144 bits.
 const KEY_TAG_BITS: u32 = 32;
@@ -917,7 +917,7 @@ impl Xorshift64 {
 // ─── Formatting ────────────────────────────────────────────────────────────
 
 /// Thousands-separated `u64`, e.g. `9437184` -> `"9,437,184"`.
-fn fmt_num(n: u64) -> String {
+pub(crate) fn fmt_num(n: u64) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -945,7 +945,12 @@ fn fmt_num(n: u64) -> String {
 /// individually correct arithmetic under their own unlabelled convention.
 /// The exact byte count in parentheses is unaffected either way — only the
 /// leading human-readable figure moves.
-fn fmt_bytes(bytes: u64) -> String {
+///
+/// `pub(crate)`, alongside [`fmt_num`] and [`value_codec`], so `xtask
+/// report` (`crate::report`) can reuse the exact same size formatting and
+/// fixed value-codec layout rather than risking a second, silently
+/// drifting copy of either.
+pub(crate) fn fmt_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = bytes as f64;
     let mut unit = 0usize;

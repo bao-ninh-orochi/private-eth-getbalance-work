@@ -12,27 +12,40 @@ use risepir_server::SetupBundle;
 
 use crate::error::RpcError;
 
-/// Client-side timers for one [`PrivateEth::sync_to`] call — the delta
-/// fetch the rewind client's accumulator is advanced by.
+/// One completed delta fetch — the unit the blocks side of a
+/// measurement is reported in.
 ///
-/// Wire time and decode time are deliberately **absent**: those belong to
-/// the transport and are recorded by [`risepir_http::NetSink`], which is
-/// where a caller building a latency budget must read them from, so that
-/// no interval is measured twice. What only this layer can see is the
-/// ingest — folding the fetched delta into the client's rolling `ΔD` —
-/// and the shape of what was fetched.
+/// Exactly one of these is produced per `GET /sync` the session
+/// performs, wherever that fetch was issued from: the catch-up inside a
+/// balance lookup (twice per lookup at most) or a standalone
+/// [`PrivateEth::follow_once`]. A caller that writes one row per fetch
+/// therefore has complete coverage with no double-counting — which is
+/// what makes the per-block delta series continuous rather than gapped
+/// at every trial.
+///
+/// The wire, decode and byte fields are attributed to *this* fetch by
+/// subtracting a [`risepir_http::NetSink`] snapshot taken either side of
+/// the call; they are zero when the transport is uninstrumented.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SyncTimings {
+pub struct SyncFetch {
     /// The accumulator's head before the fetch (the `from` of `(from, to]`).
     pub from_block: u64,
-    /// The accumulator's head after it (the `to`). Equals
-    /// [`Self::from_block`] when the call was a no-op.
+    /// The accumulator's head after it (the `to`).
     pub to_block: u64,
     /// `to_block - from_block`: how many blocks this one fetch covered.
     /// `/sync` serves a **coalesced** delta for the whole range, so a
-    /// value above 1 means the per-block costs below are a range total,
-    /// not one block's.
+    /// value above 1 means every cost here is a range total, not one
+    /// block's.
     pub blocks: u64,
+    /// Wall-clock arrival, milliseconds since the Unix epoch, taken once
+    /// the delta has been ingested. `0` when uninstrumented.
+    pub received_at_unix_ms: u128,
+    /// Wire time for this fetch: before send → last body byte.
+    pub wire: Duration,
+    /// Decoding this fetch's bytes into a `BlockDelta`.
+    pub decode: Duration,
+    /// This fetch's `/sync` response body length.
+    pub wire_bytes: u64,
     /// [`RisePirClient::ingest_delta`] — folding the fetched delta into
     /// the rolling `ΔD`.
     pub ingest: Duration,
@@ -53,12 +66,16 @@ pub struct SyncTimings {
 ///
 /// # What is *not* here, and why
 ///
-/// Network time. Each call's wire span is recorded by the transport
-/// ([`risepir_http::NetSink`]), timed from just before the request is
-/// sent to the last body byte. Re-timing it here would double-count it
-/// and would fold the wire codec into "network". A caller adds the two
-/// sources; nothing overlaps.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The query path's own network time. Each call's wire span is recorded
+/// by the transport ([`risepir_http::NetSink`]), timed from just before
+/// the request is sent to the last body byte. Re-timing it here would
+/// double-count it and would fold the wire codec into "network". A
+/// caller adds the two sources; nothing overlaps. (The exception is
+/// [`Self::sync`], where each fetch's own wire/decode/bytes *are*
+/// carried, because attributing them to an individual fetch needs a
+/// snapshot taken around that one call and only this layer knows where
+/// the call boundaries are.)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BalanceTimings {
     /// [`RisePirClient::build_query`] — the LWE encryption of the query
     /// bundle, all segments.
@@ -71,9 +88,13 @@ pub struct BalanceTimings {
     /// checks, the `candidate_buckets` re-hash, and the final value
     /// decode, which sit outside the per-segment loop.
     pub finish_parts: FinishTimings,
-    /// The catch-up sync(s) this call performed, if any. Usually a
-    /// no-op for a caller that already follows head between queries.
-    pub sync: SyncTimings,
+    /// Every delta fetch this call performed, in order — one entry per
+    /// `GET /sync`, so a caller can write one blocks-CSV row per fetch
+    /// with no gaps and no double-counting. Empty (the common case) for
+    /// a caller that already follows head between queries; at most two
+    /// entries otherwise (the pre-answer catch-up and the one to the
+    /// answered block).
+    pub sync: Vec<SyncFetch>,
     /// The block the server answered at.
     pub at_block: u64,
     /// The block the client's *hint* is pinned at
@@ -493,15 +514,17 @@ impl PrivateEth {
     /// [`RpcError::Stalled`] if the range has aged out of the server's
     /// retention window — never treated as "nothing to do".
     /// [`RpcError::Client`] if the ingest itself is rejected.
-    pub(crate) async fn follow_once(&self) -> Result<Option<SyncTimings>, RpcError> {
+    pub(crate) async fn follow_once(&self) -> Result<Option<SyncFetch>, RpcError> {
         let mut session = self.session.lock().await;
         let head = self.pir.head().await?;
         if head <= session.pending_head {
             return Ok(None);
         }
-        let mut t = SyncTimings::default();
-        self.sync_to(&mut session, head, Some(&mut t)).await?;
-        Ok(Some(t))
+        let mut fetches = Vec::new();
+        self.sync_to(&mut session, head, Some(&mut fetches)).await?;
+        // `sync_to` performs at most one fetch, and the guard above means
+        // it performed exactly one unless it errored (which returns above).
+        Ok(fetches.pop())
     }
 
     /// Claims the one re-bootstrap slot per [`REBOOTSTRAP_COOLDOWN`]
@@ -720,12 +743,17 @@ impl PrivateEth {
         &self,
         session: &mut Session,
         target: u64,
-        sink: Option<&mut SyncTimings>,
+        sink: Option<&mut Vec<SyncFetch>>,
     ) -> Result<(), RpcError> {
         if target <= session.pending_head {
             return Ok(());
         }
         let from = session.pending_head;
+        // Snapshot either side of the one `/sync` call to attribute its
+        // wire/decode/bytes to *this* fetch rather than to the trial's
+        // running total (see `PirHttpClient::net_stats`). `None` when
+        // uninstrumented, and then nothing below reads a clock.
+        let before = sink.as_ref().and_then(|_| self.pir.net_stats());
         match self
             .pir
             .sync(
@@ -739,23 +767,40 @@ impl PrivateEth {
         {
             Some(delta) => {
                 let new_head = delta.block;
+                // Counted before the ingest consumes the delta, so it can
+                // only be done here — inside the caller's own timed
+                // region. It is O(cells fetched) and lands in the
+                // caller's residual on a syncing trial; see
+                // `BalanceTimings`' docs.
                 let cells_in_delta = sink.as_ref().map_or(0, |_| delta_cells(&delta));
                 let t_ingest = Instant::now();
                 session.client.ingest_delta(&delta)?;
                 let ingest = t_ingest.elapsed();
                 session.pending_head = new_head;
                 if let Some(s) = sink {
-                    // A trial can sync twice (before the answer and again
-                    // at the answered block), so the per-call costs
-                    // accumulate while the block range spans both.
-                    if s.blocks == 0 {
-                        s.from_block = from;
-                    }
-                    s.to_block = new_head;
-                    s.blocks = new_head.saturating_sub(s.from_block);
-                    s.ingest += ingest;
-                    s.cells_in_delta += cells_in_delta;
-                    s.delta_cells_total = session.client.delta_cells();
+                    let after = self.pir.net_stats();
+                    let (wire, decode, wire_bytes) = match (before, after) {
+                        (Some(b), Some(a)) => (
+                            Duration::from_nanos(a.sync.wire_ns.saturating_sub(b.sync.wire_ns)),
+                            Duration::from_nanos(a.sync.decode_ns.saturating_sub(b.sync.decode_ns)),
+                            a.sync.response_bytes.saturating_sub(b.sync.response_bytes),
+                        ),
+                        _ => (Duration::ZERO, Duration::ZERO, 0),
+                    };
+                    s.push(SyncFetch {
+                        from_block: from,
+                        to_block: new_head,
+                        blocks: new_head.saturating_sub(from),
+                        received_at_unix_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis()),
+                        wire,
+                        decode,
+                        wire_bytes,
+                        ingest,
+                        cells_in_delta,
+                        delta_cells_total: session.client.delta_cells(),
+                    });
                 }
                 Ok(())
             }

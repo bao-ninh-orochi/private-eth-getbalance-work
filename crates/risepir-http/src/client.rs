@@ -32,7 +32,7 @@ use ikpir_common::SimplePirBackend;
 use risepir_proto::{codec, BlockDelta};
 use risepir_server::SetupBundle;
 
-use crate::measure::{NetCall, NetSink};
+use crate::measure::{NetCall, NetSink, NetStats};
 use crate::wire::{self, WireError};
 
 // ─── transport guardrails ────────────────────────────────────────────────
@@ -271,6 +271,20 @@ impl PirHttpClient {
     /// already stripped.
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// A snapshot of the attached [`NetSink`]'s counters, or `None` if
+    /// this client is uninstrumented.
+    ///
+    /// Exists so a caller can attribute one *individual* call: the sink
+    /// accumulates, so a snapshot taken either side of a single call
+    /// and subtracted gives exactly that call's wire time, decode time,
+    /// and bytes. That is sound only because this transport is driven
+    /// strictly sequentially, one request in flight at a time — which is
+    /// the same single-in-flight contract `RisePirClient::build_query`
+    /// already imposes on the query path.
+    pub fn net_stats(&self) -> Option<NetStats> {
+        self.sink.as_ref().map(|s| s.snapshot())
     }
 
     /// Send one request, measuring it if a [`NetSink`] is attached.

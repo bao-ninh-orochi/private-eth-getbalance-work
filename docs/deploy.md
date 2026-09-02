@@ -427,7 +427,7 @@ paragraph, ADR-0034 §6).
 |---|---:|---:|---|
 | `--partial` demo | ≤4 M tracked | ~1 GB | any laptop |
 | complete mainnet, `(arity 2, bucket_size 4)` — current code (ADR-0034) | **200.5 M nonzero** (2026-07-26) | server DB **23.62 GB** + hint 0.55 GB + A 0.55 GB ⇒ **~24.7 GB working set** | GCP `e2-highmem-8` (8 vCPU / 64 GB) still comfortably covers it; a smaller box is plausible but unverified — nothing has re-bootstrapped at this geometry at the complete set yet |
-| complete mainnet, `(arity 3, bucket_size 4)` — what is live today | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h — what the public deployment actually runs on right now |
+| complete mainnet, `(arity 3, bucket_size 4)` — what is live today | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h — what the public deployment ran on until the 2026-09-02 migration; now `c3d-highmem-16` (8 cores / 16 vCPU, 128 GB) in `us-east4-a`, ~$0.98/h ≈ $23.5/day (§5.11) |
 | RPC usage | — | — | dRPC + publicnode keyless tiers (the follow loop is ~5–10 requests/min steady-state) |
 
 Disk, not just RAM: a state file at the deployed `(2,4)` geometry computes to
@@ -1139,6 +1139,18 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   `--resolve host:port:ip` (curl syntax, TLS validation unchanged) lets the
   origin be measured while public DNS still points elsewhere. Exit code 3 means the run finished but at least one
   answer disagreed with the independent provider.
+- **A cloned or migrated disk's `target/` is stale for the new CPU, and
+  cargo cannot tell.** `target-cpu=native` (`.cargo/config.toml`) is outside
+  cargo's own fingerprinting, so a disk snapshot's `target/` — built for the
+  *old* host — gets silently reused rather than recompiled (a 9 s
+  incremental build kept the wrong-CPU kernels during the 2026-09-02
+  migration, §5.11). Always `cargo clean` (or clone fresh) before the first
+  build on a new machine.
+- **A fresh clone has no `web/client.wasm`.** It is a build artifact
+  `.gitignore` excludes, so `--web web` fails at startup
+  (`web/client.wasm: No such file`) until `cargo run -p xtask --release --
+  web` runs once (needs the `wasm32` target; the deployed VM's pinned
+  toolchain already carries it).
 
 ### Log timestamps and rotation
 
@@ -2419,6 +2431,130 @@ the same block, and their three saved state files are **byte-identical** —
 116,526,275 B each. Same cells, same encoded hints, from a sequential replay
 and from two 8-deep concurrent ones. Prefetching moved when the fetches were
 issued and nothing else.
+
+### 5.11 Migrated to a c3d-highmem-16 in us-east4 (2026-09-02)
+
+**Why.** The measurement campaign in issue #4 wanted a host on the paper's
+own microarchitecture family — Zen 4, matching the r7a.xlarge (EPYC 9R14)
+the paper's own benchmarks ran on — with double the old box's cores and
+memory. `c3d-highmem-16`/`-8` were **stocked out in every `us-central1`
+zone** (`a`/`b`/`c`/`f`, checked 17:20–17:30 UTC); `c3d-highmem-30` sits
+over the project's C3D quota. `us-east4-a` had capacity, so the move became
+cross-region rather than a same-zone resize. An initial `us-central1-a`
+instance record (also named `risepir-c3d`) was created and deleted once the
+stockout was confirmed there.
+
+**Migration vehicle: a disk snapshot, not a fresh bootstrap.**
+`risepir-pre-migration-20260903`, a snapshot of the old boot disk, was
+restored to a new disk in `us-east4-a` and attached to the new VM — carrying
+the 24.18 GB `RPST3` state file, the Caddy install and its certificate, the
+toolchain, and the repo checkout across in one step, with no BigQuery
+re-export. The snapshot doubles as the backup the old host's retirement
+needs: `risepir` was already `TERMINATED` when this work began, its
+reserved address (`risepir-ip`) detached; its disk deletion is deferred
+until this deployment is verified end to end.
+
+**New VM: `risepir-c3d`, `c3d-highmem-16`** (AMD EPYC 9B14, Zen 4, 8 cores /
+16 vCPU, 128 GB, 250 GB pd-balanced), `us-east4-a`, reserved address
+**`risepir-ip-east4` = `35.199.37.209`**. Every `gcloud … ssh` example
+elsewhere in this repo that named `risepir` now reads `risepir-c3d --zone
+us-east4-a` — the zone flag is required once the VM is outside the
+project's default zone.
+
+**Trap 1 — a cloned disk's `target/` is stale for the new CPU, and cargo
+cannot tell.** The snapshot's `target/` held kernel crates built with
+`target-cpu=native` for the *old* host; `cargo build` on the new host
+reused them without recompiling — a 9 s incremental build that silently
+kept the old CPU's tuned kernels on a Zen 4 machine. `target-cpu=native` is
+a `.cargo/config.toml` flag outside cargo's own fingerprinting, so nothing
+short of a clean rebuild catches it. **Always `cargo clean` (or clone
+fresh) before the first build on a new machine** — the campaign binary was
+built this way.
+
+**Catch-up replay.** The state file (block 25,838,386, saved cleanly
+2026-08-26) loaded on the new host in **113.4 s** and reported
+**203,879,841 accounts** — not the 201,059,658 that every other figure in
+this repo's docs carries: the box had been re-bootstrapped once more on
+2026-08-19 (`~/bootstrap-complete-20260819.sh`, `~/snapshot-20260819/`,
+`~/risepir-state.bin.pre-20260819` are on the disk as evidence), a round
+this repo's docs never recorded. The gap to `finalized` was then ~52,000
+blocks. At the pre-`--prefetch` loop, the replay ran at **~1.0–1.2
+blocks/s**, dRPC-bound: 1,293 fetch failures (`408`/`429`) in the first 7
+minutes, and dRPC is the only keyless endpoint that serves
+`prestateTracer` at all (blastapi, llamarpc, blockpi, merkle, mevblocker
+and nodies were probed and do not). At that rate the catch-up would have
+cost ~13 h, so issue #5's bounded prefetch (ADR-0047, PR #7, merged as
+`e780dfc`) was implemented and merged same-day specifically to shorten it —
+a skipped block is a wrong balance, so this one ran under closer review
+than routine work gets.
+
+| depth | measured rate | note |
+|---|---:|---|
+| 1 (pre-`--prefetch`) | ~1.0–1.2 blocks/s | dRPC-bound; 1,293 fetch failures in the first 7 min |
+| 4 | 3.7–4.1 blocks/s, sustained | flat failure count |
+| 8 | 2–4.5 blocks/s, degrading over the window | +156 dRPC `408`s and `merkle.io` `429`s over 20 min; no better than depth 4 |
+
+Depth 8 pushed more fallback traffic onto the reconcile-starved window for
+no net gain over depth 4 — exactly the risk the prefetch PR's review had
+flagged — so the catch-up ran at **`--prefetch 4`** for the remainder
+(switched to depth 8 at 19:15 UTC, back to depth 4 at 19:40 UTC). While
+deep in catch-up, `GET /healthz`'s reconcile fields sat dark long enough to
+repeatedly hit ADR-0027's `CRITICAL` escalation — expected during a deep
+catch-up (the loop never halts on it), not a regression; reconcile is not
+treated as verified until it is seen green with the deployment at the head.
+
+**Trap 2 — `web/client.wasm` is a build artifact, and a fresh clone does
+not have one.** The catch-up was restarted on the prefetch binary from a
+fresh clone at `~/build-4`: the old (depth-1) server was stopped with the
+anchored `pkill -INT -f "^\./target/release/risepir-rpc"` at 19:05:12 UTC
+(`state saved (shutdown): block 25844151, 24.18 GB in 121.6s` at 19:07:13),
+and the first start against the new checkout failed immediately —
+`--web web: web/client.wasm: No such file` — because that file is a build
+artifact `.gitignore` excludes, and nothing had produced one in `~/build-4`
+yet. Fixed live by copying the wasm from the original checkout; the
+durable fix, and the one to reach for on the next fresh clone, is
+`cargo run -p xtask --release -- web` (the VM's pinned toolchain already
+carries the `wasm32` target).
+
+**Timeline (UTC), this migration's own events** — the fuller
+instrumentation-PR timeline is a separate story, not repeated here:
+
+| time | event |
+|---|---|
+| 17:20–17:30 | `c3d-highmem-16`/`-8` confirmed stocked out in `us-central1-a/b/c/f`; `us-east4-a` chosen |
+| 17:45 | new host up; state loaded in 113.4 s, 203,879,841 accounts; catch-up begins at depth 1 |
+| 17:55 | price verified against the Cloud Billing catalog (below) |
+| 19:05:12 | depth-1 server stopped, anchored `pkill -INT`; save completed 19:07:13 |
+| 19:08 | server restarted from `~/build-4` on the prefetch binary, `--prefetch 4`, after the wasm-artifact fix |
+| 19:15:13 | catch-up switched to `--prefetch 8` |
+| 19:25 | PR #7 (prefetch, issue #5, `e780dfc`) merged to `upstream main` |
+| 19:40 | catch-up switched back to `--prefetch 4` after depth 8 showed no net gain and rising `408`/`429` pressure |
+| 20:00 | instrumentation PR (#8, part 1 of #4) opened as a draft |
+
+**Price, verified against the Cloud Billing catalog** (service
+`6F81-5844-456A`, USD, on-demand, `us-east4`): `c3d-highmem-16` = 16 ×
+$0.029563 (core) + 128 × $0.003959 (GiB RAM) = **$0.9798/h ≈ $23.5/day**
+while running — about 2.7× the old `e2-highmem-8`'s **$0.3616/h ≈
+$8.68/day** (matches this repo's existing ~$8.60/day figure), for roughly
+double the vCPUs and RAM.
+
+**DNS is not yet flipped.** `demo.risepir.org` still resolves to the *old*
+reserved address; Cloudflare DNS is a dashboard-only operation with no API
+path this repo drives (§3.7, §5.9), so the record has to be changed by
+hand to **35.199.37.209**, **unproxied (grey cloud)** — never orange, per
+ADR-0019 and threat model §4.2's code-delivery reasoning. The Caddy
+certificate on the cloned disk is already valid for `demo.risepir.org`
+(until ~2026-11-15), so no re-issuance is needed; per §5.9's own finding,
+the safe move after the DNS flip is a `systemctl restart caddy`, never
+`reload`.
+
+**Where things stand at the end of this record.** The server runs from
+`~/build-4` (campaign commit `b37e4ee`) in tmux session `risepir`, logging
+to `~/server-complete.log`, state at `~/risepir-state.bin`. The old host
+stays `TERMINATED`, its snapshot kept as this migration's own backup. The
+measurement campaign itself — the client probe, the per-block CSV,
+`time-setup`'s C13 check — runs after this record ends; its numbers belong
+in a later revision of this repo's docs, not here.
 
 ## 6. Who does what, explicitly
 

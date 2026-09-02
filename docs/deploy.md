@@ -748,7 +748,7 @@ one being sized:
 
 | option | complete-set cost | notes |
 |---|---|---|
-| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment runs on**; comfortable headroom at either geometry; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
+| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment ran on until the 2026-09-02 migration** (now `c3d-highmem-16` in `us-east4-a`, ≈$0.98/h; §5.11); comfortable headroom at either geometry; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
 | GCP `e2-highmem-8`, stopped when idle | ~$10/mo disk only | the honest way to run a demo box: start it for a session, `Ctrl-C` to save state, stop it |
 | AWS on-demand (`r7g.2xlarge`, 64 GB) | ≈ $0.43/h ≈ $310/mo | no free tier remotely near this RAM |
 | AWS spot (`r7g.2xlarge`) | ≈ $95–130/mo | interruptions are cheap here (state file + catch-up replay) |
@@ -763,6 +763,16 @@ The browser front end is reachable on the open internet at
 **<https://demo.risepir.org>** — one hostname serving both the page and the
 PIR transport, which is what ADR-0019's same-origin `connect-src 'self'` CSP
 requires. Every command below was executed as written.
+
+> **Note (added after the fact, 2026-09-02): the specific IP, zone and
+> instance name recorded in this section are pre-migration evidence, left
+> exactly as written.** The deployment moved off this VM (`risepir`,
+> `us-central1-a`, `136.115.93.177`) to `risepir-c3d` (`c3d-highmem-16`,
+> `us-east4-a`, `35.199.37.209`) — see §5.11 and `CLAUDE.md`'s "The live GCP
+> deployment" section for the current host, and note the `demo.` DNS record
+> has **not yet** been repointed to it. The mechanics below (the Cloudflare
+> zone setup, CAA, Caddy TLS, the same-origin requirement) are unaffected and
+> still describe how the public origin works.
 
 **Both the page and the transport must stay on one hostname.** Splitting them
 (`app.` for the page, `pir.` for `/setup` and queries) would force the CSP

@@ -207,11 +207,18 @@ operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
 
 ## The live GCP deployment
 
-Project **`<your-project-id>`**, VM **`risepir`** (**`e2-highmem-8`, 8 vCPU / 64 GB,
-250 GB disk**, Debian 12, `us-central1-a`); repo at `~/private-eth-getbalance`,
-server runs in tmux session `risepir` with `--state ~/risepir-state.bin`, logs
-at `~/server-complete.log`. The Mac's `gcloud` + `gh` are authenticated; the VM
-is drivable non-interactively.
+Project **`<your-project-id>`**, VM **`risepir-c3d`** (**`c3d-highmem-16`: AMD
+EPYC 9B14 (Zen 4), 8 cores / 16 vCPU, 128 GB, 250 GB pd-balanced disk**,
+Debian 12, `us-east4-a`); repo at `~/build-4` (a fresh clone at the campaign
+commit), server runs in tmux session `risepir` with `--state
+~/risepir-state.bin`, logs at `~/server-complete.log`. The Mac's `gcloud` +
+`gh` are authenticated; the VM is drivable non-interactively.
+
+**Migrated 2026-09-02** from VM `risepir` (`e2-highmem-8`, 8 vCPU / 64 GB,
+250 GB disk, `us-central1-a`) — cross-region, because `c3d-highmem-16`/`-8`
+were stocked out in every `us-central1` zone that day. The old VM is
+`TERMINATED`, kept only as a snapshot backup until this deployment is
+verified end to end; deploy.md §5.11 has the full record.
 
 Since **2026-07-26 it serves the COMPLETE mainnet set** — `GET /mode` = 1, not
 the partial demo. That is what the 64 GB machine is for. On **2026-07-27 it was
@@ -223,10 +230,26 @@ file **24,176,139,523 B (24.18 GB)**. The geometry has not moved across either
 of the last two rounds — same 67,108,864 buckets, `plaintext_bits` 8,
 cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged.
 
+That **201,059,658** figure was the 2026-07-31 round's count; the box was
+re-bootstrapped once more on 2026-08-19, a round this repo's docs never
+recorded, and loading the resulting state file on the new `risepir-c3d` host
+reported **203,879,841** accounts in 113.4 s (deploy.md §5.11). `C11` (the
+campaign's own account count) comes from the campaign binary, not this
+figure.
+
 Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s snapshot
 ingest, 12 min 46 s to the first saved state file, then 10,816 blocks of replay
 at **1.72 blocks/s** (not the ~1 s/block the runbook long assumed). It costs
-**~$8.60/day running**, so stop it when idle.
+**~$23.5/day running** on the `c3d-highmem-16` (was **~$8.60/day** on the
+`e2-highmem-8`; both verified against the Cloud Billing catalog, deploy.md
+§5.11), so stop it when idle.
+
+A large catch-up (this migration's own was ~52,000 blocks) is faster with
+**`--prefetch <k>`** (ADR-0047, deploy.md §5.11): depth 4 sustained
+**3.7–4.1 blocks/s** against the plain loop's ~1.0–1.2 blocks/s
+(dRPC-bound); depth 8 fetched no faster and pushed more load onto the
+keyless fallback providers while the reconcile backstop was already dark
+from the lag, so 4 is the depth to reach for first on a deep catch-up.
 
 The complete-set per-block patch time is no longer an extrapolation: **~11.1 ms
 at K ≈ 310** while following the head (8.2–8.8 ms during catch-up, when the
@@ -249,22 +272,45 @@ residual-trust disclosure, and links onward to the demo. `demo.` is the
 intermittently-available origin and fails hard when the VM is off, which is
 exactly why the apex exists.
 
-Since **2026-08-17** the VM holds the reserved static IP **`136.115.93.177`**,
-so the address no longer moves across stop/start and there is **no DNS step in
-the start path** — the old "run `duckdns-update.sh` *first*, the IP just
-changed" rule is gone. The `demo.` record is deliberately **DNS-only
-(unproxied)** at Cloudflare: proxying would terminate TLS at a third party that
-could then serve a modified wasm client, which is exactly the code-delivery
-trust ADR-0019 discloses (threat model §4.2). Never turn the orange cloud on
-for it.
+Since **2026-08-17** the VM has held a reserved static IP, so the address
+does not move across stop/start and there is **no DNS step in the ordinary
+start path** — the old "run `duckdns-update.sh` *first*, the IP just
+changed" rule is gone. **That reservation is now `risepir-ip-east4` =
+`35.199.37.209`** on `risepir-c3d` in `us-east4-a` (was `risepir-ip` =
+`136.115.93.177` on `risepir` in `us-central1-a`; the old reservation was
+detached when that VM was retired — deploy.md §5.11). The `demo.` record is
+deliberately **DNS-only (unproxied)** at Cloudflare: proxying would
+terminate TLS at a third party that could then serve a modified wasm client,
+which is exactly the code-delivery trust ADR-0019 discloses (threat model
+§4.2). Never turn the orange cloud on for it.
+
+**The DNS flip across this migration is a manual step, still pending.**
+`demo.risepir.org` currently resolves to the *old*, now-detached address —
+Cloudflare DNS is a dashboard-only operation with no API path in this repo
+(deploy.md §3.7), so nobody has updated it yet. To cut over: point the `A`
+record at `35.199.37.209`, unproxied (grey cloud, as above); the Caddy
+certificate on the cloned disk is already valid for `demo.risepir.org`
+(until ~2026-11-15), so no reissuance is needed, but Caddy's in-memory
+certificate cache does not notice a plain config reload (deploy.md
+§3.7/§5.9), so the safe move after the flip is **`systemctl restart
+caddy`**, never `reload`.
+
+**Two traps specific to a fresh clone or a migrated disk** (both hit during
+the 2026-09-02 migration, deploy.md §5.11): a cloned disk's `target/` is
+compiled for the *old* CPU and `cargo build` cannot tell `target-cpu=native`
+changed, so it silently reuses stale kernels — always `cargo clean` (or
+clone fresh) before the first build on a new machine. And `web/client.wasm`
+is a build artifact, absent from a fresh clone — `--web web` fails at
+startup (`web/client.wasm: No such file`) until `cargo run -p xtask
+--release -- web` runs once.
 
 ```bash
-gcloud --quiet compute ssh risepir --command='...'
-# resume after a stop — the IP is static now, so no DNS refresh:
-gcloud compute instances start risepir
-# normal restart: the 36 GB state file is loaded, then missed blocks replay
-gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
-  "cd ~/private-eth-getbalance && exec ./target/release/risepir-rpc mainnet \
+gcloud --quiet compute ssh risepir-c3d --zone us-east4-a --command='...'
+# resume after a stop — the IP is static, so no DNS refresh:
+gcloud compute instances start risepir-c3d --zone us-east4-a
+# normal restart: the 24.18 GB state file is loaded, then missed blocks replay
+gcloud --quiet compute ssh risepir-c3d --zone us-east4-a --command='tmux new-session -d -s risepir \
+  "cd ~/build-4 && exec ./target/release/risepir-rpc mainnet \
    --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
 ```
 
@@ -361,20 +407,20 @@ is live for the *next* hash change, not for this one. The superseded
 (24.18 GB each) are evidence only — no binary from this tree can load them —
 and can be deleted to reclaim ~48 GB.
 
-(The external IP is now reserved and stable, so nothing has to be refreshed
+(The external IP is reserved and stable, so nothing has to be refreshed
 after a start. An SSH tunnel works as before:
-`gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
+`gcloud compute ssh risepir-c3d --zone us-east4-a -- -L 8545:localhost:8545`.)
 
 Stopping the meter — in this order:
 
 ```bash
-gcloud --quiet compute ssh risepir \
+gcloud --quiet compute ssh risepir-c3d --zone us-east4-a \
   --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 90 && tail -1 ~/server-complete.log'
 #   → wait for "state saved; exiting" — at the complete set this writes the
 #     24.18 GB state file (the `(2,4)` lineage live since 2026-07-27; the
 #     final save of the old 36.26 GB `(3,4)` file took ~2 min), so allow well
 #     over the 20 s that sufficed in partial mode
-gcloud compute instances stop risepir
+gcloud compute instances stop risepir-c3d --zone us-east4-a
 ```
 
 The **anchored** pattern matters: a broad `pkill -f risepir-rpc` also kills the
@@ -384,5 +430,8 @@ mode, but **now genuinely expensive** — a complete-set re-bootstrap is ~33 min
 of CPU plus the catch-up replay). When checking from `gcloud … --command`,
 bracket the pattern (`pgrep -f "risepir-rp[c]"`) or the probe matches its own
 ssh wrapper. VM SSH key and the GitHub account key `risepir-gcp-vm` are already
-set up; at `e2-highmem-8` the VM burns **~$8.60/day** while running (up from
-~$0.80/day as an `e2-medium`), ~$10/mo stopped (250 GB disk only).
+set up; at `c3d-highmem-16` the VM burns **~$23.5/day** while running (was
+**~$8.60/day** at `e2-highmem-8`, itself up from ~$0.80/day as an
+`e2-medium`; both current figures verified against the Cloud Billing catalog,
+deploy.md §5.11), ~$25/mo stopped (250 GB pd-balanced disk only — was quoted
+here as ~$10/mo on the old host).

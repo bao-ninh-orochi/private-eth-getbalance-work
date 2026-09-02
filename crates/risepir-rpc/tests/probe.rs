@@ -162,14 +162,20 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
 
     // ── pass 2: only random addresses, exercising the not-found path ──
     // Appended to the same files, which is also the second half of the
-    // "header written once" contract in a real setting.
+    // "header written once" contract in a real setting. `follow_secs: 0`
+    // also pins the deadline rule: a batch that started runs to
+    // completion, so "do not follow" is not "do nothing".
     let s2 = probe::run(ProbeConfig {
         absent_fraction: 1.0,
+        follow_secs: 0,
         ..base
     })
     .await
     .expect("probe run 2");
-    assert_eq!(s2.trials, 3);
+    assert_eq!(
+        s2.trials, 3,
+        "--follow-secs 0 must still run the batch to completion"
+    );
     assert_eq!(
         s2.absent_probes, 3,
         "every trial took the random-address path"
@@ -297,7 +303,11 @@ async fn probe_measures_the_mock_deployment_end_to_end() {
         );
         assert!(longest_hex_run(&r.join(",")) < 40);
     }
-    assert!(s2.block_rows > 0 && s2.blocks_ingested > 0);
+    assert_eq!(
+        s2.block_rows, 0,
+        "--follow-secs 0 means no follow, so pass 2 adds no block rows"
+    );
+    assert!(s1.block_rows > 0 && s1.blocks_ingested > 0);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

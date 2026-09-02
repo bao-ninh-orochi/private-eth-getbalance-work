@@ -208,8 +208,14 @@ pub struct ProbeConfig {
     /// write lock rather than starving behind a back-to-back query
     /// stream.
     pub trial_gap_ms: u64,
-    /// Total run lifetime from start. The run stops at this deadline
-    /// even if batches remain.
+    /// Total run lifetime from start.
+    ///
+    /// The deadline gates two things: no *new* batch starts after it,
+    /// and following ends at it. A batch already in flight always runs
+    /// to completion — truncating the last batch mid-way would leave the
+    /// campaign with one short sample and no obvious sign of it. So
+    /// `--follow-secs 0` is the useful "run the batches back to back and
+    /// do not follow" mode rather than a run that does nothing.
     pub follow_secs: u64,
     /// How often the session polls `GET /head` and ingests new deltas
     /// between batches.
@@ -1072,11 +1078,10 @@ pub async fn run(cfg: ProbeConfig) -> Result<ProbeSummary, ProbeError> {
             pool.len()
         );
 
+        // No deadline check inside the batch: a batch that started runs
+        // to completion (see `ProbeConfig::follow_secs`). The deadline
+        // gates batch *starts* and the follow loop, both above.
         for _ in 0..cfg.batch_size {
-            if Instant::now() > deadline {
-                logln!("risepir-rpc probe: --follow-secs reached mid-batch; stopping");
-                break;
-            }
             let absent = rng.bernoulli(cfg.absent_fraction);
             let addr = if absent {
                 rng.address()

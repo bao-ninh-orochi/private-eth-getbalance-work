@@ -662,6 +662,13 @@ fn print_usage() {
     eprintln!("ADR-0007). The address never leaves the machine and never enters either CSV.");
     eprintln!("--resolve host:port:ip is curl-style DNS override (TLS validation stays ON), so a");
     eprintln!("deployment can be measured while its public DNS record still points elsewhere.");
+    eprintln!(
+        "--follow-secs is the run's total lifetime: no new batch starts after it and following"
+    );
+    eprintln!(
+        "ends at it, but a batch already in flight always finishes, so --follow-secs 0 means"
+    );
+    eprintln!("\"run the batches back to back, do not follow\" rather than \"do nothing\".");
     eprintln!("Exit 3 means the run finished but at least one answer disagreed with the provider.");
     eprintln!("See docs/deploy.md for the full runbook.");
 }

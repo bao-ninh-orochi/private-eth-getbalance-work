@@ -1112,6 +1112,33 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
   quietest signals you have are that rate and that name. It changes no
   apply, reconcile, autosave or journal behaviour — only when the
   *fetches* are issued.
+- **Measuring a deployment from the client: `risepir-rpc probe`.** One
+  long-lived product session (one `/setup`, never garbage-collected — the
+  same operating point a real client sits at, ADR-0003) against a running
+  deployment, writing two CSVs: one row per private query and one per delta
+  fetch. It measures end-to-end latency, the query build, each network call's
+  wire time, the server's own reported answer time where the server publishes
+  it, decode broken into ADR-0003's four rewind steps, bytes each way, the
+  per-block delta cost, the hint download, and client RSS — with the latency
+  budget closing *by construction* (`t_total = build + wire + finish +
+  residual`, residual defined as the subtraction, never distributed). Every
+  trial's decoded balance is compared byte-exactly against `--confirm-url`'s
+  `eth_getBalance` **at the same explicit block height**, never
+  `"latest"`-vs-`"latest"` (ADR-0007), and a disagreement is loud. Its
+  privacy stance is the same as `client`'s for the query path — the PIR server
+  sees only LWE query vectors — and the address never enters a CSV, a log line,
+  or an error message either; the only answer-derived fields are `found`,
+  `provider_match` and `provider_hex_match`, one bit each, and every error
+  column is a fixed variant name rather than a message that could quote a
+  provider's body. The correctness check is the deliberate exception: it asks
+  `--confirm-url` for `eth_getBalance(address, block)` **in plaintext**, because
+  there is no way to ask an independent operator whether an answer is right
+  without telling it what was asked. That happens after the trial's clock has
+  stopped, goes to a different operator from the one serving the PIR (so neither
+  sees both halves), and `--no-confirm` disables it entirely.
+  `--resolve host:port:ip` (curl syntax, TLS validation unchanged) lets the
+  origin be measured while public DNS still points elsewhere. Exit code 3 means the run finished but at least one
+  answer disagreed with the independent provider.
 
 ### Log timestamps and rotation
 

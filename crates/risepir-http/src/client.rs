@@ -24,13 +24,15 @@
 //! (`risepir-client`) regardless of whether it is driven in-process or
 //! over a real socket.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ikpir_common::backend::simple::{SimpleQuery, SimpleResponse};
 use ikpir_common::SimplePirBackend;
 use risepir_proto::{codec, BlockDelta};
 use risepir_server::SetupBundle;
 
+use crate::measure::{NetCall, NetSink, NetStats};
 use crate::wire::{self, WireError};
 
 // ─── transport guardrails ────────────────────────────────────────────────
@@ -71,8 +73,23 @@ const MAX_SYNC_BODY_BYTES: usize = 1 << 30; // 1 GiB
 /// `(arity 3, bucket_size 4)` geometry measured 2026-07-26, `docs/numbers.md`
 /// §4c), so the cap only excludes the absurd.
 const MAX_SETUP_BODY_BYTES: usize = 8 << 30; // 8 GiB
+/// `/recent`: `count:u32-le ‖ count × 20 bytes`, capped server-side at
+/// `node::RECENT_CAPACITY` (128) — a few KiB even with generous slack.
+const MAX_RECENT_BODY_BYTES: usize = 1 << 16; // 64 KiB
 /// Error bodies are diagnostic text; anything longer is noise.
 const MAX_ERROR_BODY_BYTES: usize = 64 << 10; // 64 KiB
+
+/// Optional `POST /answer` response header: nanoseconds the server spent
+/// in `RisePirServer::answer` itself.
+///
+/// **Optional by construction.** A server that does not publish
+/// per-answer timings omits it, and every caller here treats its absence
+/// as "not reported", never as zero.
+const HDR_ANSWER_COMPUTE_NS: &str = "x-risepir-answer-compute-ns";
+/// Optional `POST /answer` response header: nanoseconds the server spent
+/// in the whole `/answer` handler (lock acquisition, wire decode, the
+/// answer, wire encode). Same optionality as [`HDR_ANSWER_COMPUTE_NS`].
+const HDR_ANSWER_HANDLER_NS: &str = "x-risepir-answer-handler-ns";
 
 /// Errors from every [`PirHttpClient`] call.
 ///
@@ -184,14 +201,27 @@ impl ClientError {
 pub struct PirHttpClient {
     base: String,
     http: reqwest::Client,
+    /// Optional wire-level instrumentation ([`crate::measure`]). `None`
+    /// — the default, and what every product construction site uses —
+    /// means every method below is byte-for-byte the uninstrumented
+    /// path, with no clock read and no lock.
+    sink: Option<Arc<NetSink>>,
+}
+
+/// One measured round trip: the body (absent only for an allowed `409`)
+/// and the response headers, kept so a caller can read `/setup`'s
+/// `x-risepir-mode` or `/answer`'s optional timing headers.
+struct Measured {
+    /// `None` only when the call allowed `409 Conflict` and got one.
+    body: Option<Vec<u8>>,
+    /// The response's headers, cloned before the body was consumed.
+    headers: reqwest::header::HeaderMap,
 }
 
 impl PirHttpClient {
     /// Build a client against `base` (e.g. `"http://127.0.0.1:8645"`,
     /// no trailing slash required — one is stripped if present).
     pub fn new(base: impl Into<String>) -> Self {
-        let base = base.into();
-        let base = base.strip_suffix('/').map(str::to_string).unwrap_or(base);
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_STALL_TIMEOUT)
@@ -200,7 +230,134 @@ impl PirHttpClient {
             // static rustls configuration that is a build-environment
             // defect, not a runtime input.
             .expect("reqwest client construction");
-        Self { base, http }
+        Self::with_http_client(base, http)
+    }
+
+    /// [`Self::new`], but driving a caller-supplied [`reqwest::Client`].
+    ///
+    /// The one reason this exists: a caller that needs builder options
+    /// this crate does not (and should not) expose — a curl-style DNS
+    /// override via [`reqwest::ClientBuilder::resolve`], a proxy, a
+    /// different timeout budget — while still reusing **one** connection
+    /// pool for the whole run. A fresh TCP+TLS handshake per query would
+    /// contaminate any measurement of network time, so sharing the
+    /// client is not merely convenient.
+    ///
+    /// The caller owns the configuration, including the guardrails
+    /// [`Self::new`] sets ([`CONNECT_TIMEOUT`], [`READ_STALL_TIMEOUT`]):
+    /// a client built without them has no timeout at all. The
+    /// per-endpoint response-size caps are enforced here regardless, so
+    /// the "validate every length before allocating" half of the
+    /// transport guardrails cannot be configured away.
+    pub fn with_http_client(base: impl Into<String>, http: reqwest::Client) -> Self {
+        let base = base.into();
+        let base = base.strip_suffix('/').map(str::to_string).unwrap_or(base);
+        Self {
+            base,
+            http,
+            sink: None,
+        }
+    }
+
+    /// Attach a [`NetSink`], so every subsequent call records its wire
+    /// time and byte counts (see [`crate::measure`]).
+    #[must_use]
+    pub fn with_net_sink(mut self, sink: Arc<NetSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// The base URL this client talks to, with any trailing slash
+    /// already stripped.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// A snapshot of the attached [`NetSink`]'s counters, or `None` if
+    /// this client is uninstrumented.
+    ///
+    /// Exists so a caller can attribute one *individual* call: the sink
+    /// accumulates, so a snapshot taken either side of a single call
+    /// and subtracted gives exactly that call's wire time, decode time,
+    /// and bytes. That is sound only because this transport is driven
+    /// strictly sequentially, one request in flight at a time — which is
+    /// the same single-in-flight contract `RisePirClient::build_query`
+    /// already imposes on the query path.
+    pub fn net_stats(&self) -> Option<NetStats> {
+        self.sink.as_ref().map(|s| s.snapshot())
+    }
+
+    /// Send one request, measuring it if a [`NetSink`] is attached.
+    ///
+    /// The measured span starts immediately before `send()` and ends
+    /// once the last body byte has been accumulated — so it is wire
+    /// time only, with the caller's own decode timed separately via
+    /// [`NetSink::record_decode`]. Failures are recorded too, since a
+    /// request that never returned still consumed wall time.
+    async fn send_measured(
+        &self,
+        call: NetCall,
+        req: reqwest::RequestBuilder,
+        request_bytes: u64,
+        max_len: usize,
+        allow_conflict: bool,
+    ) -> Result<Measured, ClientError> {
+        let started = self.sink.as_ref().map(|_| Instant::now());
+        let record = |response_bytes: u64, content_length: Option<u64>| {
+            if let (Some(sink), Some(t0)) = (self.sink.as_ref(), started) {
+                sink.record(
+                    call,
+                    elapsed_ns(t0),
+                    request_bytes,
+                    response_bytes,
+                    content_length,
+                );
+            }
+        };
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                record(0, None);
+                return Err(e.into());
+            }
+        };
+        let content_length = resp.content_length();
+        let headers = resp.headers().clone();
+        if allow_conflict && resp.status() == reqwest::StatusCode::CONFLICT {
+            record(0, content_length);
+            return Ok(Measured {
+                body: None,
+                headers,
+            });
+        }
+        match ok_body(resp, max_len).await {
+            Ok(bytes) => {
+                record(bytes.len() as u64, content_length);
+                Ok(Measured {
+                    body: Some(bytes),
+                    headers,
+                })
+            }
+            Err(e) => {
+                record(0, content_length);
+                Err(e)
+            }
+        }
+    }
+
+    /// Charge `f`'s wall time to `call`'s decode total (a no-op without
+    /// a sink), returning whatever `f` returned.
+    fn timed_decode<T>(&self, call: NetCall, f: impl FnOnce() -> T) -> T {
+        match self.sink.as_ref() {
+            None => f(),
+            Some(sink) => {
+                let t0 = Instant::now();
+                let out = f();
+                sink.record_decode(call, elapsed_ns(t0));
+                out
+            }
+        }
     }
 
     /// `GET /setup`: the full [`SetupBundle`] a fresh
@@ -236,16 +393,19 @@ impl PirHttpClient {
     pub async fn setup_with_mode(
         &self,
     ) -> Result<(SetupBundle<SimplePirBackend>, Option<bool>), ClientError> {
-        let resp = self.http.get(format!("{}/setup", self.base)).send().await?;
-        // Captured before `ok_body` consumes the response, but only
-        // *interpreted* after it has vouched for a `200` — a non-`200`
-        // must surface as its status error, not as a header complaint.
-        let raw_mode = resp
-            .headers()
-            .get("x-risepir-mode")
-            .map(|v| v.as_bytes().to_vec());
-        let bytes = ok_body(resp, MAX_SETUP_BODY_BYTES).await?;
-        let mode = match raw_mode.as_deref() {
+        let m = self
+            .send_measured(
+                NetCall::Setup,
+                self.http.get(format!("{}/setup", self.base)),
+                0,
+                MAX_SETUP_BODY_BYTES,
+                false,
+            )
+            .await?;
+        // Read only after `send_measured` vouched for a `200` — a
+        // non-`200` must surface as its status error, not as a header
+        // complaint.
+        let mode = match m.headers.get("x-risepir-mode").map(|v| v.as_bytes()) {
             None => None,
             Some(b"0") => Some(false),
             Some(b"1") => Some(true),
@@ -256,7 +416,9 @@ impl PirHttpClient {
                 )))
             }
         };
-        Ok((wire::decode_setup(&bytes)?, mode))
+        let bytes = m.body.unwrap_or_default();
+        let bundle = self.timed_decode(NetCall::Setup, || wire::decode_setup(&bytes))?;
+        Ok((bundle, mode))
     }
 
     /// `GET /head`: the server's current block.
@@ -268,8 +430,16 @@ impl PirHttpClient {
     /// server's documented `/head` framing — [`crate::node`]'s module
     /// docs).
     pub async fn head(&self) -> Result<u64, ClientError> {
-        let resp = self.http.get(format!("{}/head", self.base)).send().await?;
-        let bytes = ok_body(resp, MAX_TINY_BODY_BYTES).await?;
+        let m = self
+            .send_measured(
+                NetCall::Head,
+                self.http.get(format!("{}/head", self.base)),
+                0,
+                MAX_TINY_BODY_BYTES,
+                false,
+            )
+            .await?;
+        let bytes = m.body.unwrap_or_default();
         let arr: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
             ClientError::Wire(format!(
                 "/head returned {} bytes, expected exactly 8",
@@ -291,9 +461,16 @@ impl PirHttpClient {
     /// [`ClientError::Wire`] if the body is not exactly one byte of
     /// value `0` or `1`.
     pub async fn mode(&self) -> Result<bool, ClientError> {
-        let resp = self.http.get(format!("{}/mode", self.base)).send().await?;
-        let bytes = ok_body(resp, MAX_TINY_BODY_BYTES).await?;
-        match bytes.as_slice() {
+        let m = self
+            .send_measured(
+                NetCall::Mode,
+                self.http.get(format!("{}/mode", self.base)),
+                0,
+                MAX_TINY_BODY_BYTES,
+                false,
+            )
+            .await?;
+        match m.body.unwrap_or_default().as_slice() {
             [0] => Ok(false),
             [1] => Ok(true),
             other => Err(ClientError::Wire(format!(
@@ -301,6 +478,36 @@ impl PirHttpClient {
                 other.len()
             ))),
         }
+    }
+
+    /// `GET /recent`: up to `node::RECENT_CAPACITY` recently-touched
+    /// **addresses** (not key hashes), newest first, decoded from the
+    /// server's `count:u32-le ‖ count × 20 bytes` framing.
+    ///
+    /// These are addresses from recent public blocks — the same public
+    /// chain data anyone can read from any node — and are served
+    /// identically to every caller, entirely separately from any query.
+    /// Asking for this list tells the server nothing about which account
+    /// a subsequent PIR query is for. See [`crate::node`]'s `recent`
+    /// field docs.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Network`] / [`ClientError::Status`] / a
+    /// [`ClientError::Wire`] if the body is shorter than its own
+    /// declared length or is not `4 + 20·count` bytes exactly.
+    pub async fn recent(&self) -> Result<Vec<[u8; 20]>, ClientError> {
+        let m = self
+            .send_measured(
+                NetCall::Recent,
+                self.http.get(format!("{}/recent", self.base)),
+                0,
+                MAX_RECENT_BODY_BYTES,
+                false,
+            )
+            .await?;
+        let bytes = m.body.unwrap_or_default();
+        self.timed_decode(NetCall::Recent, || decode_recent(&bytes))
     }
 
     /// `GET /sync?from=<from>&to=<to>&epoch=<epoch>`: the coalesced delta
@@ -334,19 +541,24 @@ impl PirHttpClient {
         plaintext_bits: u32,
         arity: u32,
     ) -> Result<Option<BlockDelta>, ClientError> {
-        let resp = self
-            .http
-            .get(format!(
-                "{}/sync?from={from}&to={to}&epoch={epoch}",
-                self.base
-            ))
-            .send()
+        let m = self
+            .send_measured(
+                NetCall::Sync,
+                self.http.get(format!(
+                    "{}/sync?from={from}&to={to}&epoch={epoch}",
+                    self.base
+                )),
+                0,
+                MAX_SYNC_BODY_BYTES,
+                true,
+            )
             .await?;
-        if resp.status() == reqwest::StatusCode::CONFLICT {
-            return Ok(None);
-        }
-        let bytes = ok_body(resp, MAX_SYNC_BODY_BYTES).await?;
-        let delta = codec::decode_block_delta(&bytes, plaintext_bits, arity)?;
+        let Some(bytes) = m.body else {
+            return Ok(None); // 409: outside the retained window / wrong lineage
+        };
+        let delta = self.timed_decode(NetCall::Sync, || {
+            codec::decode_block_delta(&bytes, plaintext_bits, arity)
+        })?;
         Ok(Some(delta))
     }
 
@@ -358,6 +570,12 @@ impl PirHttpClient {
     /// geometry, needed only to decode the response, and `epoch` its
     /// lineage token (ADR-0033) — see [`Self::sync`]'s docs for why
     /// `PirHttpClient` takes these as arguments rather than storing them.
+    ///
+    /// When a [`NetSink`] is attached, the response's optional
+    /// `x-risepir-answer-compute-ns` / `x-risepir-answer-handler-ns`
+    /// headers are recorded into it. Both are optional: a server that
+    /// does not publish them leaves the sink's values untouched, never
+    /// zeroed.
     ///
     /// # Errors
     ///
@@ -374,19 +592,76 @@ impl PirHttpClient {
         arity: usize,
     ) -> Result<(Vec<SimpleResponse>, u64), ClientError> {
         let body = wire::encode_query_bundle(queries);
-        let resp = self
-            .http
-            .post(format!("{}/answer?epoch={epoch}", self.base))
-            .body(body)
-            .send()
+        let request_bytes = body.len() as u64;
+        let m = self
+            .send_measured(
+                NetCall::Answer,
+                self.http
+                    .post(format!("{}/answer?epoch={epoch}", self.base))
+                    .body(body),
+                request_bytes,
+                MAX_ANSWER_BODY_BYTES,
+                false,
+            )
             .await?;
-        let bytes = ok_body(resp, MAX_ANSWER_BODY_BYTES).await?;
-        Ok(wire::decode_response_bundle(
-            &bytes,
-            reshape_row_width_per_seg,
-            arity,
-        )?)
+        if let Some(sink) = self.sink.as_ref() {
+            sink.record_server_timing(
+                header_u64(&m.headers, HDR_ANSWER_COMPUTE_NS),
+                header_u64(&m.headers, HDR_ANSWER_HANDLER_NS),
+            );
+        }
+        let bytes = m.body.unwrap_or_default();
+        Ok(self.timed_decode(NetCall::Answer, || {
+            wire::decode_response_bundle(&bytes, reshape_row_width_per_seg, arity)
+        })?)
     }
+}
+
+/// Decode `GET /recent`'s `count:u32-le ‖ count × 20 bytes` framing.
+///
+/// The declared count is validated against the bytes actually present
+/// *before* anything is allocated for it — this crate's standing rule,
+/// and this body comes from a server the threat model does not ask the
+/// client to trust for resource-safety.
+fn decode_recent(bytes: &[u8]) -> Result<Vec<[u8; 20]>, ClientError> {
+    let Some((len_bytes, rest)) = bytes.split_at_checked(4) else {
+        return Err(ClientError::Wire(format!(
+            "/recent returned {} bytes, too short for its 4-byte count prefix",
+            bytes.len()
+        )));
+    };
+    let count = u32::from_le_bytes(
+        len_bytes
+            .try_into()
+            .expect("split_at_checked(4) yields exactly 4 bytes"),
+    ) as usize;
+    if rest.len() != count.saturating_mul(20) {
+        return Err(ClientError::Wire(format!(
+            "/recent declared {count} addresses but carries {} payload bytes (expected {})",
+            rest.len(),
+            count.saturating_mul(20)
+        )));
+    }
+    Ok(rest
+        .chunks_exact(20)
+        .map(|c| {
+            let mut a = [0u8; 20];
+            a.copy_from_slice(c);
+            a
+        })
+        .collect())
+}
+
+/// Nanoseconds since `t0`, saturated into a `u64` (~584 years of range).
+fn elapsed_ns(t0: Instant) -> u64 {
+    u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// One optional `u64`-valued response header. A header that is absent,
+/// non-ASCII, or unparseable is `None` — never a defaulted zero, which
+/// would be indistinguishable from a server that really reported zero.
+fn header_u64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
 /// Shared `200`-or-`Err` handling: every method above except [`PirHttpClient::sync`]
@@ -450,6 +725,49 @@ mod tests {
         assert_eq!(c.base, "http://127.0.0.1:8645");
         let c2 = PirHttpClient::new("http://127.0.0.1:8645");
         assert_eq!(c2.base, "http://127.0.0.1:8645");
+    }
+
+    #[test]
+    fn recent_decodes_newest_first_framing() {
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0xaa; 20]);
+        body.extend_from_slice(&[0xbb; 20]);
+        assert_eq!(decode_recent(&body).unwrap(), vec![[0xaa; 20], [0xbb; 20]]);
+        assert!(decode_recent(&0u32.to_le_bytes()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_refuses_a_lying_or_truncated_count() {
+        // Truncated prefix.
+        assert!(matches!(
+            decode_recent(&[0, 0, 0]),
+            Err(ClientError::Wire(_))
+        ));
+        // A count far larger than the payload: must be refused before any
+        // allocation is sized from it.
+        let mut body = u32::MAX.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0x11; 20]);
+        assert!(matches!(decode_recent(&body), Err(ClientError::Wire(_))));
+        // A count one short of the payload.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0x11; 40]);
+        assert!(matches!(decode_recent(&body), Err(ClientError::Wire(_))));
+    }
+
+    #[test]
+    fn header_u64_is_none_unless_it_really_parses() {
+        let mut h = reqwest::header::HeaderMap::new();
+        assert_eq!(header_u64(&h, HDR_ANSWER_COMPUTE_NS), None);
+        h.insert(
+            HDR_ANSWER_COMPUTE_NS,
+            reqwest::header::HeaderValue::from_static("  4321 "),
+        );
+        assert_eq!(header_u64(&h, HDR_ANSWER_COMPUTE_NS), Some(4321));
+        h.insert(
+            HDR_ANSWER_HANDLER_NS,
+            reqwest::header::HeaderValue::from_static("not-a-number"),
+        );
+        assert_eq!(header_u64(&h, HDR_ANSWER_HANDLER_NS), None);
     }
 
     #[test]

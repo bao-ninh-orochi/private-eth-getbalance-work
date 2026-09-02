@@ -145,6 +145,31 @@ client --pir-url http://host:8645
 mock/mainnet --web web        also serve the browser front end on the PIR port
                               (ADR-0019); build it first with
                               `cargo run -p xtask --release -- web`
+probe --pir-url <url> --queries-csv <p> --blocks-csv <p>
+                              client-side measurement campaign against a live
+                              deployment: one long-lived product session (one
+                              /setup, never GC'd), per-query latency broken into
+                              build / wire / server-reported answer / decode's
+                              four ADR-0003 rewind steps / residual, bytes each
+                              way, per-fetch delta cost, hint size, client RSS —
+                              plus each answer compared byte-exactly against
+                              --confirm-url at the SAME explicit block height.
+                              The budget closes by construction (residual is the
+                              subtraction, never distributed). --resolve
+                              host:port:ip is curl-style DNS override with TLS
+                              validation left ON. --no-confirm skips the
+                              provider check; exit 3 = a real mismatch.
+                              The PIR server never learns the address, and it
+                              never enters a CSV, log line, or error message —
+                              only `found` / `provider_match` /
+                              `provider_hex_match`, one bit each. The confirm
+                              call is the one exception: it asks the INDEPENDENT
+                              provider about the same address in plaintext,
+                              which is the check itself (--no-confirm skips it).
+                              Budget: t_total = build + head + sync + answer +
+                              setup + finish + residual, residual defined as the
+                              subtraction. Blocks CSV covers every delta fetch,
+                              follow-loop and in-trial alike.
 ```
 
 The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind

@@ -22,6 +22,10 @@ rustup target add wasm32-unknown-unknown
 cargo run -p xtask --release -- web                # builds web/client.wasm
 ./target/release/risepir-rpc mainnet --partial --partial-capacity 1000000 --web web
 open http://127.0.0.1:8645/
+
+# ...or measure a running deployment from the client side
+./target/release/risepir-rpc probe --pir-url https://demo.risepir.org \
+  --queries-csv queries.csv --blocks-csv blocks.csv
 ```
 
 `mainnet` follows finalized blocks over keyless public RPC (dRPC traces ⊕
@@ -31,6 +35,17 @@ accounts against an independent provider every few blocks, and persists/reloads
 its full PIR state. A third subcommand, `client --pir-url http://<server>:8645`,
 runs the JSON-RPC front end + rewind client on *your* machine against a remote
 PIR server (`--bind 0.0.0.0`) — the queried address never leaves your machine.
+A fourth, `probe`, runs one long-lived session of that same client as a
+**measurement campaign**: per-query latency split into build / wire / the
+server's own reported answer time / decode's four rewind steps / an explicit
+residual (the budget closes by construction, never by distributing a
+remainder), bytes each way, per-block delta cost, hint size, and client RSS —
+with every decoded balance checked byte-exactly against an independent
+provider at the *same explicit block height*. The PIR server still never learns
+the address, and it never reaches a CSV, a log line, or an error message; the
+one exception is the correctness check itself, which necessarily asks that
+independent provider about the same address in plaintext (after the trial's
+clock has stopped) — `--no-confirm` turns it off.
 A **browser front end** (`--web web`) runs that same rewind client as
 WebAssembly *in the page*, so the address never leaves the browser either: a
 real mainnet balance was fetched this way and confirmed byte-exact against an

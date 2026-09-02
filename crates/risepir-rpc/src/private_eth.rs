@@ -2,13 +2,120 @@
 //! `Mutex`-guarded [`Session`] talking to one [`PirHttpClient`]
 //! (`docs/plan.md` §3.3/§3.6, ADR-0003, ADR-0006, ADR-0010).
 
+use std::time::{Duration, Instant};
+
 use ikpir_common::SimplePirBackend;
-use risepir_client::{Lookup, RisePirClient};
+use risepir_client::{FinishTimings, Lookup, RisePirClient};
 use risepir_http::PirHttpClient;
 use risepir_proto::{keccak256, AddressHash, ValueCodec};
 use risepir_server::SetupBundle;
 
 use crate::error::RpcError;
+
+/// One completed delta fetch — the unit the blocks side of a
+/// measurement is reported in.
+///
+/// Exactly one of these is produced per `GET /sync` the session
+/// performs, wherever that fetch was issued from: the catch-up inside a
+/// balance lookup (twice per lookup at most) or a standalone
+/// [`PrivateEth::follow_once`]. A caller that writes one row per fetch
+/// therefore has complete coverage with no double-counting — which is
+/// what makes the per-block delta series continuous rather than gapped
+/// at every trial.
+///
+/// The wire, decode and byte fields are attributed to *this* fetch by
+/// subtracting a [`risepir_http::NetSink`] snapshot taken either side of
+/// the call; they are zero when the transport is uninstrumented.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyncFetch {
+    /// The accumulator's head before the fetch (the `from` of `(from, to]`).
+    pub from_block: u64,
+    /// The accumulator's head after it (the `to`).
+    pub to_block: u64,
+    /// `to_block - from_block`: how many blocks this one fetch covered.
+    /// `/sync` serves a **coalesced** delta for the whole range, so a
+    /// value above 1 means every cost here is a range total, not one
+    /// block's.
+    pub blocks: u64,
+    /// Wall-clock arrival, milliseconds since the Unix epoch, taken once
+    /// the delta has been ingested. `0` when uninstrumented.
+    pub received_at_unix_ms: u128,
+    /// Wire time for this fetch: before send → last body byte.
+    pub wire: Duration,
+    /// Decoding this fetch's bytes into a `BlockDelta`.
+    pub decode: Duration,
+    /// This fetch's `/sync` response body length.
+    pub wire_bytes: u64,
+    /// [`RisePirClient::ingest_delta`] — folding the fetched delta into
+    /// the rolling `ΔD`.
+    pub ingest: Duration,
+    /// Nonzero `(segment, row, offset)` cells carried by the fetched
+    /// delta itself.
+    pub cells_in_delta: usize,
+    /// `|ΔD|` — the client's total pending delta cells *after* the
+    /// ingest.
+    pub delta_cells_total: usize,
+}
+
+/// Client-side timers for one [`PrivateEth::get_balance`] call.
+///
+/// Every field is a duration or a block/cell count. Nothing here is
+/// derived from the address or the balance — see [`Self::found`], the
+/// single bit of answer-shaped information recorded, which is what makes
+/// this safe to write to a log or a CSV.
+///
+/// # What is *not* here, and why
+///
+/// The query path's own network time. Each call's wire span is recorded
+/// by the transport ([`risepir_http::NetSink`]), timed from just before
+/// the request is sent to the last body byte. Re-timing it here would
+/// double-count it and would fold the wire codec into "network". A
+/// caller adds the two sources; nothing overlaps. (The exception is
+/// [`Self::sync`], where each fetch's own wire/decode/bytes *are*
+/// carried, because attributing them to an individual fetch needs a
+/// snapshot taken around that one call and only this layer knows where
+/// the call boundaries are.)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BalanceTimings {
+    /// [`RisePirClient::build_query`] — the LWE encryption of the query
+    /// bundle, all segments.
+    pub build: Duration,
+    /// [`RisePirClient::finish`] end to end — the whole rewind
+    /// (`docs/plan.md` §3.3 steps 2-5).
+    pub finish: Duration,
+    /// [`Self::finish`] broken into ADR-0003's four steps. Their sum is
+    /// slightly under [`Self::finish`]; the difference is the argument
+    /// checks, the `candidate_buckets` re-hash, and the final value
+    /// decode, which sit outside the per-segment loop.
+    pub finish_parts: FinishTimings,
+    /// Every delta fetch this call performed, in order — one entry per
+    /// `GET /sync`, so a caller can write one blocks-CSV row per fetch
+    /// with no gaps and no double-counting. Empty (the common case) for
+    /// a caller that already follows head between queries; at most two
+    /// entries otherwise (the pre-answer catch-up and the one to the
+    /// answered block).
+    pub sync: Vec<SyncFetch>,
+    /// The block the server answered at.
+    pub at_block: u64,
+    /// The block the client's *hint* is pinned at
+    /// ([`RisePirClient::pinned_block`]). Constant for the lifetime of a
+    /// session that never garbage-collects, which is the product's own
+    /// behaviour — so `at_block - pinned_block` is the hint's staleness.
+    pub pinned_block: u64,
+    /// `|ΔD|` at the moment the query was answered.
+    pub delta_cells: usize,
+    /// Whether the scan found a matching entry. The *only* bit of
+    /// answer-derived information recorded: `NotFound` in complete mode
+    /// is a legitimate `0x0`, and distinguishing it from a hit is
+    /// exactly what a not-found-path measurement needs. The balance
+    /// itself never enters this struct.
+    pub found: bool,
+    /// How many attempts the call took: `1` normally, `2` when a
+    /// `Stalled` forced one re-bootstrap-and-retry. Only the last
+    /// attempt's timers are recorded, so a `2` marks a row whose timers
+    /// do not account for the whole wall time.
+    pub attempts: u32,
+}
 
 /// Minimum spacing between two re-bootstrap attempts (ADR-0029, amended).
 /// A re-bootstrap is a full `/setup` re-download — 553.82 MB at the live
@@ -318,10 +425,52 @@ impl PrivateEth {
     /// ADR-0015: absence ⟺ zero, exactly); otherwise
     /// [`RpcError::NotInTrackedSet`].
     pub async fn get_balance(&self, addr20: [u8; 20]) -> Result<u128, RpcError> {
+        self.get_balance_inner(addr20, None).await
+    }
+
+    /// [`Self::get_balance`], recording this call's client-side timers
+    /// into `sink` (see [`BalanceTimings`]).
+    ///
+    /// Exactly the same code path — same lock, same catch-up sync, same
+    /// rewind, same re-bootstrap-and-retry, same errors. The timers are
+    /// read from a monotonic [`Instant`] around steps the product
+    /// already performs; nothing is added to, removed from, or reordered
+    /// within the balance path to make it measurable. That is the point:
+    /// a measurement of a *different* path would measure nothing worth
+    /// reporting.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::get_balance`]'s.
+    pub async fn get_balance_timed(
+        &self,
+        addr20: [u8; 20],
+        sink: &mut BalanceTimings,
+    ) -> Result<u128, RpcError> {
+        self.get_balance_inner(addr20, Some(sink)).await
+    }
+
+    /// The shared body of [`Self::get_balance`] and
+    /// [`Self::get_balance_timed`] — one implementation of the
+    /// lock/attempt/re-bootstrap logic, so the instrumented and
+    /// uninstrumented callers can never drift apart.
+    async fn get_balance_inner(
+        &self,
+        addr20: [u8; 20],
+        mut sink: Option<&mut BalanceTimings>,
+    ) -> Result<u128, RpcError> {
         let key = keccak256(&addr20);
         let mut session = self.session.lock().await;
 
-        let first = self.try_get_balance(&key, &mut session).await;
+        if let Some(s) = sink.as_deref_mut() {
+            *s = BalanceTimings {
+                attempts: 1,
+                ..BalanceTimings::default()
+            };
+        }
+        let first = self
+            .try_get_balance(&key, &mut session, sink.as_deref_mut())
+            .await;
         if let Err(RpcError::Stalled) = first {
             if !self.take_rebootstrap_slot() {
                 // Within [`REBOOTSTRAP_COOLDOWN`] of the previous attempt:
@@ -331,9 +480,51 @@ impl PrivateEth {
                 return first;
             }
             self.rebootstrap(&mut session).await?;
-            return self.try_get_balance(&key, &mut session).await;
+            if let Some(s) = sink.as_deref_mut() {
+                s.attempts = 2;
+            }
+            return self.try_get_balance(&key, &mut session, sink).await;
         }
         first
+    }
+
+    /// The PIR transport this deployment's front end talks to — exposed
+    /// so an in-crate caller can reach the endpoints that carry no
+    /// address at all (`GET /head`, `GET /recent`) through the *same*
+    /// connection pool the balance path uses.
+    pub(crate) fn pir(&self) -> &PirHttpClient {
+        &self.pir
+    }
+
+    /// One follow step: read `GET /head`, and if the server has advanced
+    /// past this session's accumulator, pull and ingest the coalesced
+    /// delta for the gap. `Ok(None)` when already caught up.
+    ///
+    /// This is exactly the catch-up [`Self::get_balance`] performs
+    /// inline, hoisted out so a caller can run it on its own cadence
+    /// (`docs/plan.md` §3.4) rather than only as a side effect of a
+    /// query — the operating point a long-lived session actually sits
+    /// at. It never garbage-collects: like every other caller in this
+    /// crate, it leaves the hint pinned and lets `ΔD` grow, which is the
+    /// product's own behaviour (see [`Self::get_balance`]'s docs).
+    ///
+    /// # Errors
+    ///
+    /// [`RpcError::Pir`] if `/head` or `/sync` fails at the transport.
+    /// [`RpcError::Stalled`] if the range has aged out of the server's
+    /// retention window — never treated as "nothing to do".
+    /// [`RpcError::Client`] if the ingest itself is rejected.
+    pub(crate) async fn follow_once(&self) -> Result<Option<SyncFetch>, RpcError> {
+        let mut session = self.session.lock().await;
+        let head = self.pir.head().await?;
+        if head <= session.pending_head {
+            return Ok(None);
+        }
+        let mut fetches = Vec::new();
+        self.sync_to(&mut session, head, Some(&mut fetches)).await?;
+        // `sync_to` performs at most one fetch, and the guard above means
+        // it performed exactly one unless it errored (which returns above).
+        Ok(fetches.pop())
     }
 
     /// Claims the one re-bootstrap slot per [`REBOOTSTRAP_COOLDOWN`]
@@ -370,11 +561,21 @@ impl PrivateEth {
         &self,
         key: &AddressHash,
         session: &mut Session,
+        mut sink: Option<&mut BalanceTimings>,
     ) -> Result<u128, RpcError> {
         let server_head = self.pir.head().await?;
-        self.sync_to(session, server_head).await?;
+        self.sync_to(
+            session,
+            server_head,
+            sink.as_deref_mut().map(|s| &mut s.sync),
+        )
+        .await?;
 
+        let t_build = Instant::now();
         let (queries, ctx) = session.client.build_query(key);
+        if let Some(s) = sink.as_deref_mut() {
+            s.build = t_build.elapsed();
+        }
         let (responses, at_block) = match self
             .pir
             .answer(
@@ -409,21 +610,49 @@ impl PrivateEth {
         // `pending_head` in between, so this second sync is always
         // sufficient — no retry loop needed for *this* race, only for a
         // genuine `Stalled` (handled one level up, in `get_balance`).
-        self.sync_to(session, at_block).await?;
+        self.sync_to(session, at_block, sink.as_deref_mut().map(|s| &mut s.sync))
+            .await?;
 
-        let lookup = session
-            .client
-            .finish(key, &ctx, responses, at_block)
-            .map_err(|e| match e {
-                // `finish` cannot actually observe a mismatch here (the sync
-                // immediately above guarantees `pending_head == at_block`
-                // before this call), but the mapping is kept rather than
-                // `unreachable!()`-ing: `docs/plan.md`'s invariant is "never
-                // guess, never panic on live input" even for a branch this
-                // method's own logic should have already foreclosed.
-                risepir_client::ClientError::ResponseBlockMismatch { .. } => RpcError::Stalled,
-                other => RpcError::from(other),
-            })?;
+        if let Some(s) = sink.as_deref_mut() {
+            s.at_block = at_block;
+            s.pinned_block = session.client.pinned_block();
+            s.delta_cells = session.client.delta_cells();
+        }
+        // One `finish`, two shapes: instrumented callers get ADR-0003's
+        // four steps timed individually, everyone else runs the
+        // uninstrumented path with no clock read at all. Same method
+        // underneath (`finish` *is* `finish_observed` with a no-op
+        // observer), so the two can never diverge.
+        let t_finish = Instant::now();
+        let mut parts = FinishTimings::new();
+        let outcome = match sink.as_deref_mut() {
+            Some(_) => session
+                .client
+                .finish_observed(key, &ctx, responses, at_block, &mut parts),
+            None => session.client.finish(key, &ctx, responses, at_block),
+        };
+        let finish_elapsed = t_finish.elapsed();
+        if let Some(s) = sink.as_deref_mut() {
+            s.finish = finish_elapsed;
+            s.finish_parts = parts;
+        }
+
+        let lookup = outcome.map_err(|e| match e {
+            // `finish` cannot actually observe a mismatch here (the sync
+            // immediately above guarantees `pending_head == at_block`
+            // before this call), but the mapping is kept rather than
+            // `unreachable!()`-ing: `docs/plan.md`'s invariant is "never
+            // guess, never panic on live input" even for a branch this
+            // method's own logic should have already foreclosed.
+            risepir_client::ClientError::ResponseBlockMismatch { .. } => RpcError::Stalled,
+            other => RpcError::from(other),
+        })?;
+
+        // Last use of `sink` in this method, so it is moved rather than
+        // reborrowed.
+        if let Some(s) = sink {
+            s.found = matches!(lookup, Lookup::Found(_));
+        }
 
         match lookup {
             Lookup::Found(balance) => Ok(balance),
@@ -510,14 +739,25 @@ impl PrivateEth {
     /// [`RpcError::Client`] if [`RisePirClient::ingest_delta`] itself
     /// rejects the delta (should not happen given the strict
     /// `pending_head`-gated call pattern above, but not assumed away).
-    async fn sync_to(&self, session: &mut Session, target: u64) -> Result<(), RpcError> {
+    async fn sync_to(
+        &self,
+        session: &mut Session,
+        target: u64,
+        sink: Option<&mut Vec<SyncFetch>>,
+    ) -> Result<(), RpcError> {
         if target <= session.pending_head {
             return Ok(());
         }
+        let from = session.pending_head;
+        // Snapshot either side of the one `/sync` call to attribute its
+        // wire/decode/bytes to *this* fetch rather than to the trial's
+        // running total (see `PirHttpClient::net_stats`). `None` when
+        // uninstrumented, and then nothing below reads a clock.
+        let before = sink.as_ref().and_then(|_| self.pir.net_stats());
         match self
             .pir
             .sync(
-                session.pending_head,
+                from,
                 target,
                 &session.epoch,
                 session.plaintext_bits,
@@ -527,11 +767,56 @@ impl PrivateEth {
         {
             Some(delta) => {
                 let new_head = delta.block;
+                // Counted before the ingest consumes the delta, so it can
+                // only be done here — inside the caller's own timed
+                // region. It is O(cells fetched) and lands in the
+                // caller's residual on a syncing trial; see
+                // `BalanceTimings`' docs.
+                let cells_in_delta = sink.as_ref().map_or(0, |_| delta_cells(&delta));
+                let t_ingest = Instant::now();
                 session.client.ingest_delta(&delta)?;
+                let ingest = t_ingest.elapsed();
                 session.pending_head = new_head;
+                if let Some(s) = sink {
+                    let after = self.pir.net_stats();
+                    let (wire, decode, wire_bytes) = match (before, after) {
+                        (Some(b), Some(a)) => (
+                            Duration::from_nanos(a.sync.wire_ns.saturating_sub(b.sync.wire_ns)),
+                            Duration::from_nanos(a.sync.decode_ns.saturating_sub(b.sync.decode_ns)),
+                            a.sync.response_bytes.saturating_sub(b.sync.response_bytes),
+                        ),
+                        _ => (Duration::ZERO, Duration::ZERO, 0),
+                    };
+                    s.push(SyncFetch {
+                        from_block: from,
+                        to_block: new_head,
+                        blocks: new_head.saturating_sub(from),
+                        received_at_unix_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis()),
+                        wire,
+                        decode,
+                        wire_bytes,
+                        ingest,
+                        cells_in_delta,
+                        delta_cells_total: session.client.delta_cells(),
+                    });
+                }
                 Ok(())
             }
             None => Err(RpcError::Stalled),
         }
     }
+}
+
+/// Nonzero `(segment, row, offset)` cells carried by one delta.
+///
+/// A pure count over the delta's own sparse structure — never the values.
+fn delta_cells(delta: &risepir_proto::BlockDelta) -> usize {
+    delta
+        .per_segment
+        .iter()
+        .flat_map(|rows| rows.iter())
+        .map(|(_, cells)| cells.len())
+        .sum()
 }

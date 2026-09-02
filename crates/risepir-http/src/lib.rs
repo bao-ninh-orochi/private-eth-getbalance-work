@@ -71,6 +71,11 @@
 
 #[cfg(feature = "client")]
 pub mod client;
+// Optional wire-level instrumentation for `client` (per-endpoint call
+// counts, wall time, byte counts) — a measurement concern, opt-in, and
+// meaningless without the client that writes into it.
+#[cfg(feature = "client")]
+pub mod measure;
 #[cfg(feature = "server")]
 pub mod node;
 // `/metrics` rendering (ADR-0039) — pure data + string building, used only
@@ -85,6 +90,8 @@ pub mod wire;
 
 #[cfg(feature = "client")]
 pub use client::{ClientError, PirHttpClient};
+#[cfg(feature = "client")]
+pub use measure::{CallStats, NetCall, NetSink, NetStats};
 #[cfg(feature = "server")]
 pub use node::{NodeState, ReconcileHealth, MAX_ANSWER_BODY_BYTES};
 #[cfg(feature = "server")]

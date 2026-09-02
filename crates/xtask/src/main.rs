@@ -490,8 +490,10 @@ fn run_report(rest: &[String]) {
     println!("{markdown}");
 
     if let Some(path) = write_path {
-        std::fs::write(&path, &markdown)
-            .unwrap_or_else(|e| panic!("{CMD}: failed to write {path}: {e}"));
+        std::fs::write(&path, &markdown).unwrap_or_else(|e| {
+            eprintln!("{CMD}: failed to write {path}: {e}");
+            std::process::exit(1);
+        });
         eprintln!("Wrote {path}");
     }
 }

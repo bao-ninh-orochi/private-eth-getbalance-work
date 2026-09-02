@@ -1761,6 +1761,11 @@ fn render_section_b(out: &mut String, data: &ReportData) {
         .iter()
         .filter(|r| matches!(r.answers_since_prev_block, Some(n) if n > 0))
         .collect();
+    let unknown_interference = data
+        .server_blocks
+        .iter()
+        .filter(|r| r.answers_since_prev_block.is_none())
+        .count();
     write_stats_row(
         out,
         "all blocks",
@@ -1779,6 +1784,14 @@ fn render_section_b(out: &mut String, data: &ReportData) {
         stats_from(probe_adjacent.iter().copied(), |r| r.apply_ms),
         4,
     );
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "{unknown_interference} row(s) have an empty `answers_since_prev_block` (the first \
+         block a follow-loop run applies, whose window is undefined) and belong to neither \
+         subset above."
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     writeln!(out, "### B8: stage breakdown ({MEASURED}, {DERIVED})").unwrap();

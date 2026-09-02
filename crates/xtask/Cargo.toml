@@ -37,3 +37,10 @@ risepir-feed   = { path = "../risepir-feed" }
 
 ikpir-common = { workspace = true }
 segmented-cuckoo = { workspace = true }
+
+# `xtask report`'s JSON inputs (`--setup`, `--setup-download`, and a JSON
+# `--provenance`) — not a new dependency in substance: `risepir-feed` and
+# `risepir-rpc` already pin `serde_json = "1"`, so this resolves to the
+# version already in `Cargo.lock` rather than adding a new one. The CSV
+# inputs stay hand-rolled (`report.rs`'s own parser) — no `csv` crate.
+serde_json = "1"

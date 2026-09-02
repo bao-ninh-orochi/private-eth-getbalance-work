@@ -17,8 +17,13 @@
 //! `arity x bucket_size` sweep over `risepir_proto::geometry::Geometry`,
 //! plus an opt-in real-store fill-check, for the recurring "should we
 //! change the deployed SCF geometry" question.
+//!
+//! And: the `report` subcommand ([`report`]) — turns one measurement
+//! campaign's raw trial/block/setup CSV and JSON files into the labelled
+//! `(measured)`/`(computed)`/`(derived)` statistics table a paper cites.
 
 pub mod bench;
 pub mod conformance;
 pub mod geometry;
+pub mod report;
 pub mod web;

@@ -110,13 +110,34 @@ pub struct BlockMetricsRow {
     /// over the same window as `answers_since_prev_block` — `None` under
     /// the identical first-row condition.
     pub answer_compute_ms_since_prev_block: Option<f64>,
-    /// Wall time of fetching this block's update from the feed
-    /// (`RpcFeed::block_update`) — the follow loop has a natural point to
-    /// time this (immediately around the successful fetch call), so this
-    /// column is always populated for a live mainnet run; it exists as a
-    /// plain `f64` rather than an `Option` because no caller in this
-    /// crate constructs a row without a real feed-fetch measurement in
-    /// hand.
+    /// Wall time the **applier waited** for this block's update — the
+    /// duration of the successful fetch call as the follow loop sees it,
+    /// timed immediately around that call, so a retried block's earlier
+    /// refusals never inflate it. Always populated for a live mainnet
+    /// run; a plain `f64` rather than an `Option` because no caller in
+    /// this crate constructs a row without a real measurement in hand.
+    ///
+    /// Since ADR-0047 that call is `BlockPrefetch::fetch(n)`, which awaits
+    /// block `n`'s own fetch task, so what this column means depends on
+    /// `--prefetch <k>` and it is worth being exact about it:
+    ///
+    /// - **`--prefetch 1`** (the default): the fetch for `n` is issued and
+    ///   awaited at that point, so this is the feed round trip itself —
+    ///   the same quantity the column carried before ADR-0047.
+    /// - **`--prefetch k > 1`**: the fetch for `n` was very likely issued
+    ///   while an earlier block was being applied, so the applier only
+    ///   waits for whatever is *left* of it. A block the lookahead had
+    ///   already finished resolves immediately and this column reads
+    ///   ~0 ms. That is not a mismeasurement and not a faster provider:
+    ///   it is the fetch latency having been hidden behind the apply,
+    ///   which is the whole point of the flag.
+    ///
+    /// So the column is "how long the applier waited for the block",
+    /// which is the term the per-block budget needs, and **not** "how long
+    /// the provider took" — those coincide only at `--prefetch 1`. A run
+    /// whose `feed_fetch_ms` is to be read as provider latency must be
+    /// taken at `--prefetch 1`; the campaign records the depth in force
+    /// alongside the CSV for exactly this reason.
     pub feed_fetch_ms: f64,
     /// The finalized head the follow loop was following at the moment
     /// this block was applied (i.e. `finalized` in `follow_loop`, not

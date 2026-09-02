@@ -50,6 +50,7 @@
 pub mod logging;
 
 mod error;
+mod prefetch;
 mod private_eth;
 pub mod rpc;
 

@@ -1090,6 +1090,28 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
     `risepir_process_rss_bytes` (Linux only; `0` elsewhere) — all cheap
     aggregates or live gauges, same privacy discipline as every other
     `/metrics` field.
+- **A long catch-up replay: `--prefetch <k>` (ADR-0047)**. The follow loop
+  spends nearly all of a replay waiting on the feed (~1–2 s per
+  `debug_traceBlockByNumber`, plus dRPC's `408` refusals) against a ~4 ms
+  apply — measured 2026-09-02, ~1.1 blocks/s, so a week-old state file
+  (~52,000 blocks) is ~13 h of catch-up. `--prefetch <k>` fetches up to `k`
+  blocks concurrently while still applying them in strictly increasing block
+  order, never past `finalized`, retrying a failed block exactly as before
+  and skipping nothing. It defaults to **1** — the old call sequence and
+  retry semantics; a panicking fetch is now contained and retried rather
+  than stopping the loop — and is capped at **32**; the startup log always
+  names the depth in force (`block prefetch: ...`). Use single digits and
+  only for a catch-up: the other end is a keyless free tier that
+  rate-limits, each in-flight fetch holds a block's raw JSON, and once
+  caught up `finalized` is a block or two ahead so the lookahead collapses
+  to 0–1 and the flag does nothing. **Start a big catch-up at
+  `--prefetch 4` and raise to 8 only after checking the fetch-failure rate
+  and which endpoint names appear in the `fetch failed` lines** —
+  concurrency pushes more blocks onto the fallback provider (ADR-0024)
+  precisely while reconcile is deferred by lag (ADR-0036), so the two
+  quietest signals you have are that rate and that name. It changes no
+  apply, reconcile, autosave or journal behaviour — only when the
+  *fetches* are issued.
 
 ### Log timestamps and rotation
 
@@ -2338,6 +2360,38 @@ ps -eo pid,comm,args | grep -E "target/release" | grep -v grep
 verification round — start, both certificate issuances, both gates, the CLI
 client, the DuckDNS fix, and the stop — cost roughly **$0.66**, against the
 ~$7 a full catch-up alone would have added.
+
+### 5.10 `--prefetch` measured against real mainnet (2026-09-02)
+
+The ADR-0047 lookahead, exercised on a laptop against the real feed rather
+than a mock. A `--partial` deployment (`--partial-capacity 500000`)
+bootstrapped at finalized **25,891,222**, followed to **25,891,233**,
+reconciled clean against publicnode (`8 account(s) exact vs independent
+provider`) and saved a 116,526,275 B state file on Ctrl-C. That one file was
+then copied and replayed three times, at different prefetch depths, with
+`--reconcile-every 0` so only the fetch/apply path was being timed:
+
+| run | depth | replayed | wall | blocks/s |
+|---|---|---|---|---|
+| 1 | `--prefetch 1` | 25,891,233 → 25,891,318 (85 blocks) | 123 s | 0.69 |
+| 2 | `--prefetch 8` | 25,891,233 → 25,891,318 (85 blocks) | 66 s | 1.29 |
+| 3 | `--prefetch 8` | 25,891,233 → 25,891,318 (85 blocks) | 61 s | 1.39 |
+| 4 | `--prefetch 1` | 25,891,233 → 25,891,350 (117 blocks) | 155 s | 0.75 |
+
+**≈1.86× at depth 8**, and the order was reversed between the pairs
+deliberately: a provider-side cache warmed by the first run would have
+inflated the second, and it does not — depth 1 is the slower of the two
+whichever runs first (0.69 / 0.75 vs 1.29 / 1.39). It is not 8×, because
+the endpoint's own concurrency limits and per-call latency are what the
+window is bounded by; the useful reading is that a 13-hour catch-up becomes
+a ~7-hour one, not a 100-minute one.
+
+**The part that matters more than the speed.** Runs 1, 2 and 3 all stopped at
+the same block, and their three saved state files are **byte-identical** —
+`sha256 0b550ff4c9a5403e7d8722e54f17e8f81d9fbb0543cc92716e29876d838bcce9`,
+116,526,275 B each. Same cells, same encoded hints, from a sequential replay
+and from two 8-deep concurrent ones. Prefetching moved when the fetches were
+issued and nothing else.
 
 ## 6. Who does what, explicitly
 

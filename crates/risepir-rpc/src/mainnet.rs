@@ -1393,10 +1393,15 @@ async fn follow_loop(
     // later, a couple at a time, once checkpoints run normally again.
     let mut reservoir = DeferredReservoir::default();
     // Cumulative `/answer` compute count/seconds as of the *previous*
-    // applied block — only meaningful with `--block-metrics-csv`, but
-    // cheap enough (one lock, two field reads) to read every block
-    // regardless: `NodeState::answer_compute_totals`'s own docs.
-    let (mut prev_answer_count, mut prev_answer_seconds) = node.answer_compute_totals();
+    // applied block — `None` until this run has actually applied one
+    // (the CSV's `answers_since_prev_block`/
+    // `answer_compute_ms_since_prev_block` render empty for that first
+    // row: its "since" window would otherwise start at loop entry, not
+    // at a genuine previous applied block, which is a different quantity
+    // — see `BlockMetricsRow`'s own docs). Read unconditionally (cheap,
+    // see `NodeState::answer_compute_totals`'s own docs) regardless of
+    // whether `--block-metrics-csv` is set.
+    let mut prev_answer_totals: Option<(u64, f64)> = None;
     loop {
         if let Some(saver) = &cfg.saver {
             // Outcome/error ignored by this loop's own control flow (the
@@ -1537,6 +1542,11 @@ async fn follow_loop(
                 delta_bytes,
             } = outcome;
             last = n;
+            // Taken immediately once the apply itself has returned —
+            // before the journal append below, which is real (awaited)
+            // I/O and would otherwise push this timestamp later than
+            // "when the block finished applying" actually was.
+            let applied_at_unix_ms = unix_now_ms();
 
             // Delta journal (ADR-0026): one append per applied block,
             // outside any lock this loop holds (it holds none here).
@@ -1571,20 +1581,32 @@ async fn follow_loop(
             // `--block-metrics-csv` (a measurement-campaign aid, off by
             // default): one row per applied block. `answers_since_prev_block`/
             // `answer_compute_ms_since_prev_block` diff this block's
-            // cumulative `/answer` totals against the previous block's —
-            // an interference indicator, read unconditionally (cheap, see
-            // `NodeState::answer_compute_totals`'s own docs) so the deltas
-            // stay correct even for a run that starts writing the CSV only
-            // partway through (which cannot happen today, but costs
-            // nothing to keep correct regardless). A write failure is
-            // logged and otherwise ignored — this is measurement
-            // instrumentation, never a reason to stop following or
-            // serving.
+            // cumulative `/answer` totals against the previous *applied*
+            // block's — an interference indicator — and are `None` (an
+            // empty CSV field, never `0`) on the first block this run
+            // applies, since that row's window would otherwise start at
+            // loop entry rather than at a genuine previous applied block
+            // (`BlockMetricsRow`'s own docs). Read unconditionally (cheap,
+            // see `NodeState::answer_compute_totals`'s own docs) so
+            // `prev_answer_totals` stays correct even on a run that only
+            // starts writing the CSV partway through (which cannot happen
+            // today, but costs nothing to keep correct regardless). A
+            // write failure is logged and otherwise ignored — this is
+            // measurement instrumentation, never a reason to stop
+            // following or serving.
             let (answer_count, answer_seconds) = node.answer_compute_totals();
+            let (answers_since_prev_block, answer_compute_ms_since_prev_block) =
+                match prev_answer_totals {
+                    Some((prev_count, prev_seconds)) => (
+                        Some(answer_count.saturating_sub(prev_count)),
+                        Some((answer_seconds - prev_seconds).max(0.0) * 1000.0),
+                    ),
+                    None => (None, None),
+                };
             if let Some(csv) = cfg.block_metrics_csv.as_mut() {
                 if let Err(e) = csv.write_row(BlockMetricsRow {
                     block: n,
-                    applied_at_unix_ms: unix_now_ms(),
+                    applied_at_unix_ms,
                     changes: report.changes,
                     credits: report.credits,
                     inserts: report.inserts,
@@ -1598,10 +1620,8 @@ async fn follow_loop(
                     apply_ms: patch_duration.as_secs_f64() * 1000.0,
                     lock_wait_ms: lock_wait.as_secs_f64() * 1000.0,
                     delta_bytes,
-                    answers_since_prev_block: answer_count.saturating_sub(prev_answer_count),
-                    answer_compute_ms_since_prev_block: (answer_seconds - prev_answer_seconds)
-                        .max(0.0)
-                        * 1000.0,
+                    answers_since_prev_block,
+                    answer_compute_ms_since_prev_block,
                     feed_fetch_ms,
                     finalized_block: finalized,
                 }) {
@@ -1610,8 +1630,7 @@ async fn follow_loop(
                     );
                 }
             }
-            prev_answer_count = answer_count;
-            prev_answer_seconds = answer_seconds;
+            prev_answer_totals = Some((answer_count, answer_seconds));
 
             // Feed `GET /recent` (ADR-0019). Only *after* a successful
             // apply: an address is offered to the front end as queryable

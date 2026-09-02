@@ -25,10 +25,16 @@
 //! ```
 //!
 //! Millisecond columns are floats with 3 decimals; every other column is
-//! a plain unsigned integer. **No address and no balance ever appears in
-//! a row** — [`BlockMetricsRow`] has no field shaped like one, so this is
-//! true by construction, not by discipline (mirrors `crate::metrics`'
-//! own privacy rule for `GET /metrics`, ADR-0039).
+//! a plain unsigned integer — except `answers_since_prev_block` and
+//! `answer_compute_ms_since_prev_block`, which render as an **empty**
+//! field on the first row a fresh follow-loop run writes (see
+//! [`BlockMetricsRow`]'s own docs for why: that row's "since" window
+//! begins at loop entry, not at a genuine previous applied block, so
+//! there is no previous reading to diff against). **No address and no
+//! balance ever appears in a row** — [`BlockMetricsRow`] has no field
+//! shaped like one, so this is true by construction, not by discipline
+//! (mirrors `crate::metrics`'s own privacy rule for `GET /metrics`,
+//! ADR-0039).
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -50,8 +56,11 @@ pub const COLUMN_COUNT: usize = 19;
 pub struct BlockMetricsRow {
     /// The applied block number.
     pub block: u64,
-    /// Unix time, in milliseconds, when this row was written (immediately
-    /// after the block finished applying).
+    /// Unix time, in milliseconds, taken immediately after
+    /// `NodeState::apply_block_reporting` returns for this block — before
+    /// the delta-journal append and every other per-block step that
+    /// follows it in the loop, so this is "when the block finished
+    /// applying", not "when this row happened to be written".
     pub applied_at_unix_ms: u64,
     /// `BlockApplyReport::changes` — `update.changes.len()`.
     pub changes: u64,
@@ -89,12 +98,18 @@ pub struct BlockMetricsRow {
     pub delta_bytes: u64,
     /// `/answer` computations served between the previous applied block
     /// and this one — an interference indicator (how much concurrent
-    /// query traffic overlapped this block's apply).
-    pub answers_since_prev_block: u64,
+    /// query traffic overlapped this block's apply). `None` — rendered
+    /// as an empty CSV field — on the first row a fresh follow-loop run
+    /// writes: that row's window would otherwise start at loop entry
+    /// (process/task startup), not at a genuine previous applied block,
+    /// which is not the same quantity and would be misleading reported
+    /// as one.
+    pub answers_since_prev_block: Option<u64>,
     /// Wall-clock milliseconds spent computing those `/answer` responses
     /// (the same clock `risepir_answer_duration_seconds` accumulates),
-    /// over the same window as `answers_since_prev_block`.
-    pub answer_compute_ms_since_prev_block: f64,
+    /// over the same window as `answers_since_prev_block` — `None` under
+    /// the identical first-row condition.
+    pub answer_compute_ms_since_prev_block: Option<f64>,
     /// Wall time of fetching this block's update from the feed
     /// (`RpcFeed::block_update`) — the follow loop has a natural point to
     /// time this (immediately around the successful fetch call), so this
@@ -112,12 +127,22 @@ pub struct BlockMetricsRow {
 impl BlockMetricsRow {
     /// Renders this row as one CSV line, **without** a trailing newline —
     /// [`BlockMetricsCsvWriter::write_row`] appends that. Millisecond
-    /// fields are formatted with exactly 3 decimals; every other field is
-    /// a plain unsigned integer. Never contains an address or a balance —
-    /// see this module's own docs.
+    /// fields are formatted with exactly 3 decimals; plain counts render
+    /// as bare integers; `answers_since_prev_block`/
+    /// `answer_compute_ms_since_prev_block` render as an empty field when
+    /// `None` (see their own field docs). Never contains an address or a
+    /// balance — see this module's own docs.
     fn to_csv_line(self) -> String {
+        let answers_since_prev_block = self
+            .answers_since_prev_block
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let answer_compute_ms_since_prev_block = self
+            .answer_compute_ms_since_prev_block
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_default();
         format!(
-            "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{:.3},{:.3},{}",
+            "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{},{answers_since_prev_block},{answer_compute_ms_since_prev_block},{:.3},{}",
             self.block,
             self.applied_at_unix_ms,
             self.changes,
@@ -133,8 +158,6 @@ impl BlockMetricsRow {
             self.apply_ms,
             self.lock_wait_ms,
             self.delta_bytes,
-            self.answers_since_prev_block,
-            self.answer_compute_ms_since_prev_block,
             self.feed_fetch_ms,
             self.finalized_block,
         )
@@ -202,8 +225,8 @@ mod tests {
             apply_ms: 1.8,
             lock_wait_ms: 0.005,
             delta_bytes: 812,
-            answers_since_prev_block: 3,
-            answer_compute_ms_since_prev_block: 9.75,
+            answers_since_prev_block: Some(3),
+            answer_compute_ms_since_prev_block: Some(9.75),
             feed_fetch_ms: 42.125,
             finalized_block: block + 20,
         }
@@ -281,6 +304,36 @@ mod tests {
         assert!(!cols[0].contains('.'));
         assert_eq!(cols[14], "812");
         assert!(!cols[14].contains('.'));
+    }
+
+    /// The first row a fresh follow-loop run writes has no genuine
+    /// "previous applied block" to diff against — `answers_since_prev_block`/
+    /// `answer_compute_ms_since_prev_block` must render as an **empty**
+    /// field (not `"0"`, not the literal text `"None"`), while the row
+    /// still has exactly [`COLUMN_COUNT`] columns (an empty field between
+    /// two commas is still one column).
+    #[test]
+    fn none_since_prev_block_renders_as_an_empty_column_not_zero() {
+        let mut row = sample_row(1);
+        row.answers_since_prev_block = None;
+        row.answer_compute_ms_since_prev_block = None;
+        let line = row.to_csv_line();
+        let cols: Vec<&str> = line.split(',').collect();
+
+        assert_eq!(
+            cols.len(),
+            COLUMN_COUNT,
+            "an empty field must still count as one column: {line}"
+        );
+        // Columns 15/16 per HEADER's own order.
+        assert_eq!(
+            cols[15], "",
+            "answers_since_prev_block must be empty, not 0"
+        );
+        assert_eq!(
+            cols[16], "",
+            "answer_compute_ms_since_prev_block must be empty, not 0"
+        );
     }
 
     /// No 40+ hex-digit run (a 20-byte address, hex-encoded) can appear in

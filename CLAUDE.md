@@ -55,7 +55,14 @@ today** and there is a **live GCP deployment** (below).
   (no `parallel` feature) and has neither `backend/gemm.rs` nor
   `backend/prg.rs`. `.cargo/config.toml` sets `git-fetch-with-cli` +
   `target-cpu=native`. The local checkout at `../CANS2026/RisePIR` drifts —
-  read it for API signatures, **never** path-dep it.
+  read it for API signatures, **never** path-dep it. The pin has since moved
+  again, to `tag = "v0.2.0-perf"` (commit
+  `d91c75fb807d25807104c29b1931f846f007379a`, two commits past `adecd9c`):
+  IKPIR's LWE error sampler switched from a rounded continuous Gaussian
+  (Box–Muller) to a true discrete Gaussian `D_σ`, same σ = 6.4, same public
+  API. No kernel, hash lineage, or geometry moved with it, so every claim
+  above still holds for the *current* tag too, except literal bit-identity
+  to `0f3b99b`, which the sampler diff breaks; see ADR-0046.
 - Gates, in escalating strength: `cargo test --workspace` (fast, run always) →
   `cargo run -p xtask --release -- conformance` (byte-exact vs ground truth) →
   `cargo test -p risepir-feed --release -- --ignored` (live: trace parsing vs an

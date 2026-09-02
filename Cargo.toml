@@ -49,7 +49,16 @@ rust-version = "1.96"
 # If you add a crate that depends on `ikpir-common`, give it the same
 # default-on `parallel` forwarding feature — otherwise it silently builds
 # the scalar kernels the headline numbers were not measured against.
+#
+# The pin has since moved again, to `v0.2.0-perf` (commit
+# d91c75fb807d25807104c29b1931f846f007379a): IKPIR's LWE error sampler
+# switched from a rounded continuous Gaussian (Box-Muller) to a true
+# discrete Gaussian, same sigma, same public API. No kernel, hash lineage,
+# or geometry moved, so everything above still holds for the current tag
+# too, except literal bit-identity to 0f3b99b, which the sampler diff
+# breaks; see ADR-0046. The numbers.md §7 headline above is still the
+# v0.1.0-perf measurement, not yet re-run against this tag.
 [workspace.dependencies]
-ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf", default-features = false }
-segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }
-ikpir-server     = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }
+ikpir-common     = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.2.0-perf", default-features = false }
+segmented-cuckoo = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.2.0-perf" }
+ikpir-server     = { git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.2.0-perf" }

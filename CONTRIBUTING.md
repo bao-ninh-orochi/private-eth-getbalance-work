@@ -14,7 +14,7 @@ The workspace pins Rust via [`rust-toolchain.toml`](rust-toolchain.toml)
 commit — `docs/numbers.md` measurements are toolchain-sensitive.
 
 The pinned dependency `bao-ninh-orochi/IKPIR` (`Cargo.toml`, tag
-`v0.1.0-perf`) is a public repo now, so building needs no credentials and CI
+`v0.2.0-perf`) is a public repo now, so building needs no credentials and CI
 needs no PAT — the old `IKPIR_TOKEN`/`insteadOf` wiring is gone (ADR-0045).
 
 ## Gates, in escalating strength

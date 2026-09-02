@@ -64,5 +64,5 @@ pub mod snapshot_rewind;
 pub mod state;
 
 pub use error::RpcError;
-pub use private_eth::PrivateEth;
+pub use private_eth::{BalanceTimings, PrivateEth, SyncTimings};
 pub use risepir_proto::keccak256;

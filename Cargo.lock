@@ -1779,6 +1779,7 @@ dependencies = [
  "risepir-proto",
  "risepir-server",
  "segmented-cuckoo",
+ "serde_json",
 ]
 
 [[package]]

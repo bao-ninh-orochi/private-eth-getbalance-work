@@ -145,6 +145,23 @@ client --pir-url http://host:8645
 mock/mainnet --web web        also serve the browser front end on the PIR port
                               (ADR-0019); build it first with
                               `cargo run -p xtask --release -- web`
+probe --pir-url <url> --queries-csv <p> --blocks-csv <p>
+                              client-side measurement campaign against a live
+                              deployment: one long-lived product session (one
+                              /setup, never GC'd), per-query latency broken into
+                              build / wire / server-reported answer / decode's
+                              four ADR-0003 rewind steps / residual, bytes each
+                              way, per-fetch delta cost, hint size, client RSS —
+                              plus each answer compared byte-exactly against
+                              --confirm-url at the SAME explicit block height.
+                              The budget closes by construction (residual is the
+                              subtraction, never distributed). --resolve
+                              host:port:ip is curl-style DNS override with TLS
+                              validation left ON. --no-confirm skips the
+                              provider check; exit 3 = a real mismatch.
+                              The address never leaves the machine and never
+                              enters a CSV, log line, or error message — only
+                              `found` and `provider_match`, one bit each.
 ```
 
 The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind

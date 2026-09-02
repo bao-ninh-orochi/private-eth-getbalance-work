@@ -170,6 +170,18 @@ probe --pir-url <url> --queries-csv <p> --blocks-csv <p>
                               setup + finish + residual, residual defined as the
                               subtraction. Blocks CSV covers every delta fetch,
                               follow-loop and in-trial alike.
+time-setup --state <file> [--out <json-path>]
+                              C13: loads the state file exactly like mainnet
+                              does, times a full PIR setup recompute over it
+                              (setup_seconds), and separately proves
+                              persisted_hints_exact_match — the persisted,
+                              incrementally patched hints reproduced byte-for-
+                              byte from the persisted seed and the store's own
+                              cells, exiting non-zero if they differ (the two
+                              sampled decode checks are diagnostics only, never
+                              gating the exit code). Run with the server
+                              stopped, on the campaign binary, before a
+                              measurement window opens.
 ```
 
 The browser front end (`web/`, `crates/risepir-wasm`) runs the *same* rewind

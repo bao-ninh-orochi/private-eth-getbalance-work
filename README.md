@@ -26,6 +26,9 @@ open http://127.0.0.1:8645/
 # ...or measure a running deployment from the client side
 ./target/release/risepir-rpc probe --pir-url https://demo.risepir.org \
   --queries-csv queries.csv --blocks-csv blocks.csv
+
+# ...or time the server's own setup and verify the persisted hints (C13)
+./target/release/risepir-rpc time-setup --state ~/risepir-state.bin
 ```
 
 `mainnet` follows finalized blocks over keyless public RPC (dRPC traces ⊕
@@ -46,6 +49,11 @@ the address, and it never reaches a CSV, a log line, or an error message; the
 one exception is the correctness check itself, which necessarily asks that
 independent provider about the same address in plaintext (after the trial's
 clock has stopped) — `--no-confirm` turns it off.
+A fifth, `time-setup --state <file>`, re-runs that same PIR setup over an
+already-bootstrapped state file to time it (C13) and separately proves the
+persisted, incrementally patched hints still equal a byte-for-byte
+reproduction from the persisted seed and the store's own cells
+([`docs/adr/README.md`](docs/adr/README.md) ADR-0048).
 A **browser front end** (`--web web`) runs that same rewind client as
 WebAssembly *in the page*, so the address never leaves the browser either: a
 real mainnet balance was fetched this way and confirmed byte-exact against an

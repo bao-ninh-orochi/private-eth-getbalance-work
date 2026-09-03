@@ -202,10 +202,13 @@ at the `(arity 3, bucket_size 4)` lineage this box ran until then; the "588
 MB" once quoted here predates both, computed against an assumed ~130 M). A
 complete-set client now holds **1.11 GB** resident once `A` is expanded (was
 1.66 GB) — a computed estimate for the browser client (ADR-0034); the CLI
-`client` measured **1,156,829,184 B (1.16 GB)** resident on 2026-09-03
-(`docs/deployment-numbers.md` C12). That is where the CLI `client` takes
-over. Its residual trust — you trust whoever serves the page — is stated on
-the page itself, not just in the ADR.
+`client` measured a **1,158,127,616 B (1.16 GB)** max resident set on
+2026-09-03 (`docs/deployment-numbers.md` C12, n=30, mean 1,141,386,718 B) —
+the oft-cited 1,156,829,184 B is that run's last sample
+(`docs/data/deployment-20260903/probe-stdout.log`), not a C12 figure. That
+is where the CLI `client` takes over. Its residual trust — you trust
+whoever serves the page — is stated on the page itself, not just in the
+ADR.
 
 Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
 operator). `"latest"` = **finalized**, ~13 min behind the public head, by design

@@ -63,7 +63,7 @@ sees who is asking — is stated on the page itself, and argued in ADR-0019.
 Recorded live evidence — 8/8 private queries byte-exact
 against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
 which is also the complete runbook (including the BigQuery snapshot export that
-upgrades `--partial` to the complete ~100 M-account set).
+upgrades `--partial` to the complete ≈204.7 M-account set (2026-09-03)).
 
 Eight crates, **513 tests** (as of 2026-09-03), plus two heavier gates: `cargo run -p xtask
 --release -- conformance` (≥1200 addrs × 120 blocks, byte-identical, all account

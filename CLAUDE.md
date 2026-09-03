@@ -16,6 +16,8 @@ today** and there is a **live GCP deployment** (below).
    user-run BigQuery export upgrades the partial demo to the complete set).
 5. [`docs/threat-model.md`](docs/threat-model.md) — the adversary definitions;
    a change that moves a security boundary updates it in the same commit.
+6. [`docs/deployment-numbers.md`](docs/deployment-numbers.md) — the measured
+   deployment numbers.
 
 ## The binding rules
 
@@ -199,9 +201,11 @@ lineage — at the unchanged `(arity 2, bucket_size 4)` geometry of ADR-0034):
 at the `(arity 3, bucket_size 4)` lineage this box ran until then; the "588
 MB" once quoted here predates both, computed against an assumed ~130 M). A
 complete-set client now holds **1.11 GB** resident once `A` is expanded (was
-1.66 GB). That is where the CLI `client` takes over. Its residual trust — you
-trust whoever serves the page — is stated on the page itself, not just in the
-ADR.
+1.66 GB) — a computed estimate for the browser client (ADR-0034); the CLI
+`client` measured **1,156,829,184 B (1.16 GB)** resident on 2026-09-03
+(`docs/deployment-numbers.md` C12). That is where the CLI `client` takes
+over. Its residual trust — you trust whoever serves the page — is stated on
+the page itself, not just in the ADR.
 
 Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
 operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
@@ -262,10 +266,12 @@ A large catch-up (this migration's own was ~52,000 blocks) is faster with
 keyless fallback providers while the reconcile backstop was already dark
 from the lag, so 4 is the depth to reach for first on a deep catch-up.
 
-The complete-set per-block patch time is no longer an extrapolation: **~11.1 ms
-at K ≈ 310** while following the head (8.2–8.8 ms during catch-up, when the
-cache is warmer). `docs/numbers.md` §7 carries the table and what it does to
-§6's ratio.
+The complete-set per-block patch time is now measured directly by the
+2026-09-03 measurement campaign on `risepir-c3d` (`c3d-highmem-16`): applying
+one block (store mutation + fold + hint patch), n=959, **mean 5.573 ms, p50
+4.783 ms, p95 10.975 ms**, at mean K ≈ 433 mutations/block (was ~11.1 ms at
+K≈310 on the e2-highmem-8, 2026-07-31). `docs/deployment-numbers.md` carries
+the full table.
 
 It is **public** at <https://demo.risepir.org> (Caddy + Let's Encrypt in front
 of a loopback-only `:8645`; deploy.md §3.7), with the old
@@ -370,7 +376,9 @@ mode while every flag on the command line said complete. Re-bootstrapping from
 the snapshot means moving the state file aside first — and at the complete set
 that costs **~16 min** (2026-07-27 record, `e2-highmem-8`; the campaign's
 measured setup time will land in `docs/deployment-numbers.md`) at the
-deployed `(2,4)` geometry (8 min ingest + ~6 min PIR setup + 2 min save; it
+deployed `(2,4)` geometry (8 min ingest + ~6 min PIR setup (the campaign
+measured 29.18 s for the setup step alone on the c3d-highmem-16,
+docs/deployment-numbers.md C13) + 2 min save; it
 was ~33 min at `(3,4)`), *plus* the snapshot→head
 replay, which is the part that actually hurts: ~1 s/block, so a day-old
 snapshot is another ~3 h. Prefer the state file.

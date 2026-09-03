@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RisePIR — private eth_getBalance for Ethereum mainnet</title>
-<meta name="description" content="A keyword-PIR server that answers Ethereum eth_getBalance queries against the complete 201,059,658-account mainnet set without learning which account was asked.">
+<meta name="description" content="A keyword-PIR server that answers Ethereum eth_getBalance queries against the complete 204,714,034-account mainnet set without learning which account was asked.">
 
 <meta property="og:title" content="RisePIR — private eth_getBalance for Ethereum mainnet">
 <meta property="og:description" content="LWE keyword-PIR over a Segmented Cuckoo Filter. The server computes over the entire mainnet balance set to answer one query, and never learns which account was asked.">
@@ -43,8 +43,8 @@
         information retrieval keyed by an address rather than a numeric index. A server follows the chain and holds
         a database of every nonzero account balance. A client asks for one balance without revealing, to the
         server, which account it asked about.</p>
-      <p>It runs against real mainnet today, serving the complete nonzero-balance set — 201,059,658 accounts as of
-        its most recent bootstrap, and growing with the chain as new accounts are funded. The server computes over
+      <p>It runs against real mainnet today, serving the complete nonzero-balance set — 204,714,034 accounts as of
+        2026-09-03, and growing with the chain as new accounts are funded. The server computes over
         every one of them to answer a single query. It cannot do less without learning which account you asked
         for.</p>
       <p>The system is built around one invariant: never return a wrong answer. An error is acceptable. A silently
@@ -145,7 +145,7 @@
       <dl class="stats">
         <div>
           <dt>Accounts served</dt>
-          <dd>201,059,658</dd>
+          <dd>204,714,034</dd>
         </div>
         <div>
           <dt>First load (<code>/setup</code>, one-time)</dt>
@@ -182,8 +182,9 @@
       </dl>
       <p class="note">K is mutations per block. The patch-time figure is measured while the server follows the
         chain head, not during catch-up replay, where a warmer cache makes it look faster than steady state. The
-        account count is the figure the deployment was last bootstrapped at; it is the basis every size in this
-        table is computed from, and the live set grows above it as the chain advances.</p>
+        account count is a live figure as of 2026-09-03, not a bootstrap-time snapshot; the geometry it was last
+        bootstrapped at is the basis every size in this table is computed from, and the live set grows above the
+        count shown as the chain advances.</p>
     </div>
   </section>
 

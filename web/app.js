@@ -189,8 +189,8 @@ async function boot() {
 // estimate; the CLI client measured 1.16 GB resident on 2026-09-03,
 // docs/deployment-numbers.md) once the public matrix A is expanded
 // (docs/numbers.md §4c) — was 830.73 MB / ~1.66 GB at the previous
-// `(arity 3, bucket_size 4)` geometry, which is what the live
-// deployment still actually serves until it is re-bootstrapped.
+// `(arity 3, bucket_size 4)` geometry the deployment ran until
+// 2026-07-27, ADR-0034.
 // assessCapacity (pir.js) makes the actual call; everything here just
 // gathers its inputs from a cheap HEAD probe and whatever the device is
 // willing to say about itself, and renders whichever of its three

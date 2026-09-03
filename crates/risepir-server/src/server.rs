@@ -325,10 +325,11 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     ///
     /// At the complete mainnet set this array is ~23.6 GB at the deployed
     /// `(arity 2, bucket_size 4)` geometry (ADR-0034; ~35 GB at the previous
-    /// `(arity 3, bucket_size 4)` geometry, which is what the live
-    /// deployment still actually runs until it is re-bootstrapped), so a
-    /// caller that only *reads* the cells (state serialization, above all)
-    /// must use [`Self::cells`] instead — see that method.
+    /// `(arity 3, bucket_size 4)` geometry — the lineage the live
+    /// deployment ran until its 2026-07-27 re-bootstrap onto `(arity 2,
+    /// bucket_size 4)`, ADR-0034/`docs/deploy.md` §5.4), so a caller that
+    /// only *reads* the cells (state serialization, above all) must use
+    /// [`Self::cells`] instead — see that method.
     pub fn snapshot_cells(&self) -> Vec<u32> {
         self.store.snapshot_cells()
     }

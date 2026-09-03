@@ -1,8 +1,9 @@
 //! `GET /setup` response-cache tests (ADR-0028).
 //!
 //! The cache exists so the server encodes one shared `Bytes` and hands
-//! every client a refcounted clone, instead of deep-cloning ~831 MB of
-//! hints and encoding another ~831 MB per request. What has to be proven
+//! every client a refcounted clone, instead of deep-cloning 553.82 MB of
+//! hints (was 830.73 MB before ADR-0034) and encoding another 553.82 MB
+//! per request. What has to be proven
 //! is not that it is fast — it is that it is still *correct*:
 //!
 //! (a) the encode happens once and every client gets byte-identical bytes;

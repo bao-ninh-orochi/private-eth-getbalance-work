@@ -328,7 +328,8 @@ pub struct NodeState {
     /// A mutex, not another `RwLock`: every caller that finds the cache
     /// stale must serialize behind whichever caller is already
     /// regenerating it (two concurrent regenerations would just waste a
-    /// second ~831 MB encode), so there is no useful read/write distinction
+    /// second 553.82 MB encode — was 830.73 MB before ADR-0034), so there
+    /// is no useful read/write distinction
     /// to preserve the way there is for `inner`. And tokio's rather than
     /// `std`'s — unlike `reconcile` above, this guard is held across an
     /// `.await` (the `inner.read()` inside [`Self::setup_bytes`]), which a
@@ -795,9 +796,9 @@ impl NodeState {
     /// `0` if nothing has been encoded yet this process. Unlike
     /// [`Self::setup_bytes`], this **never regenerates** the cache:
     /// `GET /metrics` must stay cheap regardless of scrape frequency, and
-    /// forcing an ~831 MB re-encode (at the deployed complete-mainnet
-    /// geometry) as a side effect of a monitoring scrape would be exactly
-    /// backwards.
+    /// forcing a 553.82 MB re-encode (the deployed complete-mainnet
+    /// geometry; was 830.73 MB before ADR-0034) as a side effect of a
+    /// monitoring scrape would be exactly backwards.
     async fn cached_setup_bytes(&self) -> u64 {
         let cache = self.setup_cache.lock().await;
         cache.as_ref().map(|c| c.bytes.len() as u64).unwrap_or(0)
@@ -1102,14 +1103,16 @@ impl NodeState {
     ///
     /// An **eighth** of the ring, revised down from the half this shipped
     /// with: the budget a client needs is not measured in blocks but in
-    /// the *time* to download ~831 MB (~8 minutes measured end to end),
+    /// the *time* to download the hint (830.73 MB when this was sized,
+    /// ~8 minutes measured end to end; 553.82 MB today, ADR-0034),
     /// and how many blocks that costs depends on how fast the server is
     /// advancing. Half the ring priced it at steady state (~5 blocks/min:
     /// 300 blocks ≈ 1 h of margin — plenty) — but the moment that
     /// actually matters is a catch-up replay (~50 blocks/min, ADR-0029's
     /// own motivating case), where a half-window-stale bundle leaves only
     /// ~6 minutes of window against that 8-minute download: the freshly
-    /// bootstrapped client stalls *again*, at 831 MB per attempt. At an
+    /// bootstrapped client stalls *again*, at the hint's size per attempt
+    /// (553.82 MB today, was 830.73 MB before ADR-0034). At an
     /// eighth (75 blocks on the deployed 600-block ring), the served
     /// bundle is at most ~90 s stale even at replay speed, leaving ~10.5
     /// minutes of window there (~1 h 45 min at steady state), and the
@@ -1131,8 +1134,8 @@ impl NodeState {
     /// bundle the first caller just produced and returns immediately
     /// instead of encoding a second time. Concurrent `/setup` callers
     /// blocking behind one encode is the intended trade — they then all
-    /// get the fresh bytes rather than each paying their own ~831 MB clone
-    /// plus encode.
+    /// get the fresh bytes rather than each paying their own 553.82 MB
+    /// clone plus encode (was 830.73 MB before ADR-0034).
     async fn setup_bytes(&self) -> (Bytes, u64) {
         let mut cache = self.setup_cache.lock().await;
 
@@ -1212,8 +1215,9 @@ impl NodeState {
             //     readers already mid-transfer did not stop a 21st request
             //     from completing with the full body.
             // (2) the actual hazard it was meant to bound — many
-            //     concurrent ~831 MB response buffers alive at once — is
-            //     now structurally impossible: every `/setup` caller gets
+            //     concurrent 553.82 MB response buffers alive at once
+            //     (was 830.73 MB before ADR-0034) — is now structurally
+            //     impossible: every `/setup` caller gets
             //     a refcounted clone of one shared, cached encode
             //     (`NodeState::setup_bytes`), so live buffers are O(1) in
             //     caller count, not O(N).

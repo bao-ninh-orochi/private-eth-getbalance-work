@@ -222,12 +222,12 @@ impl Session {
 
     /// Step one of [`Self::new`]: decode the `GET /setup` body into its
     /// owned bundle, without building anything. Split out so the host
-    /// can release the *encoded* bytes (~831 MB at the complete mainnet
-    /// set) before [`Self::from_bundle`] allocates the decoded client —
-    /// in wasm, whose linear memory never shrinks, holding both across
-    /// the build would permanently cost the tab one extra hint-set of
-    /// footprint (ADR-0032's peak estimate is derived from this exact
-    /// sequence).
+    /// can release the *encoded* bytes (553.82 MB at the complete mainnet
+    /// set, was 830.73 MB before ADR-0034) before [`Self::from_bundle`]
+    /// allocates the decoded client — in wasm, whose linear memory never
+    /// shrinks, holding both across the build would permanently cost the
+    /// tab one extra hint-set of footprint (ADR-0032's peak estimate is
+    /// derived from this exact sequence).
     ///
     /// # Errors
     ///

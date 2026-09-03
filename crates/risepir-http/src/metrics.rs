@@ -49,7 +49,8 @@ use crate::node::ReconcileHealth;
 /// Chosen to span both a modest partial deployment (`docs/numbers.md` §5:
 /// 3.3489 ms average `server.answer(&queries)` at 1,000,000 accounts) and
 /// the live complete-mainnet deployment two orders of magnitude larger
-/// (200,503,969 accounts) — where the same per-segment scan is expected to
+/// (**204,714,034 accounts** as of 2026-09-03, was 200,503,969) — where the
+/// same per-segment scan is expected to
 /// land somewhere in the hundreds-of-ms to low-seconds range, by the same
 /// `O(n_rows × row_width × lwe_dim)` scaling `RisePirServer::answer`'s own
 /// docs state. Retuning this list is a code change, not a config knob —

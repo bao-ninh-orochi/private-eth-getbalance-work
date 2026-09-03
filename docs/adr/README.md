@@ -550,7 +550,7 @@ advisory/license/source finding. Moving it host-side puts every cargo-touching
 job on one identical auth mechanism, which is the invariant ADR-0021's wiring
 assumed but the container silently broke. [DEVIATES from ADR-0021]
 
-### ADR-0023 — The complete set needs a 64 GB box: measure the account count before sizing anything **[DEVIATES from deploy.md §2.3]**
+### ADR-0023 — The complete set needs a 64 GB box: measure the account count before sizing anything **[DEVIATES from deploy.md §2.3]** **[SUPERSEDED IN PART by deploy.md §5.11 — the deployed host moved to a 128 GB `c3d-highmem-16` on 2026-09-02 (a cross-region capacity move, not a resizing decision); the measure-the-count-before-sizing rule this ADR encodes is unchanged]**
 
 **Chosen:** run the complete mainnet set on a **64 GB** machine (GCP
 `e2-highmem-8`, 8 vCPU, 250 GB disk), and treat the §2.1 gate query's
@@ -3453,7 +3453,7 @@ this ADR overrides.
 single-author: a license grant is irrevocable, so relicensing only ever binds
 future recipients, and here there are no past ones to grandfather.
 
-### ADR-0045 — The IKPIR dependency resolves from a **public personal fork** at tag `v0.1.0-perf`; `orochi-network/IKPIR` is deliberately untouched **[NEW — supersedes ADR-0021's private-primitive credential wiring and ADR-0022's rationale; records the provenance tradeoff this leaves behind]**
+### ADR-0045 — The IKPIR dependency resolves from a **public personal fork** at tag `v0.1.0-perf`; `orochi-network/IKPIR` is deliberately untouched **[NEW — supersedes ADR-0021's private-primitive credential wiring and ADR-0022's rationale; records the provenance tradeoff this leaves behind]** **[RETUNED by ADR-0046 — the pin advances from `v0.1.0-perf` to `v0.2.0-perf`; the pinning mechanism, tag-immutability rule, and provenance tradeoff recorded here are unchanged]**
 
 **Chosen:** pin `ikpir-common` / `segmented-cuckoo` / `ikpir-server` at
 `{ git = "https://github.com/bao-ninh-orochi/IKPIR", tag = "v0.1.0-perf" }` — an

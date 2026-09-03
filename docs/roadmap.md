@@ -14,7 +14,7 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 
 | | state |
 |---|---|
-| Tests | 190+ across 8 crates; `xtask conformance` (byte-exact, network-free); live feed gate; web e2e + headless-browser gates |
+| Tests | 513 across 8 crates (as of 2026-09-03); `xtask conformance` (byte-exact, network-free); live feed gate; web e2e + headless-browser gates |
 | CI | `.github/workflows/` — clippy `-D warnings`, tests, rustdoc `-D warnings`, wasm32 check on every push; conformance on PRs; live gate + fuzz nightly; `cargo-deny` |
 | Fuzzing | 5 coverage-guided targets: every wire decoder, `BlockDelta`, the state-file loader |
 | License | dual MIT/Apache-2.0, inherited by every crate |
@@ -33,8 +33,8 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 PAT, IKPIR repo only, Contents read-only — deploy keys are *disabled* on
 that repo). Until the user mints it, every CI job fails early with an
 explicit `::error`.~~ **Closed** — `bao-ninh-orochi/IKPIR` is public now,
-pinned at the `v0.1.0-perf` tag; CI needs no secret, and the
-`IKPIR_TOKEN`/`insteadOf` plumbing is gone (ADR-0045).
+pinned at the `v0.2.0-perf` tag (was `v0.1.0-perf`; ADR-0046); CI needs no
+secret, and the `IKPIR_TOKEN`/`insteadOf` plumbing is gone (ADR-0045).
 
 ## 1. Done — with the finding that motivated each
 
@@ -117,7 +117,7 @@ SECURITY/CONTRIBUTING; E4 README; clippy-clean workspace.
    `TERMINATED` (deploy.md §3.7). Cite `risepir.org`; `demo.` stays the
    intermittently-available origin. What remains on this rung is unchanged and
    sits with C3/C5: there is still no rate limiting in front of a 553.82 MB
-   `/setup`.
+   (re-confirmed 2026-09-03) `/setup`.
 6. **A1 rungs — signed store digests → public anchoring.** The first
    steps past "documented trust" (ADR-0020): a per-block signed digest
    makes global tampering attributable; anchoring stops split-view. Does

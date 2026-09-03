@@ -101,10 +101,13 @@ use segmented_cuckoo::{
 /// The live complete-set account count — every nonzero-balance mainnet
 /// account as of the 2026-07-26 bootstrap. Source of truth: `docs/deploy.md`
 /// §5.3 ("every one of mainnet's 200,503,969 funded accounts") — that count
-/// is still current. §5.3's *geometry* line quoted alongside it ("100663296
-/// buckets, server DB 35.43 GB, load 0.498") is not: it recorded the
-/// pre-ADR-0034 `(arity 3, bucket_size 4)` deployment, kept here as an
-/// explicit historical pin
+/// is pinned-and-dated, not still current: it is the 2026-07-26 bootstrap
+/// count, and the served set was 204,714,034 on 2026-09-03
+/// (`docs/deployment-numbers.md` §4.1); kept fixed here so the geometry
+/// arithmetic tests stay byte-stable. §5.3's *geometry* line quoted
+/// alongside it ("100663296 buckets, server DB 35.43 GB, load 0.498") is
+/// stale for a separate reason: it recorded the pre-ADR-0034 `(arity 3,
+/// bucket_size 4)` deployment, kept here as an explicit historical pin
 /// (`tests::pre_adr_0034_configuration_pins_historical_geometry`). The live
 /// geometry since ADR-0034 is `(arity 2, bucket_size 4)` — 67,108,864
 /// buckets, 23.62 GB, load 0.7469 — see
@@ -893,7 +896,9 @@ mod tests {
     /// (`headroom_pct < 1.0` for `arity 4, bucket_size 4`) was an artefact
     /// of the flat 0.75 target, which ADR-0034's retune to 0.90/0.95 has
     /// erased — `(4,4)` now carries ≈20.5% headroom
-    /// (`max_accounts_at_target` 241,591,910 against 200,503,969 today),
+    /// (`max_accounts_at_target` 241,591,910 against the pinned
+    /// `LIVE_COMPLETE_SET_ACCOUNTS` of 200,503,969 — the 2026-07-26
+    /// bootstrap count kept fixed for this test, not today's 204,714,034),
     /// not a cliff. What is still true, and load-bearing for ADR-0034:
     /// `(2,4)` (the deployed configuration) and `(4,4)` (the brief's
     /// original swap target) sit on the exact same 67,108,864-bucket /

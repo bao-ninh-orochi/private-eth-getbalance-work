@@ -1,0 +1,129 @@
+# HELP risepir_build_info Static build/deployment identity (value is always 1; the identity is in the labels).
+# TYPE risepir_build_info gauge
+risepir_build_info{version="0.1.0",epoch="044a5a5d312e9a89",mode="complete"} 1
+# HELP risepir_process_uptime_seconds Seconds since this process's NodeState was constructed.
+# TYPE risepir_process_uptime_seconds gauge
+risepir_process_uptime_seconds 18638.207822743
+# HELP risepir_head_block The PIR server's current applied head block.
+# TYPE risepir_head_block gauge
+risepir_head_block 25894188
+# HELP risepir_finalized_block Most recent `finalized` height the follow loop observed (0 before its first poll; always 0 for a deployment with no follow loop, e.g. mock/demo).
+# TYPE risepir_finalized_block gauge
+risepir_finalized_block 25894188
+# HELP risepir_block_lag finalized_block - head_block, saturating at 0. Reads 0 both when caught up and when finalized_block has never been observed yet — see risepir_finalized_block.
+# TYPE risepir_block_lag gauge
+risepir_block_lag 0
+# HELP risepir_store_items Accounts currently held in the store.
+# TYPE risepir_store_items gauge
+risepir_store_items 204743822
+# HELP risepir_store_capacity Total slot capacity of the store (num_buckets * bucket_size).
+# TYPE risepir_store_capacity gauge
+risepir_store_capacity 268435456
+# HELP risepir_store_load_factor risepir_store_items / risepir_store_capacity.
+# TYPE risepir_store_load_factor gauge
+risepir_store_load_factor 0.762730173766613
+# HELP risepir_store_cells_bytes The store's raw cell array length in bytes (the server DB size).
+# TYPE risepir_store_cells_bytes gauge
+risepir_store_cells_bytes 23622320128
+# HELP risepir_hint_bytes Sum, over every segment, of that segment's hint size in bytes.
+# TYPE risepir_hint_bytes gauge
+risepir_hint_bytes 553819200
+# HELP risepir_process_rss_bytes This process's resident set size in bytes (Linux only; 0 elsewhere or on read failure).
+# TYPE risepir_process_rss_bytes gauge
+risepir_process_rss_bytes 26717814784
+# HELP risepir_setup_bytes Size of the currently cached GET /setup response, in bytes (0 if nothing has been encoded yet).
+# TYPE risepir_setup_bytes gauge
+risepir_setup_bytes 553819345
+# HELP risepir_setup_regenerations_total How many times GET /setup has actually (re)encoded a bundle, as opposed to serving a cache hit (ADR-0028).
+# TYPE risepir_setup_regenerations_total counter
+risepir_setup_regenerations_total 3
+# HELP risepir_answer_duration_seconds Wall-clock time inside RisePirServer::answer(&queries) only — excludes lock wait and wire decode/encode.
+# TYPE risepir_answer_duration_seconds histogram
+risepir_answer_duration_seconds_bucket{le="0.001"} 0
+risepir_answer_duration_seconds_bucket{le="0.005"} 0
+risepir_answer_duration_seconds_bucket{le="0.01"} 0
+risepir_answer_duration_seconds_bucket{le="0.025"} 0
+risepir_answer_duration_seconds_bucket{le="0.05"} 0
+risepir_answer_duration_seconds_bucket{le="0.1"} 0
+risepir_answer_duration_seconds_bucket{le="0.25"} 0
+risepir_answer_duration_seconds_bucket{le="0.5"} 0
+risepir_answer_duration_seconds_bucket{le="1"} 439
+risepir_answer_duration_seconds_bucket{le="2.5"} 439
+risepir_answer_duration_seconds_bucket{le="5"} 439
+risepir_answer_duration_seconds_bucket{le="10"} 439
+risepir_answer_duration_seconds_bucket{le="+Inf"} 439
+risepir_answer_duration_seconds_sum 267.6601666910002
+risepir_answer_duration_seconds_count 439
+# HELP risepir_store_operations_total Cumulative store operations (insert/update/delete calls); not slot mutations — one cuckoo insert can write several slots but counts once here. Excludes no-op deletes (ADR-0017), which make no call at all.
+# TYPE risepir_store_operations_total counter
+risepir_store_operations_total{kind="delete"} 11945
+risepir_store_operations_total{kind="insert"} 42540
+risepir_store_operations_total{kind="update"} 605934
+# HELP risepir_block_apply_seconds_total Cumulative wall-clock seconds spent applying blocks (RisePirServer::apply_block_reporting). Divide by risepir_block_apply_total for the mean.
+# TYPE risepir_block_apply_seconds_total counter
+risepir_block_apply_seconds_total 8.261045220999998
+# HELP risepir_block_apply_total Blocks successfully applied this process.
+# TYPE risepir_block_apply_total counter
+risepir_block_apply_total 1565
+# HELP risepir_block_delta_bytes_total Cumulative BlockDelta::encoded_len() bytes across every applied block.
+# TYPE risepir_block_delta_bytes_total counter
+risepir_block_delta_bytes_total 16747217
+# HELP risepir_requests_total Total requests served, by route and outcome.
+# TYPE risepir_requests_total counter
+risepir_requests_total{route="answer",outcome="ok"} 439
+risepir_requests_total{route="head",outcome="ok"} 1746
+risepir_requests_total{route="metrics",outcome="ok"} 11
+risepir_requests_total{route="mode",outcome="ok"} 2
+risepir_requests_total{route="recent",outcome="ok"} 8
+risepir_requests_total{route="setup",outcome="ok"} 6
+risepir_requests_total{route="sync",outcome="ok"} 158
+# HELP risepir_request_errors_total Error responses, by route and error class. class is always a fixed error-variant name (WireError/ServerError), never a formatted message.
+# TYPE risepir_request_errors_total counter
+# HELP risepir_state_save_configured Whether this deployment persists state (--state was given).
+# TYPE risepir_state_save_configured gauge
+risepir_state_save_configured 1
+# HELP risepir_state_save_last_success_timestamp_seconds Unix time of the most recent completed state save (0 if none yet).
+# TYPE risepir_state_save_last_success_timestamp_seconds gauge
+risepir_state_save_last_success_timestamp_seconds 0
+# HELP risepir_state_save_last_duration_seconds Wall-clock duration of that save.
+# TYPE risepir_state_save_last_duration_seconds gauge
+risepir_state_save_last_duration_seconds 0
+# HELP risepir_state_save_last_bytes That save's file size, in bytes.
+# TYPE risepir_state_save_last_bytes gauge
+risepir_state_save_last_bytes 0
+# HELP risepir_state_save_failures_total Save attempts that returned an error.
+# TYPE risepir_state_save_failures_total counter
+risepir_state_save_failures_total 0
+# HELP risepir_journal_records_since_save Records appended to the current delta journal since its last rotation (this process's own count since start/last rotation).
+# TYPE risepir_journal_records_since_save gauge
+risepir_journal_records_since_save 1565
+# HELP risepir_journal_broken Whether journaling has been permanently disabled this run (a continuity gap or I/O failure).
+# TYPE risepir_journal_broken gauge
+risepir_journal_broken 0
+# HELP risepir_reconcile_configured Whether cross-provider reconciliation runs at all.
+# TYPE risepir_reconcile_configured gauge
+risepir_reconcile_configured 1
+# HELP risepir_reconcile_last_checkpoint_block Block of the most recent reconcile checkpoint attempted.
+# TYPE risepir_reconcile_last_checkpoint_block gauge
+risepir_reconcile_last_checkpoint_block 25894170
+# HELP risepir_reconcile_last_checkpoint_timestamp_seconds Unix time of the most recent reconcile checkpoint attempted.
+# TYPE risepir_reconcile_last_checkpoint_timestamp_seconds gauge
+risepir_reconcile_last_checkpoint_timestamp_seconds 1788408043
+# HELP risepir_reconcile_last_success_block Block of the most recent checkpoint with >=1 completed comparison.
+# TYPE risepir_reconcile_last_success_block gauge
+risepir_reconcile_last_success_block 25894170
+# HELP risepir_reconcile_last_success_timestamp_seconds Unix time of the most recent checkpoint with >=1 completed comparison.
+# TYPE risepir_reconcile_last_success_timestamp_seconds gauge
+risepir_reconcile_last_success_timestamp_seconds 1788408043
+# HELP risepir_reconcile_comparisons_total Total individual account comparisons completed.
+# TYPE risepir_reconcile_comparisons_total counter
+risepir_reconcile_comparisons_total 416
+# HELP risepir_reconcile_checkpoints_total Total checkpoints attempted (empty, successful, or dark).
+# TYPE risepir_reconcile_checkpoints_total counter
+risepir_reconcile_checkpoints_total 52
+# HELP risepir_reconcile_consecutive_dark Consecutive checkpoints that attempted >=1 comparison and had every attempt fail.
+# TYPE risepir_reconcile_consecutive_dark gauge
+risepir_reconcile_consecutive_dark 0
+# HELP risepir_reconcile_halted Whether a value mismatch has permanently halted the follow loop.
+# TYPE risepir_reconcile_halted gauge
+risepir_reconcile_halted 0

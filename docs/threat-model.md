@@ -270,7 +270,8 @@ between checkpoints.
 **Honest throughput:** at the defaults (`reconcile_every 30`,
 `reconcile_samples 8`) that is one checkpoint per ~6 min of chain time and up
 to 8 comparisons each — **~1,920 account comparisons per day** against a
-complete set of 200.5 M accounts. Say plainly what that is: not coverage, but
+complete set of **204.7 M** accounts (2026-09-03; was 200.5 M). Say plainly
+what that is: not coverage, but
 a well-targeted smoke test, because the accounts it samples are exactly the
 ones the block just changed — precisely where a feed error would actually
 show up, not a uniform sample of the whole universe.

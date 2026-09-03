@@ -224,8 +224,9 @@ pub extern "C" fn risepir_set_mode_byte(value: u32) -> i32 {
 ///
 /// Decode and build are two steps with the input buffer **freed in
 /// between**: at the complete mainnet set the encoded bundle is
-/// ~831 MB, the decoded bundle another ~831 MB, and the built client
-/// (per-segment hint + expanded `A`) ~2x that again — and wasm linear
+/// 553.82 MB (was 830.73 MB before ADR-0034), the decoded bundle
+/// another 553.82 MB, and the built client (per-segment hint + expanded
+/// `A`) ~2x that again (~1.11 GB) — and wasm linear
 /// memory never shrinks, so whatever peak this function reaches is the
 /// tab's floor forever after. Releasing the encoded bytes before
 /// `Session::from_bundle` allocates the client cuts that permanent

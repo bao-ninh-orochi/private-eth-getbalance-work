@@ -1,0 +1,57 @@
+RisePIR private eth_getBalance — client measurement probe
+  PIR transport:      https://demo.risepir.org
+  independent check:  https://ethereum-rpc.publicnode.com
+  queries CSV:        /home/ubuntu/campaign/trials.csv
+  blocks CSV:         /home/ubuntu/campaign/client-blocks.csv
+  schedule:           3 batches of 100 every 5400s, 500ms between trials, 11400s lifetime
+
+The PIR server NEVER learns the queried address: it sees only LWE query vectors,
+exactly as in `client` mode.
+The independent check is the one exception, and it is the point of the check:
+each successful trial asks https://ethereum-rpc.publicnode.com for eth_getBalance(address, block) in PLAINTEXT,
+after the trial's clock has stopped. That operator is deliberately a different
+one from the PIR server, so neither sees both halves. --no-confirm disables it.
+Neither CSV ever records the address or the balance — only `found`, `provider_match`
+and `provider_hex_match`, one bit each.
+
+2026-09-03T00:46:46Z risepir-rpc probe: resolving demo.risepir.org to 35.199.37.209:443 (TLS validation unchanged)
+2026-09-03T00:46:46Z risepir-rpc probe: downloading setup bundle from https://demo.risepir.org ...
+2026-09-03T00:46:47Z risepir-rpc probe: setup 553819345 B in 1.0s — hint pinned at block 25893197, mode complete
+2026-09-03T00:46:47Z risepir-rpc probe: batch 0 — 100 trials over a pool of 128 addresses
+2026-09-03T02:16:47Z risepir-rpc probe: batch 1 — 100 trials over a pool of 128 addresses
+2026-09-03T03:46:47Z risepir-rpc probe: batch 2 — 100 trials over a pool of 128 addresses
+
+RisePIR client probe — summary
+  trials              300 (300 ok, 0 errored)
+  found / not-found   267 / 33   (absent probes: 26)
+  provider (numeric)  300 matched / 0 MISMATCHED
+  provider (raw hex)  300 byte-identical / 0 same value, different rendering
+  provider not asked  0 provider failed / 0 skipped (--no-confirm or trial errored)
+  blocks              pinned 25893197 · answered 25893197..25894124 · 125 fetches covering 959 blocks
+  hint download (C12) 553819345 B in 952466 us (content-length 553819345)
+  bytes               query up 130524900 · response down 130316100 · delta 7565555
+  client RSS (C12)    1156829184 B (last sample)
+
+  column                        n           mean            p50            p95
+  t_total_us  (A1)            300       689819.0         689536         699706
+  build_us    (A2)            300        35015.1          34938          35273
+  head_wire_us                300         2605.5           2593           2666
+  sync_wire_us                300          471.2              0           2797
+  answer_wire_us              300       628802.5         628700         631117
+  setup_wire_us               300            0.0              0              0
+  finish_us   (A5)            300        22348.8          22031          30360
+    rewind_us                 300         7475.1           7155          15498
+    decode_us                 300        14860.0          14856          14925
+    delta_apply_us            300            5.1              6              8
+    scan_us                   300            3.6              4              4
+  residual_us                 300          575.9            430           1596
+  server_compute_ns           300    609575555.1      609617992      611441822
+  server_handler_ns           300    609902567.0      609897773      611899731
+  query_bytes (A6up)          300       435083.0         435083         435083
+  response_bytes              300       434387.0         434387         434387
+  provider_rtt_us             300        18441.6          17610          30821
+  client_rss_bytes             30   1141386717.9     1142333440     1157771264
+  delta wire_bytes (B9)       125        60524.4          30774         183541
+  delta ingest_us (B10)       125         2229.6           1428           6524
+
+probe-exit=0

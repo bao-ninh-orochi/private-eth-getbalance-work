@@ -16,6 +16,8 @@ today** and there is a **live GCP deployment** (below).
    user-run BigQuery export upgrades the partial demo to the complete set).
 5. [`docs/threat-model.md`](docs/threat-model.md) — the adversary definitions;
    a change that moves a security boundary updates it in the same commit.
+6. [`docs/deployment-numbers.md`](docs/deployment-numbers.md) — the measured
+   deployment numbers.
 
 ## The binding rules
 
@@ -190,14 +192,22 @@ browser. Same origin as the PIR transport on purpose (no CORS, no mixed
 content, `connect-src 'self'` CSP). Assets are read once at startup — restart
 after editing `web/*`. First load is the whole product constraint: 46.51 MB at
 `--partial-capacity 1000000`, but **553.82 MB at the real complete mainnet set**
-(200,503,969 accounts at the `(arity 2, bucket_size 4)` geometry of ADR-0034 —
-**measured on the wire 2026-07-27**, `/setup` = 553,819,345 B = that hint plus
-145 B of framing; was **830.73 MB** at the `(arity 3, bucket_size 4)` lineage
-this box ran until then; the "588 MB" once quoted here predates both, computed
-against an assumed ~130 M). A
+(**204,714,034** accounts as of 2026-09-03 — 200,503,969 when this hint size
+was first measured, 201,059,658 at the 2026-07-31 round, 203,879,841 after
+the 2026-08-19 re-bootstrap; "The live GCP deployment" below has the full
+lineage — at the unchanged `(arity 2, bucket_size 4)` geometry of ADR-0034):
+**measured on the wire 2026-07-27** and re-confirmed live 2026-09-03,
+`/setup` = 553,819,345 B = that hint plus 145 B of framing; was **830.73 MB**
+at the `(arity 3, bucket_size 4)` lineage this box ran until then; the "588
+MB" once quoted here predates both, computed against an assumed ~130 M). A
 complete-set client now holds **1.11 GB** resident once `A` is expanded (was
-1.66 GB). That is where the CLI `client` takes over. Its residual trust — you
-trust whoever serves the page — is stated on the page itself, not just in the
+1.66 GB) — a computed estimate for the browser client (ADR-0034); the CLI
+`client` measured a **1,158,127,616 B (1.16 GB)** max resident set on
+2026-09-03 (`docs/deployment-numbers.md` C12, n=30, mean 1,141,386,718 B) —
+the oft-cited 1,156,829,184 B is that run's last sample
+(`docs/data/deployment-20260903/probe-stdout.log`), not a C12 figure. That
+is where the CLI `client` takes over. Its residual trust — you trust
+whoever serves the page — is stated on the page itself, not just in the
 ADR.
 
 Feed = dRPC keyless (traces); reconcile = publicnode keyless (independent
@@ -207,11 +217,30 @@ operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
 
 ## The live GCP deployment
 
-Project **`<your-project-id>`**, VM **`risepir`** (**`e2-highmem-8`, 8 vCPU / 64 GB,
-250 GB disk**, Debian 12, `us-central1-a`); repo at `~/private-eth-getbalance`,
-server runs in tmux session `risepir` with `--state ~/risepir-state.bin`, logs
-at `~/server-complete.log`. The Mac's `gcloud` + `gh` are authenticated; the VM
-is drivable non-interactively.
+Project **`<your-project-id>`**, VM **`risepir-c3d`** (**`c3d-highmem-16`: AMD
+EPYC 9B14 (Zen 4), 8 cores / 16 vCPU, 128 GB, 250 GB pd-balanced disk**
+`risepir-c3d-central`, Debian 12, **`us-central1-a`**); repo at `~/build-4`
+(the campaign commit), server runs in tmux session `risepir` with `--state
+~/risepir-state.bin`, logs at `~/server-complete.log`. The Mac's `gcloud` +
+`gh` are authenticated; the VM is drivable non-interactively.
+
+**Migrated twice in three days, and back where it started.** On **2026-09-02**
+a `c3d-highmem-16` (still named `risepir-c3d`) replaced the original
+`e2-highmem-8` (`risepir`, 8 vCPU / 64 GB, 250 GB disk) — cross-region to
+`us-east4-a`, because `c3d-highmem-16`/`-8` were stocked out in every
+`us-central1` zone that day — specifically to give issue #4's measurement
+campaign hardware matching the paper's own evaluation instance (deploy.md
+§5.11). On **2026-09-03**, once the campaign window closed, the same machine
+type moved back to **`us-central1-a`**, this time landing under the
+**original** reserved address rather than a new regional one (below);
+deploy.md §5.12 has that record end to end, including an unrelated instance
+that briefly held the address in between, and `docs/deployment-numbers.md`
+has the campaign's own measured numbers. The interim `us-east4-a`
+measurement host existed **2026-09-02 17:30 UTC → 2026-09-03 04:33 UTC** and
+no longer exists: instance and disk deleted, its own regional address
+(`risepir-ip-east4` = `35.199.37.209`) released. The original `e2-highmem-8`
+VM was deleted with its disk on 2026-09-02, after the `c3d-highmem-16`
+replacement was verified end to end (deploy.md §5.11).
 
 Since **2026-07-26 it serves the COMPLETE mainnet set** — `GET /mode` = 1, not
 the partial demo. That is what the 64 GB machine is for. On **2026-07-27 it was
@@ -221,17 +250,46 @@ and on **2026-07-31 again onto the `xxh3_128`/`RPST3` lineage** after the
 nonzero accounts (was 200,503,969), server DB **23.62 GB**, load 0.749, state
 file **24,176,139,523 B (24.18 GB)**. The geometry has not moved across either
 of the last two rounds — same 67,108,864 buckets, `plaintext_bits` 8,
-cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged.
+cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged
+(re-confirmed live 2026-09-03, campaign-server start, block 25,892,623).
 
-Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s snapshot
-ingest, 12 min 46 s to the first saved state file, then 10,816 blocks of replay
-at **1.72 blocks/s** (not the ~1 s/block the runbook long assumed). It costs
-**~$8.60/day running**, so stop it when idle.
+That **201,059,658** figure was the 2026-07-31 round's count; the box was
+re-bootstrapped once more on 2026-08-19, a round this repo's docs never
+recorded, and loading the resulting state file on the new `risepir-c3d` host
+reported **203,879,841** accounts in 113.4 s (deploy.md §5.11). The count has
+moved again with the chain since: **204,714,034** accounts, verified live at
+the 2026-09-03 campaign-server start (block 25,892,623) — the figure every
+current claim elsewhere in this file now cites, at the same geometry (load
+now 0.7626, was 0.7490 at 201,059,658). `C11` (the campaign's own account
+count) is measured independently by the campaign binary and tracks this;
+`docs/deployment-numbers.md` §4.1 has the campaign-window figures, including
+a reconstructed window-start count. The deployment was re-verified serving,
+at head and reconcile-green after the move back to `us-central1-a`, at
+2026-09-03 04:29–04:36 UTC (deploy.md §5.12).
 
-The complete-set per-block patch time is no longer an extrapolation: **~11.1 ms
-at K ≈ 310** while following the head (8.2–8.8 ms during catch-up, when the
-cache is warmer). `docs/numbers.md` §7 carries the table and what it does to
-§6's ratio.
+**(2026-07-31 round, `e2-highmem-8`; superseded for catch-up by the
+`--prefetch` note above — see deploy.md §5.11 for the 2026-09-02 replay
+rates.)** Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s
+snapshot ingest, 12 min 46 s to the first saved state file, then 10,816
+blocks of replay at **1.72 blocks/s** (not the ~1 s/block the runbook long
+assumed). It costs
+**~$23.5/day running** on the `c3d-highmem-16` (was **~$8.60/day** on the
+`e2-highmem-8`; both verified against the Cloud Billing catalog, deploy.md
+§5.11), so stop it when idle.
+
+A large catch-up (this migration's own was ~52,000 blocks) is faster with
+**`--prefetch <k>`** (ADR-0047, deploy.md §5.11): depth 4 sustained
+**3.7–4.1 blocks/s** against the plain loop's ~1.0–1.2 blocks/s
+(dRPC-bound); depth 8 fetched no faster and pushed more load onto the
+keyless fallback providers while the reconcile backstop was already dark
+from the lag, so 4 is the depth to reach for first on a deep catch-up.
+
+The complete-set per-block patch time is now measured directly by the
+2026-09-03 measurement campaign on `risepir-c3d` (`c3d-highmem-16`): applying
+one block (store mutation + fold + hint patch), n=959, **mean 5.573 ms, p50
+4.783 ms, p95 10.975 ms**, at mean K ≈ 433 mutations/block (was ~11.1 ms at
+K≈310 on the e2-highmem-8, 2026-07-31). `docs/deployment-numbers.md` carries
+the full table.
 
 It is **public** at <https://demo.risepir.org> (Caddy + Let's Encrypt in front
 of a loopback-only `:8645`; deploy.md §3.7), with the old
@@ -249,22 +307,43 @@ residual-trust disclosure, and links onward to the demo. `demo.` is the
 intermittently-available origin and fails hard when the VM is off, which is
 exactly why the apex exists.
 
-Since **2026-08-17** the VM holds the reserved static IP **`136.115.93.177`**,
-so the address no longer moves across stop/start and there is **no DNS step in
-the start path** — the old "run `duckdns-update.sh` *first*, the IP just
-changed" rule is gone. The `demo.` record is deliberately **DNS-only
-(unproxied)** at Cloudflare: proxying would terminate TLS at a third party that
-could then serve a modified wasm client, which is exactly the code-delivery
-trust ADR-0019 discloses (threat model §4.2). Never turn the orange cloud on
-for it.
+Since **2026-08-17** the VM has held a reserved static IP, so the address
+does not move across stop/start and there is **no DNS step in the ordinary
+start path** — the old "run `duckdns-update.sh` *first*, the IP just
+changed" rule is gone. **That reservation, `risepir-ip` = `136.115.93.177`,
+is unchanged since 2026-08-17** — it survived the round trip above: the
+2026-09-02 move to the temporary `us-east4-a` measurement host used its own,
+separate regional address (`risepir-ip-east4` = `35.199.37.209`, released
+once that host was retired) rather than moving this one, so `risepir-ip`
+simply sat reserved-but-briefly-reattached-elsewhere (deploy.md §5.12 records
+that an unrelated instance held it for a few hours) until the 2026-09-03
+move back reattached it to `risepir-c3d` again. The `demo.` record is
+deliberately **DNS-only (unproxied)** at Cloudflare: proxying would
+terminate TLS at a third party that could then serve a modified wasm client,
+which is exactly the code-delivery trust ADR-0019 discloses (threat model
+§4.2). Never turn the orange cloud on for it.
+
+Since **2026-09-03 04:29 UTC**, `demo.risepir.org` resolves to this host
+again — and needed **no DNS change** to do so, because the address the
+record has always named is the one `risepir-c3d` holds once more. The Caddy
+certificate on the disk is valid for `demo.risepir.org` until ~2026-11-15.
+
+**Two traps specific to a fresh clone or a migrated disk** (both hit during
+the 2026-09-02 migration, deploy.md §5.11): a cloned disk's `target/` is
+compiled for the *old* CPU and `cargo build` cannot tell `target-cpu=native`
+changed, so it silently reuses stale kernels — always `cargo clean` (or
+clone fresh) before the first build on a new machine. And `web/client.wasm`
+is a build artifact, absent from a fresh clone — `--web web` fails at
+startup (`web/client.wasm: No such file`) until `cargo run -p xtask
+--release -- web` runs once.
 
 ```bash
-gcloud --quiet compute ssh risepir --command='...'
-# resume after a stop — the IP is static now, so no DNS refresh:
-gcloud compute instances start risepir
-# normal restart: the 36 GB state file is loaded, then missed blocks replay
-gcloud --quiet compute ssh risepir --command='tmux new-session -d -s risepir \
-  "cd ~/private-eth-getbalance && exec ./target/release/risepir-rpc mainnet \
+gcloud --quiet compute ssh risepir-c3d --zone us-central1-a --command='...'
+# resume after a stop — the IP is static, so no DNS refresh:
+gcloud compute instances start risepir-c3d --zone us-central1-a
+# normal restart: the 24.18 GB state file is loaded, then missed blocks replay
+gcloud --quiet compute ssh risepir-c3d --zone us-central1-a --command='tmux new-session -d -s risepir \
+  "cd ~/build-4 && exec ./target/release/risepir-rpc mainnet \
    --state ~/risepir-state.bin --web web >> ~/server-complete.log 2>&1"'
 ```
 
@@ -311,8 +390,12 @@ prints a note and loads the file). That is the trap to know: leaving the old
 *partial* state file in place would have brought the server back up in PARTIAL
 mode while every flag on the command line said complete. Re-bootstrapping from
 the snapshot means moving the state file aside first — and at the complete set
-that costs **~16 min** at the deployed `(2,4)` geometry (8 min ingest + ~6 min
-PIR setup + 2 min save; it was ~33 min at `(3,4)`), *plus* the snapshot→head
+that costs **~16 min** (2026-07-27 record, `e2-highmem-8`; the campaign's
+measured setup time will land in `docs/deployment-numbers.md`) at the
+deployed `(2,4)` geometry (8 min ingest + ~6 min PIR setup (the campaign
+measured 29.18 s for the setup step alone on the c3d-highmem-16,
+docs/deployment-numbers.md C13) + 2 min save; it
+was ~33 min at `(3,4)`), *plus* the snapshot→head
 replay, which is the part that actually hurts: ~1 s/block, so a day-old
 snapshot is another ~3 h. Prefer the state file.
 `~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.
@@ -361,20 +444,20 @@ is live for the *next* hash change, not for this one. The superseded
 (24.18 GB each) are evidence only — no binary from this tree can load them —
 and can be deleted to reclaim ~48 GB.
 
-(The external IP is now reserved and stable, so nothing has to be refreshed
+(The external IP is reserved and stable, so nothing has to be refreshed
 after a start. An SSH tunnel works as before:
-`gcloud compute ssh risepir -- -L 8545:localhost:8545`.)
+`gcloud compute ssh risepir-c3d --zone us-central1-a -- -L 8545:localhost:8545`.)
 
 Stopping the meter — in this order:
 
 ```bash
-gcloud --quiet compute ssh risepir \
+gcloud --quiet compute ssh risepir-c3d --zone us-central1-a \
   --command='pkill -INT -f "^\./target/release/risepir-rpc" && sleep 90 && tail -1 ~/server-complete.log'
 #   → wait for "state saved; exiting" — at the complete set this writes the
 #     24.18 GB state file (the `(2,4)` lineage live since 2026-07-27; the
 #     final save of the old 36.26 GB `(3,4)` file took ~2 min), so allow well
 #     over the 20 s that sufficed in partial mode
-gcloud compute instances stop risepir
+gcloud compute instances stop risepir-c3d --zone us-central1-a
 ```
 
 The **anchored** pattern matters: a broad `pkill -f risepir-rpc` also kills the
@@ -384,5 +467,8 @@ mode, but **now genuinely expensive** — a complete-set re-bootstrap is ~33 min
 of CPU plus the catch-up replay). When checking from `gcloud … --command`,
 bracket the pattern (`pgrep -f "risepir-rp[c]"`) or the probe matches its own
 ssh wrapper. VM SSH key and the GitHub account key `risepir-gcp-vm` are already
-set up; at `e2-highmem-8` the VM burns **~$8.60/day** while running (up from
-~$0.80/day as an `e2-medium`), ~$10/mo stopped (250 GB disk only).
+set up; at `c3d-highmem-16` the VM burns **~$23.5/day** while running (was
+**~$8.60/day** at `e2-highmem-8`, itself up from ~$0.80/day as an
+`e2-medium`; both current figures verified against the Cloud Billing catalog,
+deploy.md §5.11), ~$25/mo stopped (250 GB pd-balanced disk only — was quoted
+here as ~$10/mo on the old host).

@@ -489,8 +489,9 @@ impl PrivateEth {
             if !self.take_rebootstrap_slot() {
                 // Within [`REBOOTSTRAP_COOLDOWN`] of the previous attempt:
                 // report the stall honestly instead of paying another full
-                // ~831 MB `/setup` download that the last attempt just
-                // proved insufficient (ADR-0029, amended).
+                // 553.82 MB `/setup` download (was 830.73 MB before
+                // ADR-0034) that the last attempt just proved insufficient
+                // (ADR-0029, amended).
                 return first;
             }
             self.rebootstrap(&mut session).await?;

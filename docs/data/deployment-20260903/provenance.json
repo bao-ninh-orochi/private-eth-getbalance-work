@@ -1,0 +1,11 @@
+{
+  "commit": "b37e4eedc82477b5df5dd2bdf65c47ddab1e0a4f (upstream main, PR #8 merge)",
+  "primitive": "bao-ninh-orochi/IKPIR v0.2.0-perf (d91c75f), RisePIR-S (LWE/SimplePIR backend)",
+  "server_host": "GCP c3d-highmem-16 (risepir-c3d, us-east4-a): AMD EPYC 9B14 Zen 4, 8 cores/16 vCPU, 125 GiB, 250 GB pd-balanced, Debian 12.15, kernel 6.1.0-52-cloud-amd64, glibc 2.36, rustc 1.96.0, target-cpu=native",
+  "server_binary_sha256": "77e2f06e9a2888c1b6b00d25f0628ee9c7f4cb0db2d7b71feafc5f62794e85fd",
+  "client_vantage": "AWS r7a.xlarge (i-08a770e1d6e8a180b, us-east-1b): AMD EPYC 9R14 Zen 4, 4 vCPU, 16 MiB L3 share, 30 GiB; Ubuntu 24.04 (kernel 7.0.0-1011-aws), rustc 1.96.0, target-cpu=native; probe binary sha256 553aa8df00489eaf81bae436f16ea9c7c10a204563afd52a1947c57fac88afad",
+  "link": "public internet, cloud-to-cloud (AWS us-east-1 -> GCP us-east4, both Northern Virginia), TLS 1.3 (rustls) terminated by Caddy on the host, HTTP/1.1 keep-alive on one reqwest client; demo.risepir.org resolved client-side to 35.199.37.209 (--resolve), certificate validation on",
+  "feed": "https://eth.drpc.org (+ https://eth.merkle.io fallback), prestateTracer; reconcile/confirm provider https://ethereum-rpc.publicnode.com",
+  "window_utc": "2026-09-03T00:46:45Z (probe start; /setup pinned at block 25893197) -> 2026-09-03T03:54:37Z (last delta ingested)",
+  "block_range": "server rows 25893198..25894156 (959 blocks applied while the session was live); answers at blocks 25893197..25894124"
+}

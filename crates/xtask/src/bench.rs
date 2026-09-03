@@ -99,17 +99,24 @@ const MAX_PROJECTED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 //
 // `docs/numbers.md` §1–§6 (rendered from a fresh `run()` sweep, see
 // `BenchReport::to_markdown`) currently stop at 9,437,184 accounts on this
-// laptop. The live deployment serves `DEPLOYMENT_ACCOUNTS` — far larger — and has
-// itself measured exactly one of §1's quantities (full-rebuild time) at
-// that scale, on a different machine. §7 (`complete_set_markdown`, below)
-// states that plainly, alongside a separate, explicitly-dated laptop run
-// that extended this harness's own scales far enough to fit a defensible
-// extrapolation of the §6 headline ratio.
+// laptop. The live deployment serves `DEPLOYMENT_ACCOUNTS` — far larger.
+// As of the 2026-09-03 measurement campaign (issue #4), the complete-set
+// figures §1 sweeps at bench scale — full-rebuild/setup time, per-block
+// patch time, answer latency — are directly MEASURED at deployment scale
+// too, on the deployment host itself, and reported with full n/mean/p50/p95
+// statistics in `docs/deployment-numbers.md`. This module quotes none of
+// those timing figures — they belong to that report, which alone can keep
+// them in sync — and instead points there. §7 (`complete_set_markdown`,
+// below) also keeps, as a dated and explicitly superseded method record, a
+// separate laptop run from before the campaign existed that extended this
+// harness's own scales far enough to fit a defensible *extrapolation* of
+// the §6 headline ratio — useful history for how this repo estimated the
+// answer before it could measure it directly.
 //
 // Most figures below are one-off historical measurements with no other
-// source of truth (Run B's scale extension, the deployment's own
-// full-rebuild time, the same-machine control) — those are pinned as
-// named constants, never re-derived at render time, exactly as before.
+// source of truth (Run B's scale extension, the same-machine control) —
+// those are pinned as named constants, never re-derived at render time,
+// exactly as before.
 // `PUBLISHED_TOP_SCALE_ACCOUNTS`/`PUBLISHED_MID_SCALE_ACCOUNTS` and their
 // three `PUBLISHED_*` siblings are different: they used to be hand-typed
 // copies of whatever §1/§5/§6 happened to show, which only stayed correct
@@ -126,27 +133,22 @@ const MAX_PROJECTED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 // measurement against another on purpose.
 
 /// The complete mainnet nonzero-balance account count the live deployment
-/// serves (`GET /mode` = 1) — `docs/deploy.md` §5.8 ("gate query"),
-/// measured 2026-07-31 (was 200,503,969 from the 2026-07-26 gate, §5.3).
+/// serves (`GET /mode` = 1) — `risepir_store_items`, measured 2026-09-03 on
+/// the deployment host (GCP `c3d-highmem-16`, `us-east4-a`) at block
+/// 25,892,719, as the measurement campaign's starting count (issue #4,
+/// `docs/deployment-numbers.md`).
 ///
-/// The geometry is unchanged by the growth: `Geometry::for_accounts` lands on
-/// the same 67,108,864 buckets and `plaintext_bits` 8, so every size in §4 is
-/// identical and only the load factor moves (0.7469 → 0.7490).
-const DEPLOYMENT_ACCOUNTS: u64 = 201_059_658;
-
-/// The complete mainnet set's one-time full PIR-setup rebuild time, in
-/// seconds — `docs/deploy.md` §5.3 ("PIR setup (one-time)"), measured
-/// 2026-07-26 on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB
-/// usable), **not** this module's own benchmark machine. Pre-ADR-0034
-/// `(arity 3, bucket_size 4)` lineage: the live host has not yet been
-/// re-bootstrapped onto the `(arity 2, bucket_size 4)` geometry this
-/// module measures at every other scale (`ARITY`/`BUCKET_SIZE` above), and
-/// a full rebuild at deployment scale is not something this repo alone can
-/// re-measure — it needs the deployment host, out of scope for the
-/// arity retune. This is still §1's exact quantity (full-rebuild time) at
-/// deployment scale — see `complete_set_markdown` for why it cannot be
-/// compared to §1's other rows without saying so.
-const DEPLOYMENT_FULL_REBUILD_SECS: f64 = 1236.5;
+/// Lineage: the previous **201,059,658** was the 2026-07-31 round
+/// (`docs/deploy.md` §5.8); a 2026-08-19 re-bootstrap this repo's docs did
+/// not record at the time moved it to 203,879,841 (`docs/deploy.md`
+/// §5.11, loaded on the migrated `risepir-c3d` host); this campaign's own
+/// count supersedes both (superseded for the deployment by
+/// `docs/deployment-numbers.md`, 2026-09-03).
+///
+/// The geometry is unchanged by the growth: `Geometry::for_accounts` still
+/// lands on the same 67,108,864 buckets and `plaintext_bits` 8, so every
+/// size in §4 is identical and only the load factor moves (0.7490 → 0.7626).
+const DEPLOYMENT_ACCOUNTS: u64 = 204_714_034;
 
 /// `BenchConfig::default().scales`'s last (largest) entry — the operating
 /// point §1/§6's "honest summary" wants to talk about. Doubles as: (a) the
@@ -229,10 +231,9 @@ const RUN_B_ANSWER_LATENCY_MS_AT_MID_SCALE: f64 = 5.5713;
 /// builds and not quoted here) — full-rebuild time, headline-`K`(≈300)
 /// patch time, and their ratio, at the three largest scales this
 /// worktree's own `--scales`/`--mid-scale` `xtask bench` flags reached.
-/// Pre-ADR-0034 `(arity 3, bucket_size 4)` lineage, like
-/// `DEPLOYMENT_FULL_REBUILD_SECS` above: this run predates the arity
-/// retune, back when this module's `ARITY` constant was still 3 — not the
-/// now-deployed `(arity 2, bucket_size 4)` geometry §1–§6 measure.
+/// Pre-ADR-0034 `(arity 3, bucket_size 4)` lineage: this run predates the
+/// arity retune, back when this module's `ARITY` constant was still 3 —
+/// not the now-deployed `(arity 2, bucket_size 4)` geometry §1–§6 measure.
 /// `(accounts, full_rebuild_secs, headline_patch_ms, ratio)`. A one-off
 /// historical measurement, not reproduced by `BenchConfig::default()`.
 const RUN_B_LARGEST_SCALES: [(u64, f64, f64, u64); 3] = [
@@ -255,17 +256,17 @@ const RUN_B_RATIO_GROWTH_EXPONENT: f64 = 0.83;
 
 /// EXTRAPOLATION, not a measurement: `RUN_B_RATIO_GROWTH_EXPONENT`
 /// extended from Run B's largest scale (37,748,736) to `DEPLOYMENT_ACCOUNTS`
-/// (a further 5.31x in `N`) — `4939 * 5.31^0.83 ~ 1.9e4`. On the order of
-/// 10^4; not a precise figure — see `complete_set_markdown`'s honest
-/// summary text, and its own cross-check against `DEPLOYMENT_FULL_REBUILD_SECS`
-/// (also pre-ADR-0034 `(arity 3, bucket_size 4)` lineage, like every
-/// constant it is built from).
+/// (a further 5.42x in `N`) — `4939 * 5.42^0.83 ~ 2.0e4`. On the order of
+/// 10^4; not a precise figure, and itself superseded now that
+/// `docs/deployment-numbers.md` (2026-09-03) measures the deployment's
+/// actual per-block apply time directly — see `complete_set_markdown`'s
+/// honest summary text.
 const EXTRAPOLATED_COMPLETE_SET_RATIO: f64 = 2.0e4;
 
 // ─── §7: same-machine (2,4) vs (3,4) control — ADR-0034 follow-up ───────
 //
-// Everything above (`DEPLOYMENT_FULL_REBUILD_SECS`, `RUN_B_*`,
-// `PUBLISHED_*`) predates the arity retune from `(3,4)` to `(2,4)`
+// Everything above (`RUN_B_*`, `PUBLISHED_*`) predates the arity retune
+// from `(3,4)` to `(2,4)`
 // (ADR-0034) and answers "how does this laptop's measured ratio extend to
 // deployment scale". The four constants below answer a different
 // question, made necessary *by* that retune: now that §1–§6 are freshly
@@ -1040,12 +1041,15 @@ fn resolve_mid_scale_latency(report: &BenchReport) -> MidScaleLatency {
 /// Renders `docs/numbers.md` §7, "The complete mainnet set", for the
 /// report actually being written. Most figures here are still either a
 /// fixed historical measurement (this laptop's Run B sweep past the
-/// published top scale, or the live deployment's own number,
-/// `docs/deploy.md` §5.3), a plain computed geometry size (`Geometry::sizes`
+/// published top scale), a plain computed geometry size (`Geometry::sizes`
 /// at `DEPLOYMENT_ACCOUNTS` under this module's own fixed `ARITY`/
 /// `BUCKET_SIZE` — deterministic, not timed, exactly like §4a/4b/4c above),
 /// or an explicitly labelled extrapolation from those — never a fresh
-/// *timing* this function takes itself. The exception, deliberately: the
+/// *timing* this function takes itself. Every complete-set timing — setup
+/// time, per-block apply time, answer compute, each with full
+/// n/mean/p50/p95 statistics — is measured by the campaign directly and
+/// reported in `docs/deployment-numbers.md`; this function quotes none of
+/// them and points there instead. The exception, deliberately: the
 /// "honest summary" paragraph's top-scale rebuild time and headline ratio,
 /// which come from `report` itself whenever it reaches
 /// `PUBLISHED_TOP_SCALE_ACCOUNTS` (see `resolve_top_scale_figures`) — so
@@ -1076,13 +1080,18 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     // stale the way the "honest summary" paragraph used to.
     writeln!(
         out,
-        "The live deployment (`docs/deploy.md` §5.3) serves the complete nonzero-balance mainnet set \
-         — {:.0}x larger than this file's largest bench scale ({} accounts, §1–§6). This section \
-         states plainly what is and is not measured at that scale, and what a defensible \
-         extrapolation of the §6 headline ratio looks like. §1–§6 above are this run's own fresh \
-         measurements, never a value anyone hand-maintains to match them — see the reproducibility \
-         note below for how much run-to-run machine variance to expect before comparing them against \
-         any other figure this section cites.",
+        "The live deployment serves the complete nonzero-balance mainnet set — {:.0}x larger than \
+         this file's largest bench scale ({} accounts, §1–§6), which this laptop cannot build a \
+         server at (§4b). As of the 2026-09-03 measurement campaign (issue #4), the complete set's \
+         own numbers — per-block apply time, answer compute, setup time, and sizes, each with \
+         n/mean/p50/p95 — are MEASURED directly on the deployment host and reported in \
+         `docs/deployment-numbers.md`; that file is the one to cite for the deployment's actual \
+         behaviour — this section quotes none of those figures itself. It instead keeps — dated and \
+         explicitly labelled superseded — the extrapolation method this repo used to estimate the \
+         answer before it could measure it directly. §1–§6 above are \
+         this run's own fresh measurements, never a value anyone hand-maintains to match them — see \
+         the reproducibility note below for how much run-to-run machine variance to expect before \
+         comparing them against any other figure this section cites.",
         DEPLOYMENT_ACCOUNTS as f64 / report.reached_top_scale as f64,
         fmt_num(report.reached_top_scale),
     )
@@ -1091,15 +1100,14 @@ fn complete_set_markdown(report: &BenchReport) -> String {
 
     writeln!(
         out,
-        "**What is measured, and where.** The complete set's one-time full PIR-setup rebuild took \
-         **{DEPLOYMENT_FULL_REBUILD_SECS:.1} s** at {accounts} accounts — `docs/deploy.md` §5.3, \"PIR \
-         setup (one-time)\", on the deployment host (GCP `e2-highmem-8`, 8 vCPU / 64 GB), **not** this \
-         benchmark machine, and under the pre-ADR-0034 `(arity 3, bucket_size 4)` lineage that host is \
-         still running (it has not yet been re-bootstrapped onto the `(arity 2, bucket_size 4)` \
-         geometry §1–§6 above measure). That is exactly §1's quantity (full-rebuild time) at deployment \
-         scale, but measured on a different machine, and a different geometry, from every other row in \
-         §1 and §6 — a fact that must travel with the number wherever it is quoted.",
-        accounts = fmt_num(DEPLOYMENT_ACCOUNTS),
+        "**What is measured, and where.** The complete set's one-time full PIR-setup rebuild — \
+         exactly §1's quantity, at deployment scale rather than inferred — is measured on the \
+         deployment host (GCP `c3d-highmem-16`, `us-east4-a`), at the *same* `(arity 2, bucket_size \
+         4)` geometry §1–§6 above measure, via `risepir-rpc time-setup` (C13) run against the served \
+         store — the same `server_setup` the bootstrap itself runs, not a different code path. So is \
+         every other complete-set figure this file used to estimate — per-block apply time above \
+         all — measured the same rigorous way, with full n/mean/p50/p95 statistics. None of those \
+         figures are quoted here: see `docs/deployment-numbers.md` for the actual numbers."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -1120,16 +1128,27 @@ fn complete_set_markdown(report: &BenchReport) -> String {
 
     writeln!(
         out,
-        "**What is not measured, plainly.** Per-block patch time has never been measured at the \
-         complete set. This laptop cannot hold that set — the deployed `(arity 2, bucket_size 4)` \
-         geometry alone is a {db_gb:.2} GB server DB (§4b; the live host was re-bootstrapped onto it \
-         on 2026-07-27 and now holds exactly that, in a 24.18 GB state file — deploy.md §5.4) \
-         — and the deployment box is a production server, not a benchmark rig, so it has never run the \
-         bench harness's warm-up/measured-block protocol either. §6 therefore has no {accounts}-account \
-         row, and deliberately does not get one: a patch time nobody measured has no business next to \
-         five that were.",
+        "**Why §6 still has no {accounts}-account row.** This bench harness cannot build a server at \
+         deployment scale on this laptop — the deployed `(arity 2, bucket_size 4)` geometry alone is \
+         a {db_gb:.2} GB server DB (§4b) — and the deployment box is a production server, not a \
+         benchmark rig, so it has never run this harness's warm-up/measured-block protocol either. \
+         §6 above therefore still has no {accounts}-account row, and never will from this machine. \
+         That used to mean per-block patch time at the complete set was unmeasured anywhere; it no \
+         longer does — `docs/deployment-numbers.md` carries the campaign's own measured per-block \
+         apply time, taken on the deployment host itself rather than extrapolated from this laptop.",
         db_gb = deployed_db_bytes as f64 / 1e9,
         accounts = fmt_num(DEPLOYMENT_ACCOUNTS),
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "**EXTRAPOLATION (2026-07-27 Run B, arity-3 lineage) — superseded by the measured deployment \
+         figures.** The remainder of this section through \"Honest summary\" below is a dated method \
+         record: how this repo estimated the deployment's headline ratio *before* the 2026-09-03 \
+         measurement campaign made a direct measurement possible. It is retained for provenance, not \
+         as a current citation — see `docs/deployment-numbers.md` for the measured figures."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -1177,7 +1196,6 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     let n_growth = n2 as f64 / n0 as f64;
     let ratio_growth = r2 as f64 / r0 as f64;
     let n_extension = DEPLOYMENT_ACCOUNTS as f64 / n2 as f64;
-    let cross_check_ms = DEPLOYMENT_FULL_REBUILD_SECS / EXTRAPOLATED_COMPLETE_SET_RATIO * 1000.0;
 
     writeln!(
         out,
@@ -1216,11 +1234,10 @@ fn complete_set_markdown(report: &BenchReport) -> String {
     .unwrap();
     writeln!(
         out,
-        "- Cross-check, itself EXTRAPOLATION: dividing the deployment's own measured \
-         {DEPLOYMENT_FULL_REBUILD_SECS:.1} s full rebuild by the ~2 × 10^4 extrapolated ratio implies \
-         a per-block patch of roughly {cross_check_ms:.0} ms (55–75 ms, allowing for the \
-         extrapolation's own uncertainty) at {} accounts on that host — a figure nobody has measured \
-         (see \"instrumentation now exists\" below).",
+        "- A cross-check against a real deployment figure used to sit here, built from the \
+         pre-ADR-0034 host's rebuild time — removed now that a direct measurement exists: see \
+         `docs/deployment-numbers.md` for the campaign's own measured per-block apply time at {} \
+         accounts, not a figure implied by this extrapolation.",
         fmt_num(DEPLOYMENT_ACCOUNTS),
     )
     .unwrap();
@@ -1244,8 +1261,10 @@ fn complete_set_markdown(report: &BenchReport) -> String {
         out,
         "**Honest summary.** The {ratio}× {verb} for {top} accounts (§6) understates the argument \
          at deployment scale by roughly {ratio_gap:.0}×; a 10^5 claim (the original brief's \
-         assumption) would overstate it. The defensible statement today is: **on the order of \
-         10^4, and rising with N.**",
+         assumption) would overstate it. The defensible statement **at the time** was: on the order \
+         of 10^4, and rising with N — an estimate. The 2026-09-03 measurement campaign has since \
+         measured the real complete-set per-block apply time directly, so `docs/deployment-numbers.md` \
+         carries the actual ratio now, not this extrapolation.",
         ratio = top_figs.ratio,
         verb = honest_summary_verb,
         top = fmt_num(PUBLISHED_TOP_SCALE_ACCOUNTS),
@@ -1462,32 +1481,14 @@ fn complete_set_markdown(report: &BenchReport) -> String {
 
     writeln!(
         out,
-        "**Instrumentation now exists, and it has now reported — the extrapolation above was \
-         pessimistic by 5-7x.** `NodeState::apply_block` (`crates/risepir-http/src/node.rs`) returns \
-         its own measured hint-patch duration, and the mainnet follow loop \
-         (`crates/risepir-rpc/src/mainnet.rs`) aggregates and periodically logs it with the mean \
-         mutations/block (K) over the same window. The 2026-07-31 re-bootstrap (`docs/deploy.md` \
-         §5.8) produced the number this section was written without, on the deployment host at the \
-         complete set:\n\n\
-         | regime | mean | min | max | mean K |\n\
-         |---|---:|---:|---:|---:|\n\
-         | during catch-up replay | 8.23 ms -> 8.81 ms | 2.51 ms | 20.14 ms | 311-326 |\n\
-         | **once following the head** | **11.09 ms -> 11.11 ms** | 0.66 ms | 29.20 ms | 303-323 |\n\n\
-         Two windows in each regime, agreeing closely — a stable figure, not one lucky sample — and \
-         at K ~ 300-326, the same mutation rate §2/§6 bench at, so it is directly comparable rather \
-         than a different workload. Against the ~62 ms (55-75 ms) extrapolated just above, the \
-         measured **~11.1 ms** is 5-7x better, which runs the other way through §6's arithmetic: \
-         dividing the deployment's own 1236.5 s rebuild by a *measured* 11.1 ms puts the rebuild ÷ \
-         patch ratio on the order of **10^5**, not the ~2 x 10^4 extrapolated. The honest summary \
-         above therefore **understates** the deployed case; it is kept as written because it was the \
-         defensible statement from the data then available, and because the two halves of that \
-         quotient still are not measured the same way — 1236.5 s is the pre-ADR-0034 `(3,4)` \
-         rebuild, 11.1 ms is today's `(2,4)` deployment. A same-geometry pair for both halves does \
-         not exist yet, so the 10^5 is an *improved estimate*, not a measured ratio.\n\n\
-         Named rather than buried: the catch-up figures are taken while the server applies blocks \
-         back to back, touching the hint far more densely in time than following the head does. \
-         That is the likeliest reason catch-up looks *faster* than steady state (a warmer cache), \
-         and it is why the following-head row is the one to quote."
+        "**Instrumentation superseded.** `NodeState::apply_block` \
+         (`crates/risepir-http/src/node.rs`) has, since 2026-07-31, returned its own measured \
+         hint-patch duration, and the mainnet follow loop (`crates/risepir-rpc/src/mainnet.rs`) \
+         aggregates and periodically logs it — the source of an earlier, ad-hoc log-scraped estimate \
+         of the complete set's per-block apply time. That estimate is superseded: the 2026-09-03 \
+         measurement campaign (issue #4) reports the same quantity properly, with a controlled \
+         protocol and full n/mean/p50/p95 statistics, in `docs/deployment-numbers.md` — cite that \
+         file, not this paragraph, for the complete set's per-block apply time."
     )
     .unwrap();
 
@@ -1982,12 +1983,23 @@ mod complete_set_section_tests {
         let section = complete_set_markdown(&report);
 
         assert!(
-            section.contains("1236.5"),
-            "must cite the docs/deploy.md §5.3 full-rebuild time verbatim"
+            section.contains("docs/deployment-numbers.md"),
+            "must point readers at the measurement campaign's own report for the current \
+             complete-set figures, not restate them here"
+        );
+        assert!(
+            !section.contains("1236.5"),
+            "the old pre-campaign rebuild figure must not appear — the campaign's own measured \
+             numbers live in docs/deployment-numbers.md, never restated or implied here"
+        );
+        assert!(
+            section.contains("time-setup"),
+            "must still describe how the deployment's own setup time is measured (`risepir-rpc \
+             time-setup`), even while quoting no number for it"
         );
         assert!(
             section.contains(&fmt_num(DEPLOYMENT_ACCOUNTS)),
-            "must cite the docs/deploy.md §5.3 account count, thousands-separated to match this \
+            "must cite the live deployment's account count, thousands-separated to match this \
              module's `fmt_num` convention"
         );
         assert!(

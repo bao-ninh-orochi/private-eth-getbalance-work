@@ -111,14 +111,16 @@ downloads still shrinks slightly. ADR-0034 §5 has the full table.)
 Client compute is not the constraint: a full lookup is **10 ms** at 1 M accounts
 (two segments, single-threaded wasm, no SIMD), and expanding `A` from its seed
 at startup is another ~0.2 s. At the **actual** complete mainnet set —
-200,503,969 accounts, measured 2026-07-26, not the ~100 M once assumed here —
-the deployed geometry has since moved to `(arity 2, bucket_size 4)` at a
-higher target load (ADR-0034): the hint computes to **553.82 MB**, and a
-client holds **1.11 GB** resident once `A` is expanded alongside it
-(`docs/numbers.md` §4c) — down from **830.73 MB** / **1.66 GB** at the
-`(arity 3, bucket_size 4)` geometry the live deployment still runs until an
-operator re-bootstraps it (§5.3). That is past what a web page should ask
-for, and is where `risepir-rpc client` on a real machine takes over.
+**204,714,034** accounts as of 2026-09-03 (200,503,969 when this section was
+first measured, 2026-07-26; `CLAUDE.md`'s "The live GCP deployment" has the
+full lineage) — the deployed geometry moved to `(arity 2, bucket_size 4)` at a
+higher target load (ADR-0034) on 2026-07-27 (§5.4): the hint computes to
+**553.82 MB**, and a client holds **1.11 GB** resident once `A` is expanded
+alongside it (`docs/numbers.md` §4c) — down from **830.73 MB** / **1.66 GB** at
+the `(arity 3, bucket_size 4)` geometry the deployment ran until that
+re-bootstrap (§5.3 has that lineage's live evidence). That is past what a web
+page should ask for, and is where `risepir-rpc client` on a real machine takes
+over.
 
 **What the page tells the visitor** (all of it enforced, none of it decorative):
 the deployment's mode (complete ⇒ absence is exactly `0`; partial ⇒ absence is an
@@ -404,9 +406,11 @@ the base save alone instead (ADR-0037).
 ### 2.3 Hardware / cost
 
 **These numbers were revised upward on 2026-07-26**, when the gate query was
-first actually run rather than estimated. Mainnet has **200,503,969** nonzero
-accounts — not the ~100–130 M this table assumed — which is what actually
-drives the geometry. The earlier "16 GB floor" was wrong by more than 2×;
+first actually run rather than estimated. Mainnet had **200,503,969** nonzero
+accounts at that first measurement — not the ~100–130 M this table assumed —
+which is what actually drives the geometry; the live count has grown since,
+to **204,714,034** as of 2026-09-03 (`CLAUDE.md`'s "The live GCP deployment"
+has the full lineage). The earlier "16 GB floor" was wrong by more than 2×;
 anyone who provisioned from it would have OOMed after paying for a 5.6 GB
 download and a 12-minute ingest.
 
@@ -426,7 +430,7 @@ paragraph, ADR-0034 §6).
 | deployment | accounts | RAM needed | how to run it |
 |---|---:|---:|---|
 | `--partial` demo | ≤4 M tracked | ~1 GB | any laptop |
-| complete mainnet, `(arity 2, bucket_size 4)` — current code (ADR-0034) | **200.5 M nonzero** (2026-07-26) | server DB **23.62 GB** + hint 0.55 GB + A 0.55 GB ⇒ **~24.7 GB working set** | GCP `e2-highmem-8` (8 vCPU / 64 GB) still comfortably covers it; a smaller box is plausible but unverified — nothing has re-bootstrapped at this geometry at the complete set yet |
+| complete mainnet, `(arity 2, bucket_size 4)` — current code (ADR-0034) | **204,714,034 nonzero** (2026-09-03; was 200.5 M at 2026-07-26 — `CLAUDE.md` has the fuller lineage) | server DB **23.62 GB** + hint 0.55 GB + A 0.55 GB ⇒ **~24.7 GB working set** | The deployment re-bootstrapped onto this geometry on 2026-07-27 (§5.4), first on `e2-highmem-8` (8 vCPU / 64 GB); as of the 2026-09-02 migration it runs on `c3d-highmem-16` (128 GB) in `us-east4-a` instead (§5.11) |
 | complete mainnet, `(arity 3, bucket_size 4)` — what is live today | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h — what the public deployment ran on until the 2026-09-02 migration; now `c3d-highmem-16` (8 cores / 16 vCPU, 128 GB) in `us-east4-a`, ~$0.98/h ≈ $23.5/day (§5.11) |
 | RPC usage | — | — | dRPC + publicnode keyless tiers (the follow loop is ~5–10 requests/min steady-state) |
 
@@ -446,9 +450,16 @@ on the current code, at its deployed `(2,4)` geometry, now prints:
 risepir-rpc mainnet: geometry for 200503969 accounts: 67108864 buckets, server DB 23.62 GB, load 0.747
 ```
 
-(The live box, still running the pre-ADR-0034 binary, printed `100663296
-buckets, server DB 35.43 GB, load 0.498` when it actually bootstrapped — §5.3
-— and will keep printing that on every restart until it is re-bootstrapped.)
+(The account count printed above — `200503969` — is the 2026-07-26 gate-query
+figure this section was written against. The live set has since grown to
+**204,714,034** (2026-09-03, re-confirmed live) and keeps growing with the
+chain; a bootstrap run today would print that count instead, with the same
+`67108864` buckets and 23.62 GB DB, since the geometry hasn't moved.)
+
+(The live box, at the time this section was written, was still running the
+pre-ADR-0034 binary — it printed `100663296 buckets, server DB 35.43 GB,
+load 0.498` when it actually bootstrapped — §5.3. It has since been
+re-bootstrapped onto this `(2,4)` geometry, on 2026-07-27 — §5.4.)
 
 The load factor of 0.7469 is `segmented-cuckoo`'s own quantization, not a
 property of the target: `num_buckets` can only take the values `2^t` or
@@ -1215,6 +1226,15 @@ If you run the systemd unit (`ops/systemd/risepir.service`) instead, none of
 this applies: journald rotates on its own.
 
 ### Migration: the `xxh3_128` pin bump — REQUIRED, and NOT YET RUN
+
+> **Note (added after the fact, 2026-09-03): this migration WAS run, on
+> 2026-07-31 (§5.8) — the heading and the "planned, not executed" framing
+> below are pre-migration evidence, left exactly as recorded.** The `RPST3`
+> state it produced was itself superseded twice more: an undocumented
+> re-bootstrap on 2026-08-19, then the 2026-09-02 migration to
+> `c3d-highmem-16` in `us-east4-a` (§5.11). See `CLAUDE.md`'s "The live GCP
+> deployment" section for the current host and account count
+> (204,714,034 as of 2026-09-03).
 
 **Status: planned, not executed.** The VM has been `TERMINATED` since
 2026-07-29 (block 25,638,894) and was deliberately left alone while this

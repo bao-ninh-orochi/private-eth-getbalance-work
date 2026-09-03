@@ -20,7 +20,7 @@ Every statistic below is recomputable from those files alone with `cargo run -p 
 | geometry | arity 2, bucket_size 4, 67,108,864 buckets, `plaintext_bits` 8, LWE dimension n = 1275, fingerprint 32 bits + `key_tag` (ADR-0034 lineage, `RPST3`) |
 | server host | GCP `c3d-highmem-16` (`risepir-c3d`), us-east4-a: AMD EPYC 9B14 (Zen 4, "Genoa"), 8 physical cores / 16 vCPU, 125 GiB RAM, 250 GB pd-balanced; Debian 12.15, kernel 6.1.0-52-cloud-amd64, glibc 2.36; `rustc 1.96.0`, `target-cpu=native`, rayon 16 threads |
 | server binary | sha256 `77e2f06e9a2888c1b6b00d25f0628ee9c7f4cb0db2d7b71feafc5f62794e85fd` |
-| cache topology | L1d 32 KiB ×8, L2 1 MiB ×8, L3 32 MiB shared by all 16 vCPUs, per `lscpu`. On AMD instances `lscpu` reports L3 pro-rata to the vCPU count; 8 cores is exactly one Genoa CCD, so the pro-rata figure and the physical CCD coincide here. The 553.82 MB hint is ~17× L3 either way — the per-block patch runs out of cache, not in it (`docs/verification.md` Correction 4) |
+| cache topology | L1d 32 KiB ×8, L2 1 MiB ×8, L3 32 MiB shared by all 16 vCPUs, per `lscpu` (raw output: [`lscpu-server.txt`](data/deployment-20260903/lscpu-server.txt), captured on the identical-type replacement instance after the measurement host itself was deleted — its header explains why). On AMD instances `lscpu` reports L3 pro-rata to the vCPU count; 8 cores is exactly one Genoa CCD, so the pro-rata figure and the physical CCD coincide here. The 553.82 MB hint is ~17× L3 either way — the per-block patch runs out of cache, not in it (`docs/verification.md` Correction 4) |
 | client vantage | AWS `r7a.xlarge` (`i-08a770e1d6e8a180b`), us-east-1b: AMD EPYC 9R14 (Zen 4), 4 vCPU, 16 MiB L3 share, 30 GiB; Ubuntu 24.04, kernel 7.0.0-1011-aws; `rustc 1.96.0`, `target-cpu=native`. The paper's own evaluation instance type. Probe binary sha256 `553aa8df00489eaf81bae436f16ea9c7c10a204563afd52a1947c57fac88afad` |
 | link | public internet, cloud-to-cloud (AWS us-east-1 → GCP us-east4, both Northern Virginia); TLS 1.3 via `rustls`, terminated by Caddy on the host; HTTP/1.1 keep-alive on one `reqwest` client for the whole run; `demo.risepir.org` resolved client-side to `35.199.37.209` (`--resolve`), certificate validation left on |
 | feed / reconcile | `https://eth.drpc.org` (+ `https://eth.merkle.io` fallback), `prestateTracer`; independent provider for both the probe's per-trial correctness check and the server's reconcile loop: `https://ethereum-rpc.publicnode.com` (ADR-0007: comparisons at an explicit block height, `"latest"` = finalized) |
@@ -192,7 +192,7 @@ The 11 B and 19 B gaps are the protocol framing the geometry does not model.
 | credits | 959 | 16.00 | 16 | 16 | 16 | 16 | 15,344 |
 | `touched_cells` | 959 | 3559.46 | 3174 | 7147 | 284 | 14039 | 3,413,523 |
 
-The K the rest of this repo quotes is changes + credits (measured): mean **433.3**, p50 356, p95 975. Credits
+The K the rest of this repo quotes is changes + credits (derived): mean **433.3**, p50 356, p95 975. Credits
 are exactly 16 on every block — the withdrawal credits, one per validator-payout slot.
 
 ### 3.2 B8 — `apply_ms`, by interference subset (measured)
@@ -288,17 +288,24 @@ Measured and computed agree exactly on both sizes that can be compared.
 
 The live store, from `/metrics` (measured), at the two ends of the campaign:
 
-| metric | at window start | at collection (04:05:31Z) |
+| metric | at campaign-server start (2026-09-02T22:54:46Z, `/metrics`; not in the committed data — decision log R18) | at collection (04:05:31Z) |
 |---|---:|---:|
 | `risepir_store_items` | 204,714,034 | 204,743,822 |
 | `risepir_store_cells_bytes` | 23,622,320,128 | 23,622,320,128 |
 | `risepir_hint_bytes` | 553,819,200 | 553,819,200 |
 | `risepir_process_rss_bytes` | 26,462,306,304 (26.46 GB) | 26,717,814,784 (26.72 GB) |
 
-The account count moves with the chain (+29,788 over 3.3 h); the cell and hint footprints do not move at all,
-because the geometry is fixed and the store is patched in place. C11's 204,713,227 is the count in the state
-file the `time-setup` run read (block 25,892,623, saved at the campaign switch ~15 min before block₀), which is
-why it sits just below the live `store_items` at window start.
+The campaign-server-start column is 1 h 52 min before the window actually opened (00:46:45Z), so it is not a
+window-start figure at all. Reconstructed window-start `risepir_store_items` (derived): **≈ 204,724,899** =
+204,743,822 at collection − 18,923 net inserts − deletes over blocks 25,893,198–25,894,188 (the window's rows
+plus the 32 post-window rows before collection; the server per-block CSVs).
+
+The account count moves with the chain (+29,788 over 5.2 h, 22:55 → 04:05:31 UTC, all 1,565 server rows;
++18,900 ≈ over the 3.1 h window, derived from the same server per-block CSVs); the cell and hint footprints do
+not move at all, because the geometry is fixed and the store is patched in place. C11's 204,713,227 is the
+count in the state file the `time-setup` run read (block 25,892,623, saved at the campaign switch, 574 blocks —
+≈1 h 52 min — before block₀ 25,893,197), which is why it sits just below the live `store_items` at window
+start.
 
 ### 4.2 C12 — `/setup` download and client RSS (measured)
 
@@ -306,7 +313,7 @@ why it sits just below the live `store_items` at window start.
 |---|---:|
 | `setup_bytes` | 553.82 MB (553,819,345 B) |
 | `content_length` | 553.82 MB (553,819,345 B) |
-| wall seconds | 1.000 |
+| wall seconds | 0.952 |
 | `pinned_block` | 25,893,197 |
 
 Client RSS, sampled during the run (measured, `client_rss_bytes`):
@@ -362,7 +369,7 @@ is not mixed into any statistic above.
 | A5 (`finish`) | 19.4 ms | — | — |
 | A3 (derived) | 1600 ms | 1438 ms | 2186 ms |
 
-`/setup` downloaded 553,819,345 B in 65.0 s (against 1.0 s from the cloud vantage). **A4 is 609.8 ms here and
+`/setup` downloaded 553,819,345 B in 65.0 s (against 0.952 s from the cloud vantage). **A4 is 609.8 ms here and
 609.6 ms from AWS** — the server does not care where the client sits; everything else in the table is the path.
 The run was abandoned when the link degraded: the probe log records 31 `follow step failed (Pir); continuing`
 lines between 00:10:16 and 00:20:08 UTC, and batch 1's answer wire times rose to a 2350 ms mean (max 3713 ms)
@@ -523,9 +530,21 @@ them, and ~180 of the tool's own figures, were independently recomputed in Pytho
   snapshot ≈ $1.6/month); a static IP is $0.010–0.011/h ≈ $7.3–8/month each.
 - **Client instance.** The AWS r7a.xlarge was torn down after the window: instance terminated, security group
   `sg-0c4fdbb9415a29d50` and key pair `risepir-probe-20260903` deleted, the local `.pem` removed.
-- A post-campaign move back to us-central1-a under the original reserved IP `136.115.93.177` — which would
-  remove the manual Cloudflare DNS step entirely — was **in progress at the time of writing**.
-  **Final placement: see `docs/deploy.md` §5.12 (recorded after this report was drafted).**
+- **Final placement: moved back to `us-central1-a`.** The deployment now serves from `risepir-c3d`
+  (`c3d-highmem-16`) on boot disk `risepir-c3d-central` (250 GB pd-balanced, restored from snapshot
+  `risepir-campaign-final-20260903`, 38.2 GB stored, taken from the measurement host's final save at block
+  25,894,188, 04:08:33 UTC), under the **original** reserved address `risepir-ip` = `136.115.93.177` — so
+  `demo.risepir.org` resolves to it with **no DNS change**, removing the manual Cloudflare step §5.11 left
+  pending. Verified 2026-09-03 04:29–04:36 UTC: `GET /mode` = 200 from `136.115.93.177` at 04:29:50 UTC, head
+  25,894,316, lag 0, reconcile green (`reconcile_last_success_block=25894320`,
+  `reconcile_consecutive_dark=0`). The us-east4-a measurement host was stopped gracefully, snapshotted, and
+  deleted with its disk at ~04:33 UTC; the `risepir-ip-east4` address was released. Inventory after cleanup:
+  one instance (`risepir-c3d`, `us-central1-a`, running), one disk (`risepir-c3d-central`), two snapshots
+  (`risepir-pre-migration-20260903` 32.2 GB, `risepir-campaign-final-20260903` 38.2 GB), one address
+  (`risepir-ip`, in use). Compute cost is unchanged (`c3d-highmem-16` = 16 × $0.029563/h + 128 × $0.003959/h =
+  $0.9798/h ≈ $23.5/day, the same catalog price in both regions); the 250 GB disk drops to $25.0/month at the
+  central-region rate (was $27.5/month in Virginia), snapshots ≈ $3.5/month for both, and the reserved address
+  ≈ $0.010/h. Full record, including the move-back sequence itself: `docs/deploy.md` §5.12.
 
 ## 9. Decision log
 
@@ -694,7 +713,7 @@ edited for readability; all times UTC.
 ## 10. Stale-record sweep
 
 The campaign invalidated a number of recorded claims elsewhere in the repo (account counts, host and machine
-type, the IKPIR pin, the deployment's cost). Two passes have landed in this PR.
+type, the IKPIR pin, the deployment's cost). Four passes have landed in this PR.
 
 **Pass 1 — numbers-independent** (could be done before the campaign produced figures):
 
@@ -720,7 +739,35 @@ type, the IKPIR pin, the deployment's cost). Two passes have landed in this PR.
 | `crates/risepir-server/src/server.rs`, `crates/risepir-http/src/metrics.rs` | account-count figures in doc comments refreshed |
 | `docs/threat-model.md`, `docs/HANDOFF.md` | remaining stale account-count claims refreshed |
 
-A third pass — the **timing figures** that this campaign supersedes — lands in this same PR, from a parallel
-worktree. Nothing in the sweep changes behaviour; every edit is a doc or a doc comment, and every removed line
-was checked to be a current claim before removal rather than a historical record (historical records were
+**Pass 2b — the timing figures** that this campaign supersedes, from a parallel worktree:
+
+| target | what changed |
+|---|---|
+| `CLAUDE.md` | the stale per-block-patch and `/setup` timing claims superseded with the campaign's own B8/C13 figures |
+| `README.md` | cites `docs/deployment-numbers.md`; test count refreshed to 513 |
+| `docs/HANDOFF.md` | test count refreshed to 513 |
+| `docs/roadmap.md` | test count refreshed to 513; the `/setup` size re-confirmed against the campaign |
+| `docs/plan.md` | test count refreshed; §7 now points at `docs/deployment-numbers.md` for the measured per-block figures |
+| `site/index.html` | the served per-block patch-time stat replaced with the campaign's B8 figure |
+| `web/app.js` | the CLI client's measured resident memory noted beside the computed estimate |
+
+**Pass 3 — this finalization pass**, fixing presentation defects an independent verifier found after recomputing
+every number in this document from the committed data with 0 discrepancies (the values were already right; the
+labels, citations and a few stale prose figures were not), plus the deployment's final infrastructure state:
+
+| target | what changed |
+|---|---|
+| `docs/deployment-numbers.md` §0 | the cache-topology row cites the new raw `lscpu` evidence |
+| `docs/deployment-numbers.md` §3.1 | the K = changes + credits row relabelled `(derived)` |
+| `docs/deployment-numbers.md` §4.1 | the "at window start" column relabelled to what it actually is (campaign-server start, not window start), with a reconstructed window-start count added; the account-count-growth sentence corrected (5.2 h / 3.1 h, not 3.3 h) |
+| `docs/deployment-numbers.md` §4.2, §4.4 | the `/setup` wall time corrected from the hand-rounded 1.0 s/1.000 s to the precise 0.952 s (952,466 µs, `probe-stdout.log`) |
+| `docs/deployment-numbers.md` §8 | the pending move-back replaced with the final `us-central1-a` placement |
+| `docs/data/deployment-20260903/lscpu-server.txt` | added — raw `lscpu` output substantiating the §0 cache-topology claim |
+| `docs/data/deployment-20260903/README.md` | notes that `setup-download.json` was hand-assembled from `probe-stdout.log` (bytes exact, `wall_seconds` rounded) |
+| `docs/deploy.md` §5.12 | the move back to `us-central1-a` recorded |
+| `CLAUDE.md` | "The live GCP deployment" rewritten for the final `us-central1-a` placement; the pending-DNS-flip paragraphs removed now that the address survived the round trip |
+| `crates/risepir-wasm/src/abi.rs`, `crates/risepir-wasm/src/session.rs`, `crates/risepir-http/src/node.rs`, `crates/risepir-http/tests/setup_cache.rs`, `crates/risepir-rpc/src/private_eth.rs` | stale "~831 MB" doc comments (pre-existing since ADR-0034) corrected to 553.82 MB, with the pre-ADR-0034 figure kept as an explicit historical aside |
+
+Nothing in the sweep changes behaviour; every edit is a doc, a doc comment, or raw evidence, and every removed
+line was checked to be a current claim before removal rather than a historical record (historical records were
 annotated, per R17).

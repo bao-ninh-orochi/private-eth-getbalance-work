@@ -260,8 +260,10 @@ client polling `GET /head` every 12 s catches that progress part-way and asks `G
 since its last poll, which the server answers as one merged delta. The fetch sizes (1–31 blocks, mean 7.7) are
 therefore a product of the poll cadence and the server's apply pacing, not a property of Ethereum, and the fetch
 count (125) is emergent — 29 epoch transitions in the window (30 distinct `finalized_block` values, each a jump
-of exactly 32), typically picked up in 2 fetches (median; mean 4.17, pulled up by the slow-drain tail) — not a
-parameter that was chosen. The server-side per-block figures (B7–B9) are unaffected:
+of exactly 32), typically picked up in 2 fetches (median; the mean of 4.17 is pulled up by the three boundaries
+that fell inside a probe query batch, where each trial's own catch-up fetch polls at ~1.2 s rather than the
+follow loop's 12 s — 12, 21 and 22 fetches — and by one 67 s drain that took 6) — not a parameter that was
+chosen. The server-side per-block figures (B7–B9) are unaffected:
 every block is applied individually whichever head is followed; finality only changes *when* a batch arrives.
 A true per-block client distribution would need a probe that fetches `GET /delta/{block}` block by block (the
 route exists); this campaign did not, so the per-block client rows below stay derived.

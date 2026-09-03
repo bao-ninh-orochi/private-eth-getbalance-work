@@ -32,7 +32,7 @@ that turns "faster" into "otherwise impossible" (§7).
 ## 2. Current state
 
 Seven crates, all committed and pushed to `orochi-network/private-eth-getbalance`
-(signed, Verified), **164 tests passing**, and the binary **runs against real
+(signed, Verified), **513 tests passing** (as of 2026-09-03), and the binary **runs against real
 mainnet** (recorded live evidence in [`deploy.md`](deploy.md) §5):
 
 | crate | what |
@@ -258,6 +258,12 @@ in [`docs/numbers.md`](numbers.md), produced by `xtask bench`. It is measured ag
 workspace's then-pinned IKPIR `perf/optimized` commit (`0f3b99b`, tagged `v0.1.0-perf`;
 the workspace has since moved to `v0.2.0-perf`, ADR-0046); see that file's "IKPIR build"
 note — the pin and the numbers move together, never separately.
+
+This table has no row for the 204,714,034-account complete set — no bench-harness
+server has ever been built at that scale — but the 2026-09-03 measurement campaign
+measured the complete set directly on the live deployment itself: see
+[`docs/deployment-numbers.md`](deployment-numbers.md) for the measured per-block
+apply time, answer latency, and setup time.
 
 ## 8. Never-return-a-wrong-answer checklist
 

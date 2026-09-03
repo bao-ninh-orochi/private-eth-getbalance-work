@@ -65,7 +65,9 @@ lineage). At the geometry deployed then (`arity 3, bucket_size 4`), that made
 the server DB **35.43 GB** rather than 10–13 GB. The "16–24 GB box" advice
 was wrong by more than 2× regardless;
 the deployment ran on a 64 GB `e2-highmem-8` at the time (migrated
-2026-09-02 to a 128 GB `c3d-highmem-16` in `us-east4-a` — deploy.md §5.11).
+2026-09-02 to a 128 GB `c3d-highmem-16`, briefly in `us-east4-a` for a
+measurement campaign and back in `us-central1-a` since 2026-09-03 —
+deploy.md §5.11/§5.12).
 ADR-0034 has since retuned the
 deployed geometry to `(arity 2, bucket_size 4)` at a higher target load, and the
 live box **was re-bootstrapped onto it on 2026-07-27**: 23.62 GB server DB, a

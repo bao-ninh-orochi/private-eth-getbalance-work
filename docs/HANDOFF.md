@@ -36,7 +36,7 @@ height. First load is 49 MB of hint at `--partial-capacity 1000000`; client comp
 is ~10 ms/lookup. Its residual trust (you trust whoever serves the page; the network
 still sees who is asking) is stated on the page itself.
 
-186 tests green; `xtask conformance` PASS (1201×120, 15117 checks, 0 mismatches); the
+513 tests green (as of 2026-09-03); `xtask conformance` PASS (1201×120, 15117 checks, 0 mismatches); the
 live feed gate (`cargo test -p risepir-feed --release -- --ignored`) validates the
 diffMode trace parsing byte-exactly against a second provider; and two browser gates
 (`node web/test/e2e.mjs` / `node web/test/browser.mjs`, both against a running

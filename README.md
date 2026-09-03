@@ -65,7 +65,7 @@ against publicnode on real blocks — in [`docs/deploy.md`](docs/deploy.md) §5,
 which is also the complete runbook (including the BigQuery snapshot export that
 upgrades `--partial` to the complete ~100 M-account set).
 
-Eight crates, **191 tests**, plus two heavier gates: `cargo run -p xtask
+Eight crates, **513 tests** (as of 2026-09-03), plus two heavier gates: `cargo run -p xtask
 --release -- conformance` (≥1200 addrs × 120 blocks, byte-identical, all account
 categories) and the live test `cargo test -p risepir-feed --release --
 --ignored` (trace-derived balances vs an independent provider on a real
@@ -95,6 +95,7 @@ attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
 | [`docs/sync.md`](docs/sync.md) | keeping the DB current from the chain |
 | [`docs/data-acquisition.md`](docs/data-acquisition.md) | snapshot source analysis (BigQuery / snap / Xatu) |
 | [`docs/numbers.md`](docs/numbers.md) | the measured Stage-3 numbers table (`xtask bench`) |
+| [`docs/deployment-numbers.md`](docs/deployment-numbers.md) | the 2026-09-03 measurement campaign's numbers, taken on the live deployment itself |
 | [`docs/verification.md`](docs/verification.md) | evidence log — what was measured/checked (historical) |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | the next session's task list |
 

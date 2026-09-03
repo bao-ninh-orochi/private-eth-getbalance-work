@@ -249,6 +249,25 @@ since its last fetch: 125 fetches covered 959 blocks in this window, `blocks_in_
 divided by the 959 blocks those fetches covered — and are an average over a coalesced fetch, not a measurement
 of one block's cost.
 
+**How Ethereum's cadence produces this (read before quoting B10).** The chain's head grows one block per
+12 s slot, but this deployment follows the *finalized* head (ADR-0007). Finality is decided per 32-slot epoch
+(6.4 min): `finalized` sits 64–95 blocks behind the tip and moves forward by about 32 blocks at once, roughly
+every 6.4 min. The server then applies those blocks strictly one at a time, each needing its own feed call to
+dRPC (`feed_fetch_ms` in `server-blocks-window.csv`: mean 482.7 ms, p50 352.9 ms, p95 1.22 s in this window —
+at the head there is nothing to prefetch), so the server's own head creeps up over the following ~14 s (median
+drain of a 32-block batch, measured as the span of its rows' `applied_at_unix_ms`; mean 18.9 s, max 67.3 s). A
+client polling `GET /head` every 12 s catches that progress part-way and asks `GET /sync` for whatever arrived
+since its last poll, which the server answers as one merged delta. The fetch sizes (1–31 blocks, mean 7.7) are
+therefore a product of the poll cadence and the server's apply pacing, not a property of Ethereum, and the fetch
+count (125) is emergent — 29 epoch transitions in the window (30 distinct `finalized_block` values, each a jump
+of exactly 32), typically picked up in 2 fetches (median; the mean of 4.17 is pulled up by the three boundaries
+that fell inside a probe query batch, where each trial's own catch-up fetch polls at ~1.2 s rather than the
+follow loop's 12 s — 12, 21 and 22 fetches — and by one 67 s drain that took 6) — not a parameter that was
+chosen. The server-side per-block figures (B7–B9) are unaffected:
+every block is applied individually whichever head is followed; finality only changes *when* a batch arrives.
+A true per-block client distribution would need a probe that fetches `GET /delta/{block}` block by block (the
+route exists); this campaign did not, so the per-block client rows below stay derived.
+
 | quantity | n | mean | p50 | p95 | min | max |
 |---|---:|---:|---:|---:|---:|---:|
 | **per fetch (measured)** — `wire_bytes` | 125 | 60.52 KB (60,524.4 B) | 30.77 KB (30,774 B) | 183.54 KB (183,541 B) | 2.48 KB (2,485 B) | 287.51 KB (287,509 B) |

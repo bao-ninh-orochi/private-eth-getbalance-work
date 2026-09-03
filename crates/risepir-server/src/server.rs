@@ -339,12 +339,13 @@ impl<S: IndexScheme + SchemeMeta, B: IncrementalPirBackend> RisePirServer<S, B> 
     /// # Why this exists
     ///
     /// The cell array is the whole PIR database: `num_buckets *
-    /// bucket_size * cells_per_slot` `u32`s, which at the complete
-    /// mainnet set (200.5 M accounts) is **23.62 GB** at the deployed
-    /// `(arity 2, bucket_size 4)` geometry — 67,108,864 buckets (ADR-0034);
-    /// it was **35.4 GB** at 100,663,296 buckets under the previous
-    /// `(arity 3, bucket_size 4)` geometry, which is what the live
-    /// deployment still actually runs until it is re-bootstrapped.
+    /// bucket_size * cells_per_slot` `u32`s — at the complete mainnet set,
+    /// **204,714,034 accounts on 2026-09-03** (the count moves with the
+    /// chain; the geometry — **67,108,864 buckets**, **23.62 GB** of cells
+    /// — has not moved since ADR-0034). It was **35.4 GB** at 100,663,296
+    /// buckets under the previous `(arity 3, bucket_size 4)` geometry — the
+    /// lineage the live deployment ran until its 2026-07-27 re-bootstrap
+    /// onto `(arity 2, bucket_size 4)` (`docs/deploy.md` §5.4).
     /// `snapshot_cells` allocates a second one, so any caller that copies
     /// merely to read — as state serialization did — doubles the
     /// process's peak RSS (to ~47 GB at the current geometry, ~73 GB at

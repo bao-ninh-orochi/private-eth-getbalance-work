@@ -190,11 +190,14 @@ browser. Same origin as the PIR transport on purpose (no CORS, no mixed
 content, `connect-src 'self'` CSP). Assets are read once at startup — restart
 after editing `web/*`. First load is the whole product constraint: 46.51 MB at
 `--partial-capacity 1000000`, but **553.82 MB at the real complete mainnet set**
-(200,503,969 accounts at the `(arity 2, bucket_size 4)` geometry of ADR-0034 —
-**measured on the wire 2026-07-27**, `/setup` = 553,819,345 B = that hint plus
-145 B of framing; was **830.73 MB** at the `(arity 3, bucket_size 4)` lineage
-this box ran until then; the "588 MB" once quoted here predates both, computed
-against an assumed ~130 M). A
+(**204,714,034** accounts as of 2026-09-03 — 200,503,969 when this hint size
+was first measured, 201,059,658 at the 2026-07-31 round, 203,879,841 after
+the 2026-08-19 re-bootstrap; "The live GCP deployment" below has the full
+lineage — at the unchanged `(arity 2, bucket_size 4)` geometry of ADR-0034):
+**measured on the wire 2026-07-27** and re-confirmed live 2026-09-03,
+`/setup` = 553,819,345 B = that hint plus 145 B of framing; was **830.73 MB**
+at the `(arity 3, bucket_size 4)` lineage this box ran until then; the "588
+MB" once quoted here predates both, computed against an assumed ~130 M). A
 complete-set client now holds **1.11 GB** resident once `A` is expanded (was
 1.66 GB). That is where the CLI `client` takes over. Its residual trust — you
 trust whoever serves the page — is stated on the page itself, not just in the
@@ -228,18 +231,26 @@ and on **2026-07-31 again onto the `xxh3_128`/`RPST3` lineage** after the
 nonzero accounts (was 200,503,969), server DB **23.62 GB**, load 0.749, state
 file **24,176,139,523 B (24.18 GB)**. The geometry has not moved across either
 of the last two rounds — same 67,108,864 buckets, `plaintext_bits` 8,
-cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged.
+cells/slot 22 — so every size in `docs/numbers.md` §4 is unchanged
+(re-confirmed live 2026-09-03, campaign start, block 25,892,719).
 
 That **201,059,658** figure was the 2026-07-31 round's count; the box was
 re-bootstrapped once more on 2026-08-19, a round this repo's docs never
 recorded, and loading the resulting state file on the new `risepir-c3d` host
-reported **203,879,841** accounts in 113.4 s (deploy.md §5.11). `C11` (the
-campaign's own account count) comes from the campaign binary, not this
-figure.
+reported **203,879,841** accounts in 113.4 s (deploy.md §5.11). The count has
+moved again with the chain since: **204,714,034** accounts, verified live at
+the 2026-09-03 campaign start (block 25,892,719) — the figure every current
+claim elsewhere in this file now cites, at the same geometry (load now
+0.7626, was 0.7490 at 201,059,658). `C11` (the campaign's own account count)
+is measured independently by the campaign binary and is expected to track
+this.
 
-Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s snapshot
-ingest, 12 min 46 s to the first saved state file, then 10,816 blocks of replay
-at **1.72 blocks/s** (not the ~1 s/block the runbook long assumed). It costs
+**(2026-07-31 round, `e2-highmem-8`; superseded for catch-up by the
+`--prefetch` note above — see deploy.md §5.11 for the 2026-09-02 replay
+rates.)** Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s
+snapshot ingest, 12 min 46 s to the first saved state file, then 10,816
+blocks of replay at **1.72 blocks/s** (not the ~1 s/block the runbook long
+assumed). It costs
 **~$23.5/day running** on the `c3d-highmem-16` (was **~$8.60/day** on the
 `e2-highmem-8`; both verified against the Cloud Billing catalog, deploy.md
 §5.11), so stop it when idle.
@@ -357,8 +368,10 @@ prints a note and loads the file). That is the trap to know: leaving the old
 *partial* state file in place would have brought the server back up in PARTIAL
 mode while every flag on the command line said complete. Re-bootstrapping from
 the snapshot means moving the state file aside first — and at the complete set
-that costs **~16 min** at the deployed `(2,4)` geometry (8 min ingest + ~6 min
-PIR setup + 2 min save; it was ~33 min at `(3,4)`), *plus* the snapshot→head
+that costs **~16 min** (2026-07-27 record, `e2-highmem-8`; the campaign's
+measured setup time will land in `docs/deployment-numbers.md`) at the
+deployed `(2,4)` geometry (8 min ingest + ~6 min PIR setup + 2 min save; it
+was ~33 min at `(3,4)`), *plus* the snapshot→head
 replay, which is the part that actually hurts: ~1 s/block, so a day-old
 snapshot is another ~3 h. Prefer the state file.
 `~/bootstrap-complete.sh` on the VM re-runs the full bootstrap.

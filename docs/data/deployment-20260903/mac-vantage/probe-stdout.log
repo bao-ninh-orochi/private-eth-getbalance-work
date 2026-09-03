@@ -1,0 +1,52 @@
+RisePIR private eth_getBalance — client measurement probe
+  PIR transport:      https://demo.risepir.org
+  independent check:  https://ethereum-rpc.publicnode.com
+  queries CSV:        /private/tmp/claude-501/-Users-admin-Documents-CANS2026/8f08e4cf-e8d9-4f8e-8b51-8d64b1de5039/scratchpad/campaign/trials.csv
+  blocks CSV:         /private/tmp/claude-501/-Users-admin-Documents-CANS2026/8f08e4cf-e8d9-4f8e-8b51-8d64b1de5039/scratchpad/campaign/client-blocks.csv
+  schedule:           3 batches of 100 every 5400s, 500ms between trials, 11400s lifetime
+
+The PIR server NEVER learns the queried address: it sees only LWE query vectors,
+exactly as in `client` mode.
+The independent check is the one exception, and it is the point of the check:
+each successful trial asks https://ethereum-rpc.publicnode.com for eth_getBalance(address, block) in PLAINTEXT,
+after the trial's clock has stopped. That operator is deliberately a different
+one from the PIR server, so neither sees both halves. --no-confirm disables it.
+Neither CSV ever records the address or the balance — only `found`, `provider_match`
+and `provider_hex_match`, one bit each.
+
+2026-09-02T23:07:42Z risepir-rpc probe: resolving demo.risepir.org to 35.199.37.209:443 (TLS validation unchanged)
+2026-09-02T23:07:42Z risepir-rpc probe: downloading setup bundle from https://demo.risepir.org ...
+2026-09-02T23:08:47Z risepir-rpc probe: setup 553819345 B in 65.0s — hint pinned at block 25892719, mode complete
+2026-09-02T23:08:48Z risepir-rpc probe: batch 0 — 100 trials over a pool of 128 addresses
+2026-09-03T00:10:16Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:10:38Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:11:00Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:11:22Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:11:44Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:12:06Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:12:28Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:12:50Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:13:12Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:13:34Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:13:56Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:14:18Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:14:30Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:14:46Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:15:08Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:15:30Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:15:52Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:16:14Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:16:36Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:16:52Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:17:08Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:17:24Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:17:40Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:18:02Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:18:14Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:18:30Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:18:52Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:19:14Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:19:36Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:19:52Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:20:08Z risepir-rpc probe: follow step failed (Pir); continuing
+2026-09-03T00:38:48Z risepir-rpc probe: batch 1 — 100 trials over a pool of 128 addresses

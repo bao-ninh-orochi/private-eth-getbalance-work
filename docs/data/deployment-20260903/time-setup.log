@@ -1,0 +1,39 @@
+== 2026-09-03T00:49:43Z time-setup start; binary 77e2f06e9a2888c1; nproc=16; free=99G
+accounts:                    204713227
+buckets:                     67108864
+cells_bytes:                 23622320128 (23.62 GB)
+hint_bytes:                  553819200 (553.82 MB)
+arity:                       2
+bucket_size:                 4
+lwe_dim:                     1275
+plaintext_bits:              8
+rayon_threads:               16
+state_block:                 25892623
+setup_seconds:               29.178
+exact_check_seconds:         3125.473
+persisted_hints_exact_match: true
+persisted_hints_decode_ok:   true
+rebuilt_hints_decode_ok:     true
+wrote /home/admin/campaign/setup.json
+== 2026-09-03T01:42:29Z time-setup end rc=0
+	User time (seconds): 3650.74
+	System time (seconds): 9.59
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 52:45.19
+	Maximum resident set size (kbytes): 25804460
+{
+  "accounts": 204713227,
+  "buckets": 67108864,
+  "cells_bytes": 23622320128,
+  "hint_bytes": 553819200,
+  "arity": 2,
+  "bucket_size": 4,
+  "lwe_dim": 1275,
+  "plaintext_bits": 8,
+  "setup_seconds": 29.177548504,
+  "exact_check_seconds": 3125.473016634,
+  "persisted_hints_exact_match": true,
+  "persisted_hints_decode_ok": true,
+  "rebuilt_hints_decode_ok": true,
+  "state_block": 25892623,
+  "rayon_threads": 16
+}

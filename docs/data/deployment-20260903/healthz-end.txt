@@ -1,0 +1,14 @@
+ok 25894188
+reconcile_configured=1
+reconcile_last_checkpoint_block=25894170
+reconcile_last_checkpoint_unix=1788408043
+reconcile_last_success_block=25894170
+reconcile_last_success_unix=1788408043
+reconcile_comparisons_total=416
+reconcile_checkpoints_total=52
+reconcile_consecutive_dark=0
+reconcile_halted=0
+reconcile_deferred_total=0
+reconcile_reservoir_checks_total=0
+reconcile_reservoir_len=0
+snapshot_audit=checked=200 disagreed=2 block=25778250 rate=1.00% ci=[0.27%,3.57%]

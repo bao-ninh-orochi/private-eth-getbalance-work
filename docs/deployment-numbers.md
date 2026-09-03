@@ -253,12 +253,15 @@ of one block's cost.
 12 s slot, but this deployment follows the *finalized* head (ADR-0007). Finality is decided per 32-slot epoch
 (6.4 min): `finalized` sits 64–95 blocks behind the tip and moves forward by about 32 blocks at once, roughly
 every 6.4 min. The server then applies those blocks strictly one at a time, each needing its own feed call to
-dRPC (1–2 s at the head, where there is nothing to prefetch), so the server's own head creeps up over the
-following 30–60 s. A client polling `GET /head` every 12 s catches that progress part-way and asks `GET /sync`
-for whatever arrived since its last poll, which the server answers as one merged delta. The fetch sizes (1–31
-blocks, mean 7.7) are therefore a product of the poll cadence and the server's apply pacing, not a property of
-Ethereum, and the fetch count (125) is emergent — about 29 epoch boundaries in the window, each picked up in
-about four fetches — not a parameter that was chosen. The server-side per-block figures (B7–B9) are unaffected:
+dRPC (`feed_fetch_ms` in `server-blocks-window.csv`: mean 482.7 ms, p50 352.9 ms, p95 1.22 s in this window —
+at the head there is nothing to prefetch), so the server's own head creeps up over the following ~14 s (median
+drain of a 32-block batch, measured as the span of its rows' `applied_at_unix_ms`; mean 18.9 s, max 67.3 s). A
+client polling `GET /head` every 12 s catches that progress part-way and asks `GET /sync` for whatever arrived
+since its last poll, which the server answers as one merged delta. The fetch sizes (1–31 blocks, mean 7.7) are
+therefore a product of the poll cadence and the server's apply pacing, not a property of Ethereum, and the fetch
+count (125) is emergent — 29 epoch transitions in the window (30 distinct `finalized_block` values, each a jump
+of exactly 32), typically picked up in 2 fetches (median; mean 4.17, pulled up by the slow-drain tail) — not a
+parameter that was chosen. The server-side per-block figures (B7–B9) are unaffected:
 every block is applied individually whichever head is followed; finality only changes *when* a batch arrives.
 A true per-block client distribution would need a probe that fetches `GET /delta/{block}` block by block (the
 route exists); this campaign did not, so the per-block client rows below stay derived.

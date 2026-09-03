@@ -16,7 +16,7 @@ in us-east-1b; window 2026-09-03T00:46:45Z → 03:54:37Z.
 | `server-blocks-window.csv` | one row per block **applied during the campaign window** — B7/B8/B9. **This is the file the report's statistics are computed from** | 959 |
 | `server-blocks.csv` | the same CSV **untrimmed**, exactly as the server wrote it from its own start | 1,565 |
 | `setup.json` | `time-setup` output — C11 sizes, C13 `setup_seconds`, and the exact-hint invariant result | — |
-| `setup-download.json` | the probe's `/setup` download — C12 bytes, wall time, pinned block | — |
+| `setup-download.json` | the probe's `/setup` download — C12 bytes, wall time, pinned block. **Hand-assembled**, not a tool artifact: `setup_bytes`/`content_length`/`pinned_block` are copied verbatim from `probe-stdout.log`'s `setup 553819345 B in 1.0s — hint pinned at block 25893197` line, so they are byte-exact; `wall_seconds` was typed from that same line's rounded `1.0s` display rather than from the log's own precise `hint download (C12) 553819345 B in 952466 us` summary line, so it reads `1.0` where the precise figure is 0.952466 s (952,466 µs). `docs/deployment-numbers.md` §4.2 reports the precise 0.952 s, not this file's rounded one | — |
 | `provenance.json` | the provenance block `xtask report` prints verbatim (commit, hosts, binary hashes, link, feed, window) | — |
 | `probe-stdout.log` | the probe's own console output: banner, batch starts, and its end-of-run summary | — |
 | `time-setup.log` | the C13 wrapper's log — start/end stamps, the tool's own output, the `/usr/bin/time` extract | — |

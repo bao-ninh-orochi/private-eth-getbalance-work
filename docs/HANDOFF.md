@@ -57,10 +57,13 @@ the export, and the complete-set run all happened; the live GCP box now serves
 the complete set. See `docs/deploy.md` §2.1 (recorded gate output), §2.3
 (revised sizing) and §5.3 (live evidence).
 
-The one number that mattered: mainnet has **200,503,969** nonzero accounts, not
-the ~100–130 M this file and the runbook had assumed. At the geometry deployed
-then (`arity 3, bucket_size 4`), that made the server DB **35.43 GB** rather
-than 10–13 GB. The "16–24 GB box" advice was wrong by more than 2× regardless;
+The one number that mattered: mainnet had **200,503,969** nonzero accounts at
+that first measurement (2026-07-26) — not the ~100–130 M this file and the
+runbook had assumed — and the live count has grown since, to **204,714,034**
+as of 2026-09-03 (`CLAUDE.md`'s "The live GCP deployment" has the full
+lineage). At the geometry deployed then (`arity 3, bucket_size 4`), that made
+the server DB **35.43 GB** rather than 10–13 GB. The "16–24 GB box" advice
+was wrong by more than 2× regardless;
 the deployment ran on a 64 GB `e2-highmem-8` at the time (migrated
 2026-09-02 to a 128 GB `c3d-highmem-16` in `us-east4-a` — deploy.md §5.11).
 ADR-0034 has since retuned the

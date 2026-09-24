@@ -1250,7 +1250,7 @@ impl NodeState {
         // and that ordering is the whole point. `Router::layer` wraps only
         // the routes registered up to that moment — a route added
         // afterwards is not wrapped, silently. Attaching the front end
-        // after the layer (as this did until 2026-07-29) left all eleven of
+        // after the layer (as this did until 2026-07-29) left all eight of
         // `crate::web::MANIFEST`'s routes — `/`, `/status`, `client.wasm`
         // and the rest — serving real traffic while incrementing nothing,
         // which made `route_label`'s own `"index"`/`"asset"`/`"status"`

@@ -677,9 +677,10 @@ main {
   box-shadow: var(--shadow-lift);
   padding: var(--s-7) var(--s-7) var(--s-6);
   overflow: hidden;
-  /* So .balance-num's font-size (below) can be sized to this card's real
-     rendered width, not the viewport's — a two-column desktop layout can
-     squeeze this card far narrower than a vw-based size would assume. */
+  /* So .balance-int's and .balance-frac's font-size (below) can be sized
+     to this card's real rendered width, not the viewport's — a
+     two-column desktop layout can squeeze this card far narrower than a
+     vw-based size would assume. */
   container-type: inline-size;
 }
 

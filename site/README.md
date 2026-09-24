@@ -1,10 +1,10 @@
 # `site/` — the always-on apex page at <https://risepir.org>
 
 The static page a paper cites. It is deliberately **not** served by the demo
-VM: the VM costs $8.60/day and is stopped most of the time, so a URL pointing
+VM: the VM costs money and is stopped most of the time, so a URL pointing
 at it fails hard on most days. This page is on Cloudflare Pages, is always up,
-and carries the result — numbers, an architecture diagram, and screenshots of
-a real lookup — so a reader gets the substance even when the server is off.
+and carries the result — numbers, an architecture diagram, and an illustration
+of a lookup — so a reader gets the substance even when the server is off.
 
 The decision, and the trust it does and does not add, is **ADR-0043**. The
 short version: this page delivers **no cryptographic client** and makes no PIR
@@ -16,15 +16,22 @@ its PIR transport under `connect-src 'self'`. Do not conflate the two.
 ## Layout
 
 ```
-index.html      the page; CSS is a separate file, everything else is inline SVG
-style.css       tokens on :root, dark via prefers-color-scheme
-404.html        matches the design
-favicon.svg
-assets/         screenshots captured from the live demo (deploy.md §5.9)
+index.html      the page; CSS is a separate file, everything else is inline SVG or same-origin <img>
+style.css       design tokens on :root (Orochi Network / zkDatabase brand lineage), light theme only
+404.html        matches the design; root-relative asset paths (Cloudflare serves it for any path depth)
+favicon.svg     the RisePIR mark (patched-ribbon), replacing the old favicon
+fonts/          self-hosted Raleway + JetBrains Mono, subset to woff2, OFL-1.1 (license text alongside
+                each family). No font CDN: a third-party font request would be exactly the kind of
+                request a page about caring who sees your requests should not make. Recorded as
+                ADR-0049 (added by #14, the demo redesign).
+assets/         brand marks (RisePIR mark, Orochi Network symbol) and illustrations (patched ribbon,
+                segment grid, icons). No screenshots of the demo yet — the old ones showed the
+                previous design and were removed; real captures of the new demo land in #15.
 ```
 
-No build step, no dependencies, no external requests. Every asset is
-same-origin; the only outbound link is to `https://demo.risepir.org`.
+No build step, no dependencies, no external requests. Every asset — including
+every font and every illustration — is same-origin; the only outbound links
+are to `https://demo.risepir.org` and to `github.com/orochi-network/...`.
 
 ## Deploying
 
@@ -51,11 +58,13 @@ CAA record Cloudflare injects into any zone it serves that has CAA at all
   Cloudflare in the path that delivers the wasm client, which is exactly the
   trust ADR-0019 discloses. The reason is written into `ops/caddy/Caddyfile`,
   deploy.md §3.7 and threat model §4.2 so it does not get "optimized" later.
-- **Every number here must match `docs/numbers.md`.** They were checked against
-  it when the page was written; a figure that drifts silently is the failure
-  mode this project cares most about. The account count is the value the
-  deployment was last bootstrapped at, and the page says so — the live set
-  grows above it as the chain advances.
+- **Every number here must match its source.** Figures on this page trace to
+  `docs/deployment-numbers.md` (the 2026-09-03 measurement campaign) and the
+  paper (§8, §9) — they were checked against those sources when the page was
+  written. A figure that drifts silently is the failure mode this project
+  cares most about. The account count is the value the deployment was last
+  bootstrapped at, and the page says so — the live set grows above it as the
+  chain advances.
 
 ## Known wart
 

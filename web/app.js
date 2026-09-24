@@ -639,13 +639,36 @@ async function lookup(event) {
 
       const balance = document.createElement("div");
       balance.className = "balance num";
-      const amount = document.createElement("span");
-      amount.className = "balance-num";
-      amount.textContent = formatEth(result.balanceWei);
+      // Split at the decimal point into two unbreakable spans (never
+      // formatEth's own output, which this file must not touch, and never
+      // .balance's own textContent, which the gates read as
+      // formatEth(...) + "ETH" — only how it's chunked into elements). A
+      // 96-bit balance's fraction is up to 19 characters ("." + 18
+      // digits); its integer part is at most 14 (that bit width caps the
+      // integer at 11 digits, grouped). CSS sizes each span to the
+      // card's real width and lets the layout break only between them
+      // (and before the unit) — never inside either digit run.
+      const formatted = formatEth(result.balanceWei);
+      const dot = formatted.indexOf(".");
+      const intText = dot === -1 ? formatted : formatted.slice(0, dot);
+      const fracText = dot === -1 ? "" : formatted.slice(dot);
+
+      const intSpan = document.createElement("span");
+      intSpan.className = "balance-int";
+      intSpan.textContent = intText;
+      balance.appendChild(intSpan);
+
+      if (fracText) {
+        const fracSpan = document.createElement("span");
+        fracSpan.className = "balance-frac";
+        fracSpan.textContent = fracText;
+        balance.appendChild(fracSpan);
+      }
+
       const unit = document.createElement("span");
       unit.className = "balance-unit";
       unit.textContent = "ETH";
-      balance.append(amount, unit);
+      balance.appendChild(unit);
 
       const wei = document.createElement("p");
       wei.className = "wei num";

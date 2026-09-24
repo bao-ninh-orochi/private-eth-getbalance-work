@@ -20,6 +20,19 @@ use risepir_proto::{Backend, Geometry, ValueCodec};
 use risepir_server::{DeltaRing, RisePirServer};
 use segmented_cuckoo::{Segmented2aryCuckooKVStore, Segmented2aryScheme};
 
+/// A copy of `web::CSP` (the constant is private to that module) — see the
+/// assertion in `assets_are_served_with_their_hardening_headers` for why
+/// this is checked byte-for-byte rather than just directive-by-directive.
+const EXPECTED_CSP: &str = "default-src 'none'; \
+     script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self'; \
+     img-src 'self' data:; \
+     font-src 'self'; \
+     connect-src 'self'; \
+     form-action 'none'; \
+     frame-ancestors 'none'; \
+     base-uri 'none'";
+
 const ARITY: u32 = 2;
 const BUCKET_SIZE: u32 = 4;
 const FINGERPRINT_BITS: u32 = 32;
@@ -201,6 +214,10 @@ async fn assets_are_served_with_their_hardening_headers() {
         ("/status", "text/html; charset=utf-8"),
         ("/status.css", "text/css; charset=utf-8"),
         ("/status.js", "text/javascript; charset=utf-8"),
+        // Self-hosted webfonts (ADR-0049) — same mechanism again.
+        ("/fonts/raleway.woff2", "font/woff2"),
+        ("/fonts/raleway-italic.woff2", "font/woff2"),
+        ("/fonts/jetbrains-mono.woff2", "font/woff2"),
     ] {
         let (status, body, headers) = get(&app, route).await;
         assert_eq!(status, StatusCode::OK, "{route}");
@@ -227,6 +244,13 @@ async fn assets_are_served_with_their_hardening_headers() {
         // Chromium treats wasm compilation as script evaluation.
         assert!(csp.contains("'wasm-unsafe-eval'"), "{route}: {csp}");
         assert!(csp.contains("default-src 'none'"), "{route}: {csp}");
+        // The full policy, byte for byte — not just the directives above.
+        // A copy of `web::CSP`, kept in sync deliberately rather than
+        // imported: a change to the served policy should have to touch
+        // this literal too, on purpose, so it is never silently loosened
+        // (e.g. a font CDN added to `font-src` for ADR-0049 without
+        // updating the policy this test pins).
+        assert_eq!(csp, EXPECTED_CSP, "{route}");
         assert_eq!(
             headers
                 .get("x-content-type-options")
@@ -259,6 +283,9 @@ async fn nothing_outside_the_manifest_is_reachable() {
         "/client.wasm/../pir.js",
         "/.git/config",
         "/style.css/",
+        "/fonts/",
+        "/fonts/../style.css",
+        "/fonts/OFL-Raleway.txt",
     ] {
         let (status, _, _) = get(&app, uri).await;
         assert_ne!(status, StatusCode::OK, "{uri} was served");
@@ -315,6 +342,9 @@ async fn every_front_end_route_is_counted_in_the_request_metrics() {
         ("/status", "status"),
         ("/status.css", "asset"),
         ("/status.js", "asset"),
+        ("/fonts/raleway.woff2", "asset"),
+        ("/fonts/raleway-italic.woff2", "asset"),
+        ("/fonts/jetbrains-mono.woff2", "asset"),
     ];
     for (route, _) in routes {
         let (status, _, _) = get(&app, route).await;
@@ -325,8 +355,8 @@ async fn every_front_end_route_is_counted_in_the_request_metrics() {
     assert_eq!(status, StatusCode::OK);
     let text = String::from_utf8(body).expect("metrics is UTF-8 text");
 
-    // `asset` covers five of the eight routes, so assert per-label totals
-    // rather than one sample per route: index 1, status 1, asset 5.
+    // `asset` covers eight of the eleven routes, so assert per-label totals
+    // rather than one sample per route: index 1, status 1, asset 8.
     let mut expected: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
     for (_, label) in routes {
         *expected.entry(label).or_default() += 1;

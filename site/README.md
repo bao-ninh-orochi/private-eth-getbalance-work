@@ -1,10 +1,11 @@
 # `site/` — the always-on apex page at <https://risepir.org>
 
 The static page a paper cites. It is deliberately **not** served by the demo
-VM: the VM costs $8.60/day and is stopped most of the time, so a URL pointing
-at it fails hard on most days. This page is on Cloudflare Pages, is always up,
-and carries the result — numbers, an architecture diagram, and an illustration
-of a lookup — so a reader gets the substance even when the server is off.
+VM: the VM is billed by the hour while it runs and is stopped most of the
+time, so a URL pointing at it fails hard on most days. This page is on
+Cloudflare Pages, is always up, and carries the result — numbers, an
+architecture diagram, and an illustration of a lookup — so a reader gets the
+substance even when the server is off.
 
 The decision, and the trust it does and does not add, is **ADR-0043**. The
 short version: this page delivers **no cryptographic client** and makes no PIR
@@ -23,7 +24,7 @@ favicon.svg     the RisePIR mark (patched-ribbon), replacing the old favicon
 fonts/          self-hosted Raleway + JetBrains Mono, subset to woff2, OFL-1.1 (license text alongside
                 each family). No font CDN: a third-party font request would be exactly the kind of
                 request a page about caring who sees your requests should not make. Recorded as
-                ADR-0049 (added by #14, the demo redesign).
+                ADR-0049, which lands with the demo redesign (#14, PR #20).
 assets/         brand marks (RisePIR mark, Orochi Network symbol) and illustrations (patched ribbon,
                 segment grid, icons). No screenshots of the demo yet — the old ones showed the
                 previous design and were removed; real captures of the new demo land in #15.

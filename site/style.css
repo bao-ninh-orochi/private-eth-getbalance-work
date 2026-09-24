@@ -504,6 +504,7 @@ summary::-webkit-details-marker { display: none; }
   background: #fff;
   border: 1px solid var(--line);
   box-shadow: var(--shadow-lift);
+  container-type: inline-size;
 }
 .app-titlebar {
   display: flex; align-items: center; gap: 6px;
@@ -621,6 +622,59 @@ summary::-webkit-details-marker { display: none; }
 .error-main h1 { font: var(--t-h2); color: var(--ink); margin-top: var(--s-4); }
 .error-copy { font: var(--t-lead); color: var(--ink-70); margin-top: var(--s-4); max-width: 42rem; }
 .error-actions { margin-top: var(--s-6); }
+
+/* ================================================================== INTERMEDIATE (721–1360) ====
+   Tablet / half-screen-laptop band: the desktop grid (sized for the 1120px
+   content box, --content 1200px minus 2 * --frame-inset) starts breaking
+   well above the 720px mobile breakpoint. Measured empirically (Playwright,
+   real font metrics): the hero illustration's -64px bleed margin alone
+   overflows the viewport everywhere from 721px up to ~1359px — the 600px/1fr
+   hero grid only has room to absorb that bleed once the centred 1200px
+   content box gets its own side margins, around a 1360px viewport — and the
+   4-up numbers/stat grids independently overflow below ~1230px. This band
+   covers the whole broken range: collapses the two 4-up grids to 2-up, lets
+   the CTA banner headline wrap instead of clipping, stacks the hero
+   illustration and the architecture diagram the way mobile already does
+   (verified not to overflow there), and keeps stat values from spilling
+   mid-digit-group. */
+@media (max-width: 1360px) {
+  /* numbers grid: 4-up -> 2-up, and stop mid-number wraps */
+  .numbers-grid { grid-template-columns: repeat(2, 1fr); }
+  .numbers-tile .v { white-space: nowrap; }
+
+  /* stat strip: 4-up -> 2-up, same border pattern as the numbers grid */
+  .stat-strip .container { grid-template-columns: repeat(2, 1fr); }
+  .stat-cell:nth-child(1), .stat-cell:nth-child(3) { border-left: none; }
+  .stat-cell:nth-child(2), .stat-cell:nth-child(4) { border-left: 1px solid var(--line); }
+  .stat-cell:nth-child(1), .stat-cell:nth-child(2) { border-bottom: 1px solid var(--line); }
+
+  /* CTA banner headline: wrap instead of being clipped by overflow: hidden */
+  .cta-banner h2 { white-space: normal; }
+  .banner-break { display: inline; }
+
+  /* hero: stack the illustration under the copy instead of squeezing it to a sliver */
+  .hero .container { grid-template-columns: 1fr; }
+  .hero-art { width: 420px; max-width: 100%; margin: 0 auto; }
+  .hero-callout { display: none; }
+
+  /* diagram: stack vertically, exactly as at mobile, so the nowrap arrow
+     labels can't crush the boxes between them */
+  .diagram { grid-template-columns: 1fr; }
+  .diagram-box { min-height: 0; }
+  .diagram-arrows { flex-direction: column; padding: var(--s-3) 0; gap: var(--s-2); min-width: 0; }
+  .arrow-label { white-space: normal; text-align: center; }
+  .arrow-track {
+    height: 28px; width: 0; margin: 2px auto;
+    border-top: none; border-left: 1.5px solid var(--ink-70);
+  }
+  .arrow-track .head {
+    top: auto; left: 50%; transform: translateX(-50%);
+    border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+  }
+  .arrow-track .head-left { top: -1px; left: 50%; border-bottom: 6px solid var(--ink-70); border-right: 5px solid transparent; border-top: none; }
+  .arrow-track .head-right { bottom: -1px; top: auto; left: 50%; right: auto; border-top: 6px solid var(--ink-70); border-left: 5px solid transparent; border-right: 5px solid transparent; }
+}
 
 /* ================================================================== MOBILE (390) ==== */
 @media (max-width: 720px) {

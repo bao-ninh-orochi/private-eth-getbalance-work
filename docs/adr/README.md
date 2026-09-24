@@ -3956,7 +3956,8 @@ report to.
 
 ### ADR-0049 — Self-hosted webfonts on both origins; no font CDN **[NEW]**
 
-**Context.** The `demo.risepir.org`/`risepir.org` redesign (#12/#13) adopts
+**Context.** The `demo.risepir.org`/`risepir.org` redesign (#12; landing
+#13, demo #14) adopts
 Raleway (prose) and JetBrains Mono (addresses, hex, byte counts, block
 numbers, balances) as its typefaces, in place of the system-font stacks
 every page used until now. Both origins need the same two families; the

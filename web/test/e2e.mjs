@@ -635,18 +635,17 @@ check(
         ? `threw ${lookupError?.constructor?.name ?? "Error"}: ${lookupError?.message ?? String(lookupError)}`
         : `resumed answered at block ${viaResumed?.atBlock}, booted at ${viaBooted?.atBlock} — never converged`,
     );
-    check(
-      "a lookup through the resumed session matches the already-booted session exactly",
-      lookupError === null &&
-        sameHeight &&
-        viaResumed.status === viaBooted.status &&
-        viaResumed.balanceWei === viaBooted.balanceWei,
-      lookupError
-        ? `threw ${lookupError?.constructor?.name ?? "Error"}: ${lookupError?.message ?? String(lookupError)}`
-        : !sameHeight
-          ? "skipped — the two sessions never answered at the same height, see the check above"
-          : `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${viaBooted.status}/${String(viaBooted.balanceWei)}`,
-    );
+    // Guarded on the check above rather than folded into this one's own
+    // condition: a head that never converges (or a thrown lookup) is then
+    // exactly one failure, reported by the check above, not two reports
+    // of the same underlying cause.
+    if (lookupError === null && sameHeight) {
+      check(
+        "a lookup through the resumed session matches the already-booted session exactly",
+        viaResumed.status === viaBooted.status && viaResumed.balanceWei === viaBooted.balanceWei,
+        `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${viaBooted.status}/${String(viaBooted.balanceWei)}`,
+      );
+    }
   }
 }
 

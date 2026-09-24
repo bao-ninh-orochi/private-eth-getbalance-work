@@ -454,6 +454,69 @@ check(
   /crypto\.getRandomValues/.test(lookup?.wire ?? "") && !/ 0 bytes of crypto/.test(lookup?.wire ?? ""),
 );
 
+// ── 2.35 the number renders as one continuous run, not two detached chunks ──
+//
+// .balance is a flex row whose 12px gap is tuned for its two children —
+// the .balance-num wrapper and .balance-unit — not for the two spans
+// *inside* the wrapper. An earlier version of the fix below made
+// .balance-int/.balance-frac/.balance-unit three separate flex children
+// of .balance directly, which put that same 12px gap between the
+// integer and fraction too, so every balance with a fractional part
+// rendered as two detached chunks (issue #25 review). Assert the two
+// spans sit flush together whenever they land on the same line — first
+// for the value the mock just rendered, then for a typical one-line
+// value (the mock's own balance is short enough it wouldn't catch a
+// regression here on its own) — and that the unit keeps a visible gap
+// from the number when they share a line.
+const adjacency = await evaluate(`
+  function measure() {
+    const intEl = document.querySelector(".balance-int");
+    const fracEl = document.querySelector(".balance-frac");
+    const unitEl = document.querySelector(".balance-unit");
+    if (!intEl || !fracEl || !unitEl) return { skipped: true };
+    const intRect = intEl.getBoundingClientRect();
+    const fracRect = fracEl.getBoundingClientRect();
+    const unitRect = unitEl.getBoundingClientRect();
+    const sameLineIF = Math.abs(intRect.top - fracRect.top) < 1;
+    const sameLineFU = Math.abs(fracRect.top - unitRect.top) < 1;
+    return {
+      skipped: false,
+      sameLineIF,
+      intFracGap: sameLineIF ? fracRect.left - intRect.right : null,
+      sameLineFU,
+      fracUnitGap: sameLineFU ? unitRect.left - fracRect.right : null,
+    };
+  }
+
+  const real = measure();
+
+  const intEl = document.querySelector(".balance-int");
+  const fracEl = document.querySelector(".balance-frac");
+  if (intEl && fracEl) {
+    intEl.textContent = "1";
+    fracEl.textContent = ".345804390675688562";
+  }
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const typical = measure();
+
+  return { real, typical };
+`);
+check(
+  "the real (mock) balance's integer and fraction are adjacent whenever they share a line",
+  adjacency?.real?.skipped === false && (!adjacency.real.sameLineIF || adjacency.real.intFracGap < 1),
+  JSON.stringify(adjacency?.real),
+);
+check(
+  "a typical balance's integer and fraction are adjacent whenever they share a line, not detached chunks",
+  adjacency?.typical?.skipped === false && (!adjacency.typical.sameLineIF || adjacency.typical.intFracGap < 1),
+  JSON.stringify(adjacency?.typical),
+);
+check(
+  "the ETH unit keeps a visible gap from the number when they share a line",
+  adjacency?.typical?.skipped === false && (!adjacency.typical.sameLineFU || adjacency.typical.fracUnitGap >= 6),
+  JSON.stringify(adjacency?.typical),
+);
+
 // ── 2.4 the balance never overflows its card, even at the 96-bit worst case ──
 //
 // The mock only ever shows an 18-character balance (100 wei) — nowhere

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="tilePale" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#FFBAA4"/>
+    <stop offset="1" stop-color="#FFFFFF"/>
+  </linearGradient>
+    
+  </defs>
+  <polygon points="32.00,12.00 18.00,20.00 20.00,38.00 32.00,52.00" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="32.00,12.00 46.00,20.00 44.00,38.00 32.00,52.00" fill="#FF4608" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+</svg>

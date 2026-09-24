@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="RisePIR">
+  <!-- white mono version for the orange banner / dark surfaces; top scale (the patch) stays full-opacity -->
+  <rect x="1" y="15" width="14" height="14" fill="#FFFFFF" fill-opacity="0.42" stroke="#FFFFFF" stroke-opacity="0.75" stroke-width="1.2" stroke-linejoin="round"/>
+  <rect x="8" y="8" width="14" height="14" fill="#FFFFFF" fill-opacity="0.62" stroke="#FFFFFF" stroke-opacity="0.85" stroke-width="1.2" stroke-linejoin="round"/>
+  <rect x="15" y="1" width="14" height="14" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="1.2" stroke-linejoin="round"/>
+</svg>

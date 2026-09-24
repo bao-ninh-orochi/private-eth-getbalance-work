@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="tilePale" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#FFBAA4"/>
+    <stop offset="1" stop-color="#FFFFFF"/>
+  </linearGradient>
+    
+  </defs>
+  <polygon points="17.00,33.70 32.00,42.40 32.00,61.00 17.00,52.30" fill="#FFE9E0" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="47.00,33.70 32.00,42.40 32.00,61.00 47.00,52.30" fill="#FF4608" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="32.00,25.00 47.00,33.70 32.00,42.40 17.00,33.70" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="15.00,25.70 30.00,34.40 30.00,53.00 15.00,44.30" fill="#FFE9E0" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="45.00,25.70 30.00,34.40 30.00,53.00 45.00,44.30" fill="#FFCEBE" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="30.00,17.00 45.00,25.70 30.00,34.40 15.00,25.70" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="13.00,17.70 28.00,26.40 28.00,45.00 13.00,36.30" fill="#FFE9E0" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="43.00,17.70 28.00,26.40 28.00,45.00 43.00,36.30" fill="#FFCEBE" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+<polygon points="28.00,9.00 43.00,17.70 28.00,26.40 13.00,17.70" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1.5" stroke-linejoin="round" opacity="1"/>
+</svg>

@@ -595,28 +595,57 @@ check(
 
     // The functional byte-identity proof (see the section header): a
     // lookup through the resumed session must match the already-booted
-    // session's answer for the same address, exactly.
+    // session's answer for the same address, exactly — but only once
+    // both answer at the *same* finalized height. Comparing against
+    // `result` (captured once, long before this point) compares across
+    // heights on a live deployment: mainnet finalizes a new block during
+    // the real, sequential network round trips this test makes, so two
+    // genuinely different — and both correct — balances at different
+    // blocks would misreport as a mismatch (confirmed independently
+    // against Tenderly for exactly this case, issue #25). Re-query the
+    // booted `session` right after the resumed one and require equal
+    // `atBlock` before comparing; retry the pair a bounded number of
+    // times if the head moved between the two calls.
     //
     // Guarded: an unhandled rejection here escapes the module and kills
     // the process *before* the PASS/FAIL summary and `process.exit`
     // below, so a single throw silently discards every check's result
     // rather than reporting one failure. A gate that crashes instead of
     // failing is not reporting.
+    const RESUMED_COMPARE_ATTEMPTS = 3;
     let viaResumed = null;
+    let viaBooted = null;
     let lookupError = null;
-    try {
-      viaResumed = await resumedSession.getBalance(target);
-    } catch (e) {
-      lookupError = e;
+    let sameHeight = false;
+    for (let attempt = 0; attempt < RESUMED_COMPARE_ATTEMPTS && !sameHeight; attempt++) {
+      try {
+        viaResumed = await resumedSession.getBalance(target);
+        viaBooted = await session.getBalance(target);
+      } catch (e) {
+        lookupError = e;
+        break;
+      }
+      sameHeight = viaResumed.atBlock === viaBooted.atBlock;
     }
+
+    check(
+      `the resumed and already-booted sessions answered at the same finalized height within ${RESUMED_COMPARE_ATTEMPTS} attempts`,
+      lookupError === null && sameHeight,
+      lookupError
+        ? `threw ${lookupError?.constructor?.name ?? "Error"}: ${lookupError?.message ?? String(lookupError)}`
+        : `resumed answered at block ${viaResumed?.atBlock}, booted at ${viaBooted?.atBlock} — never converged`,
+    );
     check(
       "a lookup through the resumed session matches the already-booted session exactly",
       lookupError === null &&
-        viaResumed.status === result.status &&
-        viaResumed.balanceWei === result.balanceWei,
+        sameHeight &&
+        viaResumed.status === viaBooted.status &&
+        viaResumed.balanceWei === viaBooted.balanceWei,
       lookupError
         ? `threw ${lookupError?.constructor?.name ?? "Error"}: ${lookupError?.message ?? String(lookupError)}`
-        : `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${result.status}/${String(result.balanceWei)}`,
+        : !sameHeight
+          ? "skipped — the two sessions never answered at the same height, see the check above"
+          : `status ${viaResumed.status}/${String(viaResumed.balanceWei)} vs ${viaBooted.status}/${String(viaBooted.balanceWei)}`,
     );
   }
 }

@@ -763,7 +763,9 @@ function renderBlockStrip() {
   } else {
     const label = n === 1n ? "1 finalized block" : `${n.toLocaleString("en-US")} finalized blocks`;
     const kb = (session.traffic.deltaBytes / 1000).toFixed(1);
-    caption.textContent = `${label} folded in since your hint was pinned · ${kb} kB of public deltas · no re-download`;
+    // U+2011 (non-breaking hyphen): keeps "re‑download" from breaking
+    // across "re-" / "download" at narrow widths.
+    caption.textContent = `${label} folded in since your hint was pinned · ${kb} kB of public deltas · no re‑download`;
   }
 
   strip.append(tiles, caption);

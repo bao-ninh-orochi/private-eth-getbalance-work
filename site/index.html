@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RisePIR — private eth_getBalance for Ethereum mainnet</title>
+<title>RisePIR — Private eth_getBalance for Ethereum mainnet</title>
 <meta name="description" content="A keyword-PIR server that answers Ethereum eth_getBalance queries against the complete 204,714,034-account mainnet set without learning which account was asked.">
 
-<meta property="og:title" content="RisePIR — private eth_getBalance for Ethereum mainnet">
+<meta property="og:title" content="RisePIR — Private eth_getBalance for Ethereum mainnet">
 <meta property="og:description" content="LWE keyword-PIR over a Segmented Cuckoo Filter. The server computes over the entire mainnet balance set to answer one query, and never learns which account was asked.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://risepir.org/">
@@ -17,278 +17,464 @@
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
+<div class="page">
 
-<header class="site-header">
-  <div class="wrap">
-    <p class="eyebrow">Ethereum mainnet · private balance queries · paper accepted for publication</p>
-    <h1>RisePIR</h1>
-    <p class="tagline">Private <code>eth_getBalance</code> for Ethereum mainnet, answered without the server learning which account was asked.</p>
-    <nav aria-label="Page sections">
-      <a href="#what">What it does</a>
-      <a href="#mechanism">How it works</a>
-      <a href="#scale">Scale</a>
-      <a href="#demo">Live demo</a>
-      <a href="#trust">Trust</a>
-      <a href="#paper">Paper &amp; code</a>
-    </nav>
-  </div>
-</header>
-
-<main id="main" tabindex="-1">
-
-  <section id="what" aria-labelledby="what-h">
-    <div class="wrap">
-      <h2 id="what-h">What it does</h2>
-      <p class="lede">RisePIR answers <code>eth_getBalance</code> for Ethereum mainnet through keyword-PIR — private
-        information retrieval keyed by an address rather than a numeric index. A server follows the chain and holds
-        a database of every nonzero account balance. A client asks for one balance without revealing, to the
-        server, which account it asked about.</p>
-      <p>It runs against real mainnet today, serving the complete nonzero-balance set — 204,714,034 accounts as of
-        2026-09-03, and growing with the chain as new accounts are funded. The server computes over
-        every one of them to answer a single query. It cannot do less without learning which account you asked
-        for.</p>
-      <p>The system is built around one invariant: never return a wrong answer. An error is acceptable. A silently
-        wrong balance is not.</p>
+  <!-- ============================================================ NAV -->
+  <header class="nav">
+    <div class="container">
+      <div class="nav-left">
+        <div class="nav-lockup">
+          <img class="mark" src="./assets/risepir-mark.svg" width="32" height="32" alt="RisePIR">
+          <span class="wordmark">RisePIR</span>
+        </div>
+        <div class="nav-by">
+          <img class="orochi-sym" src="./assets/brand/orochi-net-logo-orochi-symbol.svg" width="16" height="16" alt="">
+          <span>by Orochi Network</span>
+        </div>
+      </div>
+      <nav class="nav-links" aria-label="Page sections">
+        <a href="#how">How it works</a>
+        <a href="#numbers">Numbers</a>
+        <a href="#trust">Trust</a>
+        <a href="#paper">Paper</a>
+      </nav>
+      <div class="nav-right">
+        <div class="nav-divider"></div>
+        <a class="btn btn-secondary btn-sm" href="#demo">Open live demo →</a>
+        <details class="nav-menu">
+          <summary aria-label="Menu">
+            <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+              <line x1="3" y1="6" x2="21" y2="6" stroke="#0B0A09" stroke-width="1.6" stroke-linecap="round"/>
+              <line x1="3" y1="12" x2="21" y2="12" stroke="#0B0A09" stroke-width="1.6" stroke-linecap="round"/>
+              <line x1="3" y1="18" x2="21" y2="18" stroke="#0B0A09" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </summary>
+          <nav class="nav-menu-panel" aria-label="Page sections">
+            <a href="#how">How it works</a>
+            <a href="#numbers">Numbers</a>
+            <a href="#trust">Trust</a>
+            <a href="#paper">Paper</a>
+            <a class="btn btn-primary" href="#demo">Open live demo →</a>
+          </nav>
+        </details>
+      </div>
     </div>
-  </section>
+  </header>
 
-  <section id="mechanism" aria-labelledby="mechanism-h">
-    <div class="wrap">
-      <h2 id="mechanism-h">How it works</h2>
+  <main id="main" tabindex="-1">
 
-      <h3>The protocol</h3>
-      <p>The client first downloads a one-time hint: the server's database, preprocessed into a matrix that is
-        identical for every visitor, so holding it says nothing about you. To look up a balance, the client builds
-        a short LWE-encrypted query locally and sends it. The server computes its response over the entire
-        database — every account, every time — and returns a ciphertext. Only the client, holding the secret
-        behind its own query, can decode that ciphertext into a balance. The server never sees a plaintext
-        address, and it never learns which row of its database the query actually touched, because in a real
-        sense it touched all of them.</p>
-
-      <h3>The keyword layer</h3>
-      <p>Ethereum accounts are addressed by address, not by row number, so a plain index-based PIR scheme cannot be
-        queried directly. RisePIR's keyword layer is a Segmented Cuckoo Filter: it maps each address to a small,
-        fixed set of candidate cells, the way any cuckoo filter maps a key, so the client can look up a fingerprint
-        of the address instead of an index. The filter's own cell array doubles as the PIR database matrix — there
-        is no separate index-to-address table to keep in sync with it.</p>
-
-      <figure class="diagram-figure">
-        <div class="diagram-wrap">
-        <svg viewBox="0 0 420 550" role="img" aria-labelledby="arch-title arch-desc" xmlns="http://www.w3.org/2000/svg">
-          <title id="arch-title">RisePIR architecture</title>
-          <desc id="arch-desc">The browser or CLI client builds an LWE-encrypted query locally; the address never
-            leaves the client. Both the query and the server's response are ciphertext. The PIR server computes
-            its answer over its entire database, so it cannot tell which record was requested. The server's
-            database is populated independently, by following Ethereum mainnet's finalized blocks.</desc>
-          <style>
-            .node-box{fill:var(--surface-2);stroke:var(--text);stroke-width:1.5}
-            .boundary{fill:none;stroke:var(--accent);stroke-width:1.4;stroke-dasharray:5 4}
-            .arrow{fill:none;stroke:var(--text);stroke-width:1.6}
-            .arrowhead{fill:var(--text)}
-            .lbl{font-family:var(--font-sans);fill:var(--text);font-size:16px;font-weight:600}
-            .lbl-sub{font-family:var(--font-sans);fill:var(--text-secondary);font-size:11.5px}
-            .lbl-accent{font-family:var(--font-sans);fill:var(--accent);font-size:11.5px;font-weight:600}
-            .lbl-small{font-family:var(--font-sans);fill:var(--text-secondary);font-size:11px}
-            .lbl-boundary{font-family:var(--font-sans);fill:var(--accent);font-size:10px;font-weight:600;letter-spacing:.06em}
-          </style>
-          <defs>
-            <marker id="arrow-end" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-              <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
-            </marker>
-          </defs>
-
-          <!-- trust boundary + client -->
-          <text class="lbl-boundary" x="46" y="17">TRUST BOUNDARY — ADDRESS STAYS HERE</text>
-          <rect class="boundary" x="44" y="24" width="332" height="128" rx="10" />
-          <rect class="node-box" x="60" y="40" width="300" height="96" rx="6" />
-          <text class="lbl" x="210" y="72" text-anchor="middle">Browser / CLI client</text>
-          <text class="lbl-sub" x="210" y="94" text-anchor="middle">builds the LWE query locally</text>
-          <text class="lbl-accent" x="210" y="114" text-anchor="middle">the address stays in this box</text>
-
-          <!-- query / response, both ciphertext -->
-          <line class="arrow" x1="160" y1="142" x2="160" y2="222" marker-end="url(#arrow-end)" />
-          <line class="arrow" x1="260" y1="222" x2="260" y2="142" marker-end="url(#arrow-end)" />
-          <text class="lbl-small" x="160" y="172" text-anchor="middle">query</text>
-          <text class="lbl-small" x="160" y="188" text-anchor="middle">435.07 KB</text>
-          <text class="lbl-small" x="260" y="172" text-anchor="middle">response</text>
-          <text class="lbl-small" x="260" y="188" text-anchor="middle">434.37 KB</text>
-
-          <!-- server -->
-          <rect class="node-box" x="60" y="228" width="300" height="96" rx="6" />
-          <text class="lbl" x="210" y="260" text-anchor="middle">PIR server</text>
-          <text class="lbl-sub" x="210" y="282" text-anchor="middle">computes over the entire database</text>
-          <text class="lbl-accent" x="210" y="302" text-anchor="middle">sees ciphertext only</text>
-
-          <!-- feed -->
-          <line class="arrow" x1="210" y1="446" x2="210" y2="330" marker-end="url(#arrow-end)" />
-          <text class="lbl-small" x="222" y="392" text-anchor="start">finalized blocks</text>
-
-          <!-- mainnet -->
-          <rect class="node-box" x="60" y="450" width="300" height="86" rx="6" />
-          <text class="lbl" x="210" y="483" text-anchor="middle">Ethereum mainnet</text>
-          <text class="lbl-sub" x="210" y="505" text-anchor="middle">blocks and traces, followed at finalized</text>
-        </svg>
+  <!-- ============================================================ HERO -->
+  <section class="hero dotted">
+    <div class="container">
+      <div class="hero-copy">
+        <div class="eyebrow">Private eth_getBalance · Ethereum mainnet · CANS 2026</div>
+        <h1>The chain is public. Only your question needs hiding.</h1>
+        <p class="lead">RisePIR looks up any Ethereum balance without the server learning which address you asked about — across all 204,714,034 funded accounts, kept current block by block.</p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#demo">Try the live demo →</a>
+          <a class="btn btn-secondary" href="#paper">Read the paper</a>
         </div>
-        <figcaption>The client builds its query locally; the address it is asking about never leaves that box.
-          Both the query and the server's response are ciphertext — the only things that cross the wire. The
-          server's database is populated independently, by following Ethereum mainnet's finalized blocks.</figcaption>
-      </figure>
-    </div>
-  </section>
-
-  <section id="scale" aria-labelledby="scale-h">
-    <div class="wrap">
-      <h2 id="scale-h">Scale</h2>
-      <p class="lede">Figures below describe the live deployment at the complete mainnet set. Sizes are computed
-        directly from the deployment's fixed geometry; timings are measured on the running server.</p>
-
-      <dl class="stats">
-        <div>
-          <dt>Accounts served</dt>
-          <dd>204,714,034</dd>
-        </div>
-        <div>
-          <dt>First load (<code>/setup</code>, one-time)</dt>
-          <dd>553.82&nbsp;MB<br>(553,819,200&nbsp;B)</dd>
-        </div>
-        <div>
-          <dt>Client memory (resident)</dt>
-          <dd>1.11&nbsp;GB</dd>
-        </div>
-        <div>
-          <dt>Server database</dt>
-          <dd>23.62&nbsp;GB</dd>
-        </div>
-        <div>
-          <dt>Query (client → server)</dt>
-          <dd>435.07&nbsp;KB</dd>
-        </div>
-        <div>
-          <dt>Response (server → client)</dt>
-          <dd>434.37&nbsp;KB</dd>
-        </div>
-        <div>
-          <dt>Per-block patch time</dt>
-          <dd>5.573&nbsp;ms mean / 4.783&nbsp;ms p50 at K&nbsp;≈&nbsp;433<br>(measured 2026-09-03; was ~11.1&nbsp;ms at K&nbsp;≈&nbsp;310)</dd>
-        </div>
-        <div>
-          <dt>Geometry</dt>
-          <dd>arity 2, bucket size 4,<br>67,108,864 buckets,<br>plaintext_bits 8</dd>
-        </div>
-        <div>
-          <dt>&quot;latest&quot;</dt>
-          <dd>finalized — ~13 minutes<br>behind the public head,<br>by design</dd>
-        </div>
-      </dl>
-      <p class="note">K is mutations per block. The patch-time figure is measured while the server follows the
-        chain head, not during catch-up replay, where a warmer cache makes it look faster than steady state. The
-        account count is a live figure as of 2026-09-03, not a bootstrap-time snapshot; the geometry it was last
-        bootstrapped at is the basis every size in this table is computed from, and the live set grows above the
-        count shown as the chain advances.</p>
-    </div>
-  </section>
-
-  <section id="demo" aria-labelledby="demo-h">
-    <div class="wrap">
-      <h2 id="demo-h">Live demo</h2>
-      <p class="lede">A running instance answers real queries against the deployment described above, at
-        <a href="https://demo.risepir.org">demo.risepir.org</a>.</p>
-      <p>The live instance is not always on. It runs during demos and on request. The screenshots below were
-        captured from it while running, so the result is on this page whether or not the server is up.</p>
-
-      <div class="shots">
-        <figure class="shot">
-          <img src="./assets/demo-initial.png" alt="Screenshot of the RisePIR browser client on first load, working through its one-time setup checklist: cryptographic engine, hint download, and pinning to a finalized block.">
-          <figcaption>First load: the one-time setup sequence, before any query has been made.</figcaption>
-        </figure>
-        <figure class="shot">
-          <img src="./assets/demo-result.png" alt="Screenshot of the RisePIR browser client showing a completed balance lookup result and a receipt panel listing what was sent and received.">
-          <figcaption>The browser client after a balance lookup: the decoded result, and the receipt of exactly what crossed the wire.</figcaption>
-        </figure>
-        <figure class="shot">
-          <img src="./assets/demo-mobile.png" alt="Screenshot of the RisePIR browser client rendered on a mobile-width screen.">
-          <figcaption>The same client at a mobile viewport width.</figcaption>
-        </figure>
+        <p class="hero-fine">Research prototype · the live instance runs during demos and on request.</p>
+      </div>
+      <div class="hero-art">
+        <img src="./assets/illustrations/hero-patched-ribbon.svg" width="720" height="560" alt="A ribbon of database scales, mostly pale, with a few solid-orange scales showing the block just patched">
+        <div class="hero-callout hero-callout-1"><span>≈433 accounts change per block</span><span class="leader"></span></div>
+        <div class="hero-callout hero-callout-2"><span class="leader"></span><span>patched in place · 5.6 ms</span></div>
       </div>
     </div>
   </section>
 
-  <section id="trust" aria-labelledby="trust-h">
-    <div class="wrap">
-      <h2 id="trust-h">What this does not protect</h2>
-      <p class="lede">RisePIR's cryptographic guarantee is specific: it stops the party operating the server from
-        learning which account a query is about, by observing the traffic it serves. It does not, on its own,
-        protect against a compromised path for delivering the client's code. That is a real, separate trust
-        boundary, and it is stated here deliberately, not as fine print.</p>
+  <!-- ============================================================ STAT STRIP -->
+  <section class="stat-strip">
+    <div class="container">
+      <div class="stat-cell"><span class="v num">204,714,034</span><span class="l">accounts served</span></div>
+      <div class="stat-cell"><span class="v num">0.69 s</span><span class="l">per private query</span></div>
+      <div class="stat-cell"><span class="v num">5.6 ms</span><span class="l">to absorb a block</span></div>
+      <div class="stat-cell"><span class="v num">none</span><span class="l">addresses sent to the server</span></div>
+    </div>
+    <div class="container"><p class="stat-caption">Measured on the live deployment, 2026-09-03.</p></div>
+  </section>
 
-      <h3>Who is choosing your client</h3>
-      <p>On the live demo, the page and its WebAssembly client are delivered by the same host being queried,
-        <code>demo.risepir.org</code>. PIR keeps that host from learning your address only if the client it handed
-        you is honest — and whoever serves the page chooses what the client does. A malicious or compromised
-        origin could serve a modified client that leaks the address it was asked about, and the PIR guarantee
-        would not catch it.</p>
-      <ul>
-        <li>Same-origin delivery and a <code>connect-src 'self'</code> content-security policy: the page is
-          structurally unable to send a request anywhere but the server it already talks to. That constrains a
-          tampered page; it does not constrain a dishonest origin.</li>
-        <li>The WebAssembly module's only import from its host is a source of random bytes. No fetch, no clock, no
-          storage — it has no channel to exfiltrate anything on its own.</li>
-        <li>The wasm client and the command-line client are built from the same Rust source, so auditing one
-          audits both. Running the client on your own machine instead of the browser removes the code-delivery
-          question entirely — only PIR ciphertext crosses the network at that point.</li>
-      </ul>
+  <!-- ============================================================ 01 PATCHED IN PLACE -->
+  <section class="section section-pad" id="how">
+    <div class="container">
+      <div class="section-num">01 · Patched in place</div>
+      <div class="section-head">
+        <h2>Ethereum changes every 12 seconds. RisePIR keeps up by patching, not rebuilding.</h2>
+        <p class="lede">Fast private lookups need a preprocessed hint of the whole database. In earlier keyword PIR, changing one account meant rebuilding it. RisePIR's Segmented Cuckoo Filter turns each change into a sparse, position-predictable patch — so a block's changes land in milliseconds.</p>
+      </div>
 
-      <h3>What the cryptography does not hide</h3>
-      <p>PIR hides which account you asked about. It does not hide that you asked, when, how often, or from
-        where — the server still sees a requester's IP address and request timing, like any web server. Nothing
-        in this system anonymizes the network layer.</p>
+      <div class="chart-card">
+        <div class="chart-title">One block's changes, two ways · measured 2026-09-03, 16 threads</div>
 
-      <h3>This page is not the PIR origin</h3>
-      <p>risepir.org — this page — is static and served by a different party than <code>demo.risepir.org</code>,
-        the PIR origin. It carries no cryptographic client and makes no PIR queries, so it sits outside the trust
-        boundary described above. The demo deliberately keeps its own page and its PIR transport on one hostname:
-        same-origin delivery plus that <code>connect-src 'self'</code> policy is what makes the disclosure above
-        checkable by anyone who looks, rather than a claim taken on faith about a second party.</p>
-      <p>Being specific about this page's own delivery, since the section above asks you to care who serves a
-        page: it is hosted on Cloudflare Pages, so Cloudflare terminates TLS for it and can see requests to it.
-        Cloudflare also injects its own analytics script (<code>cloudflareinsights.com</code>) into this page at
-        the edge — it is not in the source, and it is not something this page asks for. Neither applies to
-        <code>demo.risepir.org</code>, which is served directly by its own machine with no proxy in front of it,
-        precisely so that no third party sits in the path that delivers the cryptographic client.</p>
+        <div class="chart-blockline">
+          <div class="spacer"></div>
+          <div class="blockmarks">
+            <span class="blocklabel pos-1">block N</span>
+            <span class="blocklabel pos-2">block N+1</span>
+            <span class="blocklabel pos-3">block N+2</span>
+            <i class="pos-0"></i><i class="pos-33"></i><i class="pos-66"></i><i class="pos-100"></i>
+            <span class="ticklabel pos-0">0 s</span>
+            <span class="ticklabel pos-33">12 s</span>
+            <span class="ticklabel pos-66">24 s</span>
+            <span class="ticklabel pos-100">36 s</span>
+          </div>
+        </div>
+
+        <div class="chart-row">
+          <div class="row-label">Patch in place — 5.6 ms</div>
+          <div class="chart-row-cell">
+            <div class="chart-track">
+              <div class="bar-patch"></div>
+              <div class="chart-callout callout-patch">0.05% of the block</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-row rebuild-row">
+          <div class="row-label">Full rebuild — 29.2 s</div>
+          <div class="chart-row-cell">
+            <div class="chart-track">
+              <div class="bar-rebuild"></div>
+            </div>
+            <div class="chart-callout warn">longer than two blocks — it can never catch up</div>
+          </div>
+        </div>
+
+        <div class="fact-cards">
+          <div class="fact-card"><div class="fc-num num">5,200×</div><div class="fc-label">cheaper than a rebuild</div></div>
+          <div class="fact-card"><div class="fc-num num">≈433</div><div class="fc-label">accounts changed per block</div></div>
+          <div class="fact-card"><div class="fc-num num">≈10.8 kB</div><div class="fc-label">public delta per block</div></div>
+        </div>
+      </div>
+
+      <blockquote class="pull-quote">
+        “A scheme that rebuilds on every change cannot keep pace with the chain.”
+        <cite>— RisePIR paper, §9</cite>
+      </blockquote>
     </div>
   </section>
 
-  <section id="paper" aria-labelledby="paper-h">
-    <div class="wrap">
-      <h2 id="paper-h">Paper and code</h2>
+  <!-- ============================================================ 02 HOW A PRIVATE LOOKUP WORKS -->
+  <section class="section section-pad hairline-top">
+    <div class="container">
+      <div class="section-num">02 · How a private lookup works</div>
+      <div class="section-head">
+        <h2>Encrypted here. Computed blind. Decoded here.</h2>
+      </div>
 
-      <h3>Paper</h3>
-      <p class="cite">
-        Bao Ninh.
-        <cite>Incremental Keyword Private Information Retrieval from <i>d</i>-ary Segmented Cuckoo Filters</cite>.
-        CANS 2026 — International Conference on Cryptology and Network Security.
-      </p>
-      <!-- TODO: add DOI and PDF link once the proceedings are published -->
-      <p class="note">Accepted for publication; a DOI and a link to the paper will be added here on release.</p>
+      <div class="step-cards">
+        <div class="step-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-hint.svg" width="48" height="48" alt="">
+          <div class="step-no">01</div>
+          <h3>Download the hint, once</h3>
+          <p>Your browser fetches a 553.8 MB preprocessed hint. It is identical for every visitor, so holding it says nothing about you.</p>
+        </div>
+        <div class="step-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-query.svg" width="48" height="48" alt="">
+          <div class="step-no">02</div>
+          <h3>Ask in ciphertext</h3>
+          <p>The address is encrypted in your browser into a ≈435 kB LWE query. The server computes over every one of its 204.7 million accounts, so it cannot tell which one you meant.</p>
+        </div>
+        <div class="step-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-patch.svg" width="48" height="48" alt="">
+          <div class="step-no">03</div>
+          <h3>Stay current, block by block</h3>
+          <p>Each finalized block's changes arrive as a ≈10.8 kB public delta that every client downloads in full, so your answer is corrected to the latest finalized block without re-downloading the hint.</p>
+        </div>
+      </div>
 
-      <h3>Code</h3>
-      <p>The implementation is a Rust workspace: a geometry and wire-codec layer, the PIR server with a verified
-        store, the response-rewind client (also compiled to WebAssembly for the browser), a mainnet feed, an HTTP
-        transport, and a JSON-RPC front end — plus a conformance harness checked against an independent provider
-        on real mainnet blocks.</p>
-      <p>The repository is <a href="https://github.com/orochi-network/private-eth-getbalance"><code>orochi-network/private-eth-getbalance</code></a>,
-        published under Apache-2.0.</p>
+      <div class="diagram">
+        <div class="diagram-box trust">
+          <div class="tb-label eyebrow">The address stays here</div>
+          <img class="db-icon" src="./assets/illustrations/icon-browser.svg" width="40" height="40" alt="">
+          <h4>Your browser</h4>
+          <p>Builds the LWE query locally.</p>
+        </div>
+        <div class="diagram-arrows">
+          <div class="arrow-label">query · ≈435 kB ciphertext →</div>
+          <div class="arrow-track both"><span class="head head-left"></span><span class="head head-right"></span></div>
+          <div class="arrow-label">← response · ≈434 kB ciphertext</div>
+        </div>
+        <div class="diagram-box">
+          <img class="db-icon" src="./assets/illustrations/icon-server.svg" width="40" height="40" alt="">
+          <h4>PIR server</h4>
+          <p>Computes over the entire database · sees ciphertext only.</p>
+        </div>
+        <div class="diagram-arrows">
+          <div class="arrow-label">← finalized blocks</div>
+          <div class="arrow-track left-only"><span class="head head-left"></span></div>
+        </div>
+        <div class="diagram-box">
+          <img class="db-icon" src="./assets/illustrations/icon-chain.svg" width="40" height="40" alt="">
+          <h4>Ethereum mainnet</h4>
+          <p>Followed at finalized, ≈13 min behind the head.</p>
+        </div>
+      </div>
     </div>
   </section>
 
-</main>
+  <!-- ============================================================ 03 UNDER THE HOOD (BENTO) -->
+  <section class="section section-pad hairline-top">
+    <div class="container">
+      <div class="section-num">03 · Under the hood</div>
+      <div class="section-head">
+        <h2>One component changed. Everything else stays fast.</h2>
+      </div>
 
-<footer>
-  <div class="wrap">
-    <p>RisePIR is a research prototype, built alongside the paper above. The live instance runs during demos and
-      on request: <a href="https://demo.risepir.org">demo.risepir.org</a>.</p>
-  </div>
-</footer>
+      <div class="bento">
+        <div class="bento-tile big">
+          <div class="bento-art">
+            <img src="./assets/illustrations/segment-grid.svg" width="560" height="360" alt="A grid of buckets in two segments; a few highlighted orange as the ones a mutation touches">
+            <div class="segment-labels"><span>segment 0</span><span>segment 1</span></div>
+          </div>
+          <h3>d-ary Segmented Cuckoo Filter</h3>
+          <p>Each address maps to exactly one bucket per segment, so every segment is a self-contained PIR database — and an insert, update or delete touches only a few predictable cells.</p>
+        </div>
 
+        <div class="bento-tile">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-check.svg" width="48" height="48" alt="">
+          <h3>Never a wrong answer</h3>
+          <p>An error is acceptable. A silently wrong balance is not. Every failure path refuses rather than guesses.</p>
+        </div>
+
+        <div class="bento-tile">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-shield.svg" width="48" height="48" alt="">
+          <h3>The address never leaves your browser</h3>
+          <p>The client is WebAssembly running on your machine. The address is not hashed, not truncated, not encrypted for the server — it is not sent.</p>
+        </div>
+
+        <div class="bento-tile">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-clock.svg" width="48" height="48" alt="">
+          <h3>Finalized, never reorged</h3>
+          <p>Answers are as of the latest finalized block, about 13 minutes behind the head, so an answer cannot be quietly invalidated.</p>
+        </div>
+
+        <div class="bento-tile">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="step-icon" src="./assets/illustrations/icon-query.svg" width="48" height="48" alt="">
+          <h3>Checked against the chain</h3>
+          <p>300 of 300 live answers matched an independent provider byte for byte (2026-09-03).</p>
+        </div>
+
+        <div class="bento-tile cta full">
+          <div class="cta-text">
+            <img class="step-icon" src="./assets/illustrations/icon-code.svg" width="48" height="48" alt="">
+            <h3>Two variants, one construction</h3>
+            <p>RisePIR-S over SimplePIR runs this deployment; RisePIR-F runs over FrodoPIR.</p>
+            <a class="cta-link" href="#paper">Read the paper →</a>
+          </div>
+          <img class="cta-art" src="./assets/illustrations/ribbon-corner.svg" width="240" height="140" alt="">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 04 MEASURED, NOT ESTIMATED -->
+  <section class="section section-pad hairline-top" id="numbers">
+    <div class="container">
+      <div class="section-num">04 · Measured, not estimated</div>
+      <div class="section-head">
+        <h2>The live deployment, in numbers</h2>
+        <p class="lede">One binary, one host, one 3.1-hour window on 2026-09-03: 300 private queries and 959 blocks.</p>
+      </div>
+
+      <div class="numbers-grid">
+        <div class="numbers-tile"><span class="v num">204,714,034</span><span class="l">accounts served (complete nonzero-balance set)</span></div>
+        <div class="numbers-tile"><span class="v num">0.69 s</span><span class="l">private query, end to end (0.61 s is the server's product)</span></div>
+        <div class="numbers-tile"><span class="v num">5.6 ms</span><span class="l">per-block patch (5.573 ms mean · 4.783 ms p50)</span></div>
+        <div class="numbers-tile"><span class="v num">553.8 MB</span><span class="l">one-time hint</span></div>
+        <div class="numbers-tile"><span class="v num">435 kB / 434 kB</span><span class="l">query / response on the wire</span></div>
+        <div class="numbers-tile"><span class="v num">23.62 GB</span><span class="l">server database</span></div>
+        <div class="numbers-tile"><span class="v num">≈10.8 kB</span><span class="l">public delta per block</span></div>
+        <div class="numbers-tile"><span class="v num">≈13 min</span><span class="l">freshness lag (latest finalized block, by design)</span></div>
+      </div>
+      <p class="numbers-foot">Measured on 2026-09-03 on a GCP c3d-highmem-16 (AMD EPYC 9B14, Zen 4, 16 threads); client an AWS r7a.xlarge over the public internet. Source: docs/deployment-numbers.md in the repository.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ 05 TRY IT -->
+  <section class="section section-pad hairline-top" id="demo">
+    <div class="container">
+      <div class="section-num">05 · Try it</div>
+      <div class="section-head">
+        <h2>Look up a real balance. Watch what leaves your browser.</h2>
+      </div>
+
+      <div class="try-grid">
+        <div>
+          <div class="try-bullets">
+            <div class="try-bullet"><span class="dot"></span><p>Type any address.</p></div>
+            <div class="try-bullet"><span class="dot"></span><p>The hint downloads once.</p></div>
+            <div class="try-bullet"><span class="dot"></span><p>A receipt shows exactly what crossed the wire.</p></div>
+          </div>
+          <p class="try-note">The live instance is not always on — it runs during demos and on request.</p>
+          <div class="try-actions"><a class="btn btn-primary" href="https://demo.risepir.org">Open demo.risepir.org →</a></div>
+        </div>
+
+        <div>
+          <div class="app-window">
+            <div class="app-titlebar">
+              <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+              <span class="app-url">demo.risepir.org</span>
+            </div>
+            <div class="app-body">
+              <div class="answer-mock">
+                <div class="am-label">Balance</div>
+                <div class="am-balance num">1.345804390675688562 ETH</div>
+                <div class="am-asof num">As of finalized block 25,650,921</div>
+              </div>
+              <div class="receipt-row">
+                <svg class="receipt-check" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+                  <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                  <path d="M6 10.3l2.6 2.6L14.2 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span class="receipt-text">Addresses transmitted: <strong>none</strong></span>
+              </div>
+            </div>
+          </div>
+          <p class="mock-caption">Illustration of the demo's answer card — not a screenshot.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 06 TRUST -->
+  <section class="section section-pad hairline-top" id="trust">
+    <div class="container">
+      <div class="section-num">06 · Trust</div>
+      <div class="section-head">
+        <h2>What this does not protect</h2>
+        <p class="lede">The guarantee is specific: the operator cannot learn which account you asked about. Everything it does not cover is stated here, up front — not in fine print.</p>
+      </div>
+
+      <div class="trust-grid">
+        <div class="trust-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="tc-icon" src="./assets/illustrations/icon-code.svg" width="48" height="48" alt="">
+          <h3>Who is choosing your client</h3>
+          <p>demo.risepir.org serves both the page and the WebAssembly, so PIR holds only if that origin is honest.</p>
+          <ul>
+            <li>Same-origin delivery plus a <code>connect-src 'self'</code> CSP constrain a tampered page, not a dishonest origin.</li>
+            <li>The wasm's only host import is a random-bytes source.</li>
+            <li>The wasm and CLI share source — run <code>risepir-rpc client --pir-url …</code> yourself to remove the question.</li>
+          </ul>
+        </div>
+        <div class="trust-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="tc-icon" src="./assets/illustrations/icon-shield.svg" width="48" height="48" alt="">
+          <h3>What the cryptography does not hide</h3>
+          <p>It hides which account, not that, when, how often or from where you asked; the server sees your IP address and timing like any web server — use Tor if that matters.</p>
+        </div>
+        <div class="trust-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="tc-icon" src="./assets/illustrations/icon-clock.svg" width="48" height="48" alt="">
+          <h3>Freshness</h3>
+          <p>Answers are as of the latest finalized block, about 13 minutes behind a block explorer — deliberately, because finalized blocks do not reorganise.</p>
+        </div>
+        <div class="trust-card">
+          <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
+          <img class="tc-icon" src="./assets/illustrations/icon-browser.svg" width="48" height="48" alt="">
+          <h3>This page is not the PIR origin</h3>
+          <p>risepir.org is static, carries no cryptographic client, and makes no PIR queries — it sits outside the trust boundary above. It is hosted on Cloudflare Pages, so Cloudflare terminates TLS for it and injects its own analytics script (<code>cloudflareinsights.com</code>) at the edge — not in this page's source, and not something it asks for. <code>demo.risepir.org</code> is served directly, with no proxy in the path that delivers the cryptographic client.</p>
+        </div>
+      </div>
+
+      <div class="trust-note">The operator is assumed honest-but-curious: it follows the protocol and cannot learn your address, but a dishonest operator could serve a wrong balance — see the <a href="https://github.com/orochi-network/private-eth-getbalance/blob/main/docs/threat-model.md">threat model</a>.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 07 PAPER & CODE -->
+  <section class="section section-pad hairline-top" id="paper">
+    <div class="container">
+      <div class="section-num">07 · Paper &amp; code</div>
+      <div class="section-head">
+        <h2>Read the paper. Run the code.</h2>
+      </div>
+      <div class="paper-grid">
+        <div class="paper-card">
+          <div class="pc-label eyebrow">Paper</div>
+          <h3>Incremental Keyword Private Information Retrieval from d-ary Segmented Cuckoo Filters</h3>
+          <div class="pc-meta">Bao Ninh · CANS 2026 — International Conference on Cryptology and Network Security</div>
+          <blockquote>“…the first preprocessing keyword private information retrieval (PIR) scheme that absorbs insert, update, and delete on its key-value store at a cost proportional to the number of mutations alone.”</blockquote>
+          <!-- TODO: add DOI and PDF link once the proceedings are published -->
+          <p class="pc-note">Accepted for publication; DOI and PDF on release.</p>
+        </div>
+        <div class="paper-card">
+          <div class="pc-label eyebrow">Code</div>
+          <h3>github.com/orochi-network/private-eth-getbalance</h3>
+          <div class="pc-meta">Apache-2.0</div>
+          <p class="pc-desc">Rust workspace: PIR server and verified store, WebAssembly and CLI clients, mainnet feed, JSON-RPC front end, conformance harness.</p>
+          <div class="pc-cta"><a class="btn btn-secondary" href="https://github.com/orochi-network/private-eth-getbalance">View on GitHub →</a></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ============================================================ CTA BANNER -->
+  <section class="cta-banner">
+    <img class="banner-pattern" src="./assets/illustrations/banner-pattern.svg" alt="">
+    <div class="container">
+      <div class="banner-headline">
+        <img class="banner-mark" src="./assets/risepir-mark-mono-white.svg" width="36" height="36" alt="">
+        <h2>Ask the chain without<br class="banner-break"> telling it who's asking.</h2>
+      </div>
+      <a class="btn btn-outline-white" href="#demo">Open the live demo →</a>
+    </div>
+  </section>
+
+  <!-- ============================================================ FOOTER -->
+  <footer class="footer dotted">
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <div class="nav-lockup">
+            <img class="mark" src="./assets/risepir-mark.svg" width="32" height="32" alt="RisePIR">
+            <span class="wordmark">RisePIR</span>
+          </div>
+          <p>Private eth_getBalance over RisePIR — a research prototype by Orochi Network.</p>
+          <div class="footer-social">
+            <a href="https://github.com/orochi-network/private-eth-getbalance"><img src="./assets/brand/footer-social-github.svg" width="18" height="18" alt="GitHub"></a>
+            <a href="https://x.com/OrochiNetwork"><img src="./assets/brand/footer-social-x.svg" width="18" height="18" alt="X"></a>
+          </div>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul>
+            <li><a href="#demo">Live demo</a></li>
+            <li><a href="https://demo.risepir.org/status">Status</a></li>
+            <li><a href="#how">How it works</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Research</h4>
+          <ul>
+            <li><a href="#paper">Paper</a></li>
+            <li><a href="#numbers">Numbers</a></li>
+            <li><a href="https://github.com/orochi-network/private-eth-getbalance/blob/main/docs/threat-model.md">Threat model</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Orochi Network</h4>
+          <ul>
+            <li><a href="https://orochi.network">orochi.network</a></li>
+            <li><a href="https://github.com/orochi-network/zkDatabase">zkDatabase</a></li>
+            <li><a href="https://github.com/orochi-network">GitHub</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">© 2026 Orochi Network · Apache-2.0 · The live instance runs during demos and on request.</div>
+    </div>
+  </footer>
+
+</div>
 </body>
 </html>

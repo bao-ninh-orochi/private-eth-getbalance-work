@@ -663,12 +663,15 @@ summary::-webkit-details-marker { display: none; }
    the 36px mark, gaps and a ~215px button, so between 721px (below is
    already stacked/wrapped by the mobile block) and 1093px the headline
    runs under the button rather than just clipping — an outright collision,
-   not just visual clipping by the section's overflow: hidden. Measured
-   with a Range over the headline's text and an intersection test against
-   the button's rect (getBoundingClientRect on the flex item alone isn't
-   enough, since the text can render narrower than its box). Let it wrap
-   there instead. */
-@media (max-width: 1093px) {
+   not just visual clipping by the section's overflow: hidden. Above that,
+   up to 1125px, it clears the button but by less than a comfortable 32px
+   — the text ends ~1-31px away, reading as cramped rather than collided.
+   Measured with a Range over the headline's text against the button's
+   rect (getBoundingClientRect on the flex item alone isn't enough, since
+   the text can render narrower than its box): the gap crosses 32px going
+   from 1125px (31.6px) to 1126px (32.6px). Wrap up to and including
+   1126px, so the closest gap at any wider width is >= 32px. */
+@media (max-width: 1126px) {
   .cta-banner h2 { white-space: normal; }
   .banner-break { display: inline; }
 }

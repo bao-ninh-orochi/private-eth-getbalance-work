@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 280" fill="none">
+  <defs>
+    <linearGradient id="tilePale" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#FFBAA4"/>
+    <stop offset="1" stop-color="#FFFFFF"/>
+  </linearGradient>
+    
+  </defs>
+  <rect x="-30.00" y="-30.00" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="-13.13" y="-17.28" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="3.60" y="-4.39" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="20.50" y="8.29" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="37.70" y="20.55" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="55.42" y="32.04" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="74.12" y="41.82" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="94.46" y="47.35" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="115.48" y="49.41" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="136.45" y="51.84" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="156.51" y="58.27" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="174.83" y="68.77" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="192.10" y="80.92" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="208.68" y="94.01" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="224.76" y="107.71" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="240.48" y="121.82" width="46" height="46" fill="#FF4608" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="255.96" y="136.19" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="271.03" y="150.99" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="285.23" y="166.63" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="298.87" y="182.76" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="312.34" y="199.03" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="326.06" y="215.09" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="340.51" y="230.50" width="46" height="46" fill="#FF4608" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="355.81" y="245.06" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="371.58" y="259.11" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="387.63" y="272.85" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="403.83" y="286.40" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+<rect x="420.00" y="300.00" width="46" height="46" fill="url(#tilePale)" stroke="#E03C06" stroke-width="1" stroke-linejoin="round"/>
+</svg>

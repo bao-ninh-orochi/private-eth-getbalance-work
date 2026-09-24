@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="RisePIR">
   <defs>
-    <linearGradient id="fav-scale" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="rp-scale" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#FFBAA4"/>
       <stop offset="1" stop-color="#FFFFFF"/>
     </linearGradient>
   </defs>
   <!-- three rising scales of the Orochi ribbon; the top scale is solid brand orange: the patch -->
-  <rect x="1" y="15" width="14" height="14" fill="url(#fav-scale)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round"/>
-  <rect x="8" y="8" width="14" height="14" fill="url(#fav-scale)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round"/>
+  <rect x="1" y="15" width="14" height="14" fill="url(#rp-scale)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round"/>
+  <rect x="8" y="8" width="14" height="14" fill="url(#rp-scale)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round"/>
   <rect x="15" y="1" width="14" height="14" fill="#FF4608" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round"/>
 </svg>

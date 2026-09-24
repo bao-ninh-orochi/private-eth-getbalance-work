@@ -277,12 +277,27 @@ summary::-webkit-details-marker { display: none; }
 .hero-actions { display: flex; align-items: center; gap: var(--s-4); margin-top: var(--s-7); }
 .hero-fine { margin-top: var(--s-5); font: var(--t-small); color: var(--ink-50); }
 
-/* Bleed the art past the content box on wide viewports (up to 64px, the
-   original design amount), but clamp it to the side margin actually
-   available so it never pushes the art past the viewport edge — the margin
-   outside the frame-inset, (100vw - content)/2, plus the frame-inset itself,
-   floored at 0 once there is no room left. */
-.hero-art { position: relative; margin-right: calc(-1 * clamp(0px, (100vw - var(--content)) / 2 + var(--frame-inset), 64px)); }
+/* Bleed the art past the content box, but only as far as the side margin
+   actually available — and in fixed steps, not a `100vw`-based formula.
+   `100vw` is the viewport width assuming no scrollbar; on Chrome/Firefox/
+   Edge on Windows and Linux, a classic (space-taking) scrollbar makes it
+   ~15px wider than the actual layout width the page has to work with
+   (`document.documentElement.clientWidth`), so a clamp computed from it
+   over-bleeds by half that in the band where it isn't already saturated —
+   a real, if small, horizontal overflow a headless-Chromium harness can't
+   see (its scrollbars take no layout space) and a `scrollWidth <=
+   innerWidth` check can't catch either (innerWidth has the same gutter
+   baked in). Below the 1280px step, bleed exactly --frame-inset (40px) —
+   the room available at the narrowest two-column width (1120px) is
+   exactly that, with no `vw` term to be thrown off by a scrollbar. From
+   1280px the full room for the original 64px bleed exists with slack
+   left over even under a scrollbar (64px first fits at a 1248px content
+   width; this media query, keyed to the viewport width a scrollbar
+   doesn't shrink, can't fire before 1263px). */
+.hero-art { position: relative; margin-right: calc(-1 * var(--frame-inset)); }
+@media (min-width: 1280px) {
+  .hero-art { margin-right: -64px; }
+}
 .hero-art img, .hero-art svg { width: 100%; height: auto; }
 .hero-callout {
   position: absolute;
@@ -678,25 +693,34 @@ summary::-webkit-details-marker { display: none; }
 
 /* Hero: keep the two-column layout, both callouts included, as long as the
    art column (600px copy + 40px gap, the rest 1fr) is at least ~400px wide
-   — measured: the track crosses 400px right at a 1120px viewport, exactly
-   where the clamped bleed above also reaches 0, so the transition to
-   stacked is smooth. Below that it stacks under the copy, as at mobile. */
+   — measured: the track crosses 400px right at a 1120px viewport. Below
+   that it stacks under the copy, as at mobile (the 40px bleed above is
+   irrelevant here either way, since the stacked art's own width/margin
+   rule below overrides margin-right). */
 @media (max-width: 1119px) {
   .hero .container { grid-template-columns: 1fr; }
   .hero-art { width: 420px; max-width: 100%; margin: 0 auto; }
   .hero-callout { display: none; }
 }
 
-/* Still two-column here (>= 1120px, above), but with the bleed clamped down
-   the art is narrower than its full 544px width, so hero-callout-2's
-   left: 72.2% / top: 53.6% anchor (tuned for the full-width art at
-   >= 1360px) no longer lands in clear space: at this narrower width that
-   point sits over the ribbon's rising tiles, so the label paints across
-   tile strokes. The ribbon climbs bottom-left -> top-right, so its
-   lower-right is empty (dotted ground, no tiles) at every width — anchor
-   the label there instead, in this band only. 1440 and other widths
-   >= 1360px keep the original anchor, unchanged. */
-@media (min-width: 1120px) and (max-width: 1359px) {
+/* Still two-column here (1120px and up, above). The art itself reaches its
+   full 544px design width at 1280px (480px track, capped once the content
+   box hits its own 1200px max, plus the full 64px bleed step). That is
+   NOT, on its own, where the original hero-callout-2 anchor
+   (left: 72.2% / top: 53.6%) stops overflowing the viewport, though —
+   measured directly (not inferred from the art's width): the callout's
+   own box extends past the art's right edge by more than the page's
+   surrounding margin provides until a 1357px viewport, so the original
+   anchor keeps overflowing by a shrinking amount all the way from 1280px
+   (39px over) down to 1px at 1356px, reaching 0 only at 1357px. Below
+   1280px it's also the wrong place regardless of overflow: at that
+   narrower art width the same anchor point sits over the ribbon's rising
+   tiles instead of clear ground, painting the label across tile strokes.
+   Anchor the label at the ribbon's empty lower-right — it climbs
+   bottom-left -> top-right, so that corner is dotted ground at every
+   width — for the whole 1120-1356px span. 1357px and up (1366 and 1440
+   included) keep the original design anchor, unchanged. */
+@media (min-width: 1120px) and (max-width: 1356px) {
   .hero-callout-2 { left: auto; top: auto; right: 4%; bottom: 6%; transform: none; }
 }
 

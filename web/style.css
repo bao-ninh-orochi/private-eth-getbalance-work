@@ -218,8 +218,8 @@ button {
 .nav-inner {
   height: var(--nav-h);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: var(--s-5);
 }
 
@@ -290,6 +290,12 @@ button {
   white-space: nowrap;
   flex: none;
   font-variant-numeric: tabular-nums;
+  /* Pushes itself (and .nav-right right after it) to the far right,
+     .nav-inner now being a plain flex-start row of three direct
+     children (brand-lockup, this, nav-right) instead of a two-item
+     `justify-content: space-between` — needed so the <=560px rule below
+     can drop this to its own row without the two links coming with it. */
+  margin-left: auto;
 }
 
 .live-dot {
@@ -1477,7 +1483,44 @@ main {
     flex-direction: column;
     align-items: flex-start;
   }
+}
 
+/* ── nav wrap: the live pill gets its own row ─────────────────────────
+   `#live-text` is one string set by app.js ("following · block N"), so
+   CSS alone cannot hide part of it — the fix is room, not truncation.
+   On mainnet that string runs to "following · block 26,050,123" or
+   "stalled at block 26,050,123", ~8 characters wider than the mock's
+   2-digit block number, and narrow enough viewports were letting the
+   pill overlap the wordmark. Below this, the pill drops to its own row,
+   left-aligned, rather than staying beside the brand mark. ────────── */
+
+@media (max-width: 560px) {
+  .nav-inner {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .brand-lockup {
+    order: 1;
+  }
+  .nav-right {
+    order: 2;
+    margin-left: auto;
+  }
+  /* A zero-height, full-width flex item forces everything after it onto
+     a new line, without the live pill itself having to stretch to that
+     width — its own box stays content-sized (flex-basis: auto below). */
+  .nav-inner::after {
+    content: "";
+    display: block;
+    flex-basis: 100%;
+    height: 0;
+    order: 3;
+  }
+  .live-pill {
+    order: 4;
+    flex-basis: auto;
+    margin-left: 0;
+  }
 }
 
 /* ── motion ───────────────────────────────────────────────────────── */

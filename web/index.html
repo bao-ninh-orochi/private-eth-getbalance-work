@@ -36,11 +36,16 @@
               <span class="brand-name">RisePIR</span>
               <span class="tag-live">LIVE DEMO</span>
             </a>
+            <!-- A direct sibling of .brand-lockup and .nav-right (not
+                 nested inside .nav-right) so it can drop to its own row
+                 at narrow widths without the two links coming with it —
+                 see .nav-inner's <=560px rule. app.js only ever looks it
+                 up by id, so moving it here needs no script change. -->
+            <div id="live-pill" class="live-pill hidden">
+              <span class="live-dot" aria-hidden="true"></span>
+              <span id="live-text"></span>
+            </div>
             <nav class="nav-right">
-              <div id="live-pill" class="live-pill hidden">
-                <span class="live-dot" aria-hidden="true"></span>
-                <span id="live-text"></span>
-              </div>
               <a class="nav-link" href="/status">Status</a>
               <a class="nav-link nav-link-ext" href="https://risepir.org">About RisePIR <span class="mono" aria-hidden="true">↗</span></a>
             </nav>

@@ -277,7 +277,27 @@ summary::-webkit-details-marker { display: none; }
 .hero-actions { display: flex; align-items: center; gap: var(--s-4); margin-top: var(--s-7); }
 .hero-fine { margin-top: var(--s-5); font: var(--t-small); color: var(--ink-50); }
 
-.hero-art { position: relative; margin-right: -64px; }
+/* Bleed the art past the content box, but only as far as the side margin
+   actually available — and in fixed steps, not a `100vw`-based formula.
+   `100vw` is the viewport width assuming no scrollbar; on Chrome/Firefox/
+   Edge on Windows and Linux, a classic (space-taking) scrollbar makes it
+   ~15px wider than the actual layout width the page has to work with
+   (`document.documentElement.clientWidth`), so a clamp computed from it
+   over-bleeds by half that in the band where it isn't already saturated —
+   a real, if small, horizontal overflow a headless-Chromium harness can't
+   see (its scrollbars take no layout space) and a `scrollWidth <=
+   innerWidth` check can't catch either (innerWidth has the same gutter
+   baked in). Below the 1280px step, bleed exactly --frame-inset (40px) —
+   the room available at the narrowest two-column width (1120px) is
+   exactly that, with no `vw` term to be thrown off by a scrollbar. From
+   1280px the full room for the original 64px bleed exists with slack
+   left over even under a scrollbar (64px first fits at a 1248px content
+   width; this media query, keyed to the viewport width a scrollbar
+   doesn't shrink, can't fire before 1263px). */
+.hero-art { position: relative; margin-right: calc(-1 * var(--frame-inset)); }
+@media (min-width: 1280px) {
+  .hero-art { margin-right: -64px; }
+}
 .hero-art img, .hero-art svg { width: 100%; height: auto; }
 .hero-callout {
   position: absolute;
@@ -623,42 +643,95 @@ summary::-webkit-details-marker { display: none; }
 .error-copy { font: var(--t-lead); color: var(--ink-70); margin-top: var(--s-4); max-width: 42rem; }
 .error-actions { margin-top: var(--s-6); }
 
-/* ================================================================== INTERMEDIATE (721–1360) ====
+/* ================================================================== INTERMEDIATE (721–1359) ====
    Tablet / half-screen-laptop band: the desktop grid (sized for the 1120px
    content box, --content 1200px minus 2 * --frame-inset) starts breaking
-   well above the 720px mobile breakpoint. Measured empirically (Playwright,
-   real font metrics): the hero illustration's -64px bleed margin alone
-   overflows the viewport everywhere from 721px up to ~1359px — the 600px/1fr
-   hero grid only has room to absorb that bleed once the centred 1200px
-   content box gets its own side margins, around a 1360px viewport — and the
-   4-up numbers/stat grids independently overflow below ~1230px. This band
-   covers the whole broken range: collapses the two 4-up grids to 2-up, lets
-   the CTA banner headline wrap instead of clipping, stacks the hero
-   illustration and the architecture diagram the way mobile already does
-   (verified not to overflow there), and keeps stat values from spilling
-   mid-digit-group. */
-@media (max-width: 1360px) {
-  /* numbers grid: 4-up -> 2-up, and stop mid-number wraps */
+   well above the 720px mobile breakpoint. The old approach was one blanket
+   step at 1360px, which also changed the approved design at 1280/1366 —
+   the common laptop widths — where the two-column hero and the 4-up grids
+   actually fit; the only real problem there was the hero art's fixed
+   -64px bleed (fixed above, clamped to the side margin actually
+   available). Each component below now collapses at its own measured
+   threshold instead. */
+
+/* Numbers grid + stat strip: 4-up -> 2-up. Measured with Playwright using a
+   Range over the actual text node (getBoundingClientRect on a nowrap block
+   reports the box's layout width, not the painted text extent, which
+   under-reports the real overflow): the stat strip's 36px "204,714,034"
+   (forced nowrap) stops crossing into the next cell at a 1124px viewport;
+   the numbers grid's 34px copy (no forced nowrap until this breakpoint)
+   wraps to two lines below a 1175px viewport, the later and thus binding
+   threshold. Both grids switch together at that point, with a small
+   margin: 2-up at 1179px and below, 4-up at 1180px and up — unchanged at
+   1280/1366/1440. */
+@media (max-width: 1179px) {
   .numbers-grid { grid-template-columns: repeat(2, 1fr); }
   .numbers-tile .v { white-space: nowrap; }
 
-  /* stat strip: 4-up -> 2-up, same border pattern as the numbers grid */
   .stat-strip .container { grid-template-columns: repeat(2, 1fr); }
   .stat-cell:nth-child(1), .stat-cell:nth-child(3) { border-left: none; }
   .stat-cell:nth-child(2), .stat-cell:nth-child(4) { border-left: 1px solid var(--line); }
   .stat-cell:nth-child(1), .stat-cell:nth-child(2) { border-bottom: 1px solid var(--line); }
+}
 
-  /* CTA banner headline: wrap instead of being clipped by overflow: hidden */
+/* CTA banner headline: the single-line nowrap headline is ~830px wide, plus
+   the 36px mark, gaps and a ~215px button, so between 721px (below is
+   already stacked/wrapped by the mobile block) and 1093px the headline
+   runs under the button rather than just clipping — an outright collision,
+   not just visual clipping by the section's overflow: hidden. Above that,
+   up to 1125px, it clears the button but by less than a comfortable 32px
+   — the text ends ~1-31px away, reading as cramped rather than collided.
+   Measured with a Range over the headline's text against the button's
+   rect (getBoundingClientRect on the flex item alone isn't enough, since
+   the text can render narrower than its box): the gap crosses 32px going
+   from 1125px (31.6px) to 1126px (32.6px). Wrap up to and including
+   1126px, so the closest gap at any wider width is >= 32px. */
+@media (max-width: 1126px) {
   .cta-banner h2 { white-space: normal; }
   .banner-break { display: inline; }
+}
 
-  /* hero: stack the illustration under the copy instead of squeezing it to a sliver */
+/* Hero: keep the two-column layout, both callouts included, as long as the
+   art column (600px copy + 40px gap, the rest 1fr) is at least ~400px wide
+   — measured: the track crosses 400px right at a 1120px viewport. Below
+   that it stacks under the copy, as at mobile (the 40px bleed above is
+   irrelevant here either way, since the stacked art's own width/margin
+   rule below overrides margin-right). */
+@media (max-width: 1119px) {
   .hero .container { grid-template-columns: 1fr; }
   .hero-art { width: 420px; max-width: 100%; margin: 0 auto; }
   .hero-callout { display: none; }
+}
 
-  /* diagram: stack vertically, exactly as at mobile, so the nowrap arrow
-     labels can't crush the boxes between them */
+/* Still two-column here (1120px and up, above). The art itself reaches its
+   full 544px design width at 1280px (480px track, capped once the content
+   box hits its own 1200px max, plus the full 64px bleed step). That is
+   NOT, on its own, where the original hero-callout-2 anchor
+   (left: 72.2% / top: 53.6%) stops overflowing the viewport, though —
+   measured directly (not inferred from the art's width): the callout's
+   own box extends past the art's right edge by more than the page's
+   surrounding margin provides until a 1357px viewport, so the original
+   anchor keeps overflowing by a shrinking amount all the way from 1280px
+   (39px over) down to 1px at 1356px, reaching 0 only at 1357px. Below
+   1280px it's also the wrong place regardless of overflow: at that
+   narrower art width the same anchor point sits over the ribbon's rising
+   tiles instead of clear ground, painting the label across tile strokes.
+   Anchor the label at the ribbon's empty lower-right — it climbs
+   bottom-left -> top-right, so that corner is dotted ground at every
+   width — for the whole 1120-1356px span. 1357px and up (1366 and 1440
+   included) keep the original design anchor, unchanged. */
+@media (min-width: 1120px) and (max-width: 1356px) {
+  .hero-callout-2 { left: auto; top: auto; right: 4%; bottom: 6%; transform: none; }
+}
+
+/* Architecture diagram: the two fixed-content "auto" arrow-label columns
+   (~223px and ~130px, sized to their nowrap text) don't shrink with the
+   viewport, so the two flexible 1fr boxes between them absorb the whole
+   squeeze — measured crushed to an uncomfortable ~150px (icon + heading,
+   almost no room for the paragraph) by an 860px viewport. Stack vertically
+   there, as at mobile, so the arrow labels wrap instead of crushing the
+   boxes. */
+@media (max-width: 899px) {
   .diagram { grid-template-columns: 1fr; }
   .diagram-box { min-height: 0; }
   .diagram-arrows { flex-direction: column; padding: var(--s-3) 0; gap: var(--s-2); min-width: 0; }

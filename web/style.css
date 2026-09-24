@@ -402,7 +402,6 @@ main {
   color: var(--err);
   font: var(--t-small);
   margin: 0 0 var(--s-6);
-  overflow-wrap: anywhere;
 }
 
 /* Two arrangements of the same five sections, switched by the `is-boot`
@@ -443,6 +442,10 @@ main {
   border: 1px solid var(--line);
   border-radius: var(--r-card);
   padding: var(--s-6);
+  /* Every card is a query container, so .rrow's container query (below)
+     reacts to whichever card actually holds it, at whatever width the
+     grid above renders that card — not the viewport. */
+  container-type: inline-size;
 }
 
 .panel-title {
@@ -668,6 +671,10 @@ main {
   box-shadow: var(--shadow-lift);
   padding: var(--s-7) var(--s-7) var(--s-6);
   overflow: hidden;
+  /* So .balance-num's font-size (below) can be sized to this card's real
+     rendered width, not the viewport's — a two-column desktop layout can
+     squeeze this card far narrower than a vw-based size would assume. */
+  container-type: inline-size;
 }
 
 .answer-scales {
@@ -690,12 +697,20 @@ main {
   flex-wrap: wrap;
   gap: 12px;
   margin: 0 0 10px;
+}
+
+.balance-num {
   font-family: var(--font-mono);
   font-weight: 500;
   line-height: 1.1;
-  font-size: clamp(22px, 6vw, 48px);
   color: var(--ink);
-  overflow-wrap: anywhere;
+  /* Container-query sized (cqi = 1% of .answer-card's inline size), so it
+     fits the longest realistic balance at every column width this page
+     renders. The digits are one unbroken token and never split — if they
+     ever outgrow the card anyway, that is overflow, not a mid-number
+     break; "ETH" is a separate flex item free to wrap to its own line. */
+  font-size: clamp(18px, 6.2cqi, 48px);
+  white-space: nowrap;
 }
 
 .balance-unit {
@@ -708,7 +723,6 @@ main {
   font-size: 14px;
   color: var(--ink-70);
   margin: 0 0 var(--s-4);
-  overflow-wrap: anywhere;
 }
 
 .asof {
@@ -931,9 +945,32 @@ main {
   color: var(--ink);
   text-align: right;
   margin-left: auto;
-  overflow-wrap: anywhere;
   max-width: 100%;
   font-variant-numeric: tabular-nums;
+}
+
+/* Rows adapt to whichever card actually holds them, not the viewport.
+   375px sits between the narrowest desktop two-column card in this
+   design (391px at 1180px viewport — one line, values wrap inside their
+   own cell, unchanged from round 2 at 1440px too) and a true narrow
+   single-column card (358px at the 390px mobile viewport) — below it,
+   stack label above value exactly like that mobile layout, which is
+   itself just a narrow container. */
+@container (max-width: 375px) {
+  .rrow {
+    flex-direction: column;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 10px 0;
+  }
+  .leader {
+    display: none;
+  }
+  .rv {
+    text-align: left;
+    margin-left: 0;
+  }
 }
 
 .rrow.is-hero {
@@ -981,6 +1018,7 @@ main {
   padding: 4px 8px;
   border-radius: var(--r-chip);
   vertical-align: baseline;
+  white-space: nowrap;
 }
 
 .tag-ok {
@@ -1299,6 +1337,28 @@ main {
   color: var(--brand-ink);
 }
 
+/* ── the two-column squeeze (measured: the receipt column is unusable
+   below ~1100px of frame content width) ─────────────────────────────── */
+
+@media (max-width: 1100px) {
+  /* Below this the 440fr receipt column gets too narrow to hold a row on
+     one line even with the container-query stacking below — collapse to
+     one column, same top-to-bottom order as the ≤720px mobile layout. */
+  .grid-main {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "q"
+      "s"
+      "w";
+  }
+  .grid-main.is-boot {
+    grid-template-areas:
+      "q"
+      "w"
+      "s";
+  }
+}
+
 /* ── small screens ────────────────────────────────────────────────── */
 
 @media (max-width: 720px) {
@@ -1366,19 +1426,6 @@ main {
     align-self: center;
   }
 
-  .grid-main {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "q"
-      "s"
-      "w";
-  }
-  .grid-main.is-boot {
-    grid-template-areas:
-      "q"
-      "w"
-      "s";
-  }
   .card {
     padding: var(--s-5);
   }
@@ -1431,24 +1478,6 @@ main {
     align-items: flex-start;
   }
 
-  .rrow {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 3px;
-    padding: 10px 0;
-  }
-  .leader {
-    display: none;
-  }
-  .rv {
-    text-align: left;
-    margin-left: 0;
-  }
-  .rrow.is-hero,
-  .rrow.is-error,
-  .rrow.is-warn {
-    padding: 12px;
-  }
 }
 
 /* ── motion ───────────────────────────────────────────────────────── */

@@ -78,8 +78,8 @@
       </div>
       <div class="hero-art">
         <img src="./assets/illustrations/hero-patched-ribbon.svg" width="720" height="560" alt="A ribbon of database scales, mostly pale, with a few solid-orange scales showing the block just patched">
-        <div class="hero-callout hero-callout-1"><span>≈433 accounts change per block</span><span class="leader"></span></div>
-        <div class="hero-callout hero-callout-2"><span class="leader"></span><span>patched in place · 5.6 ms</span></div>
+        <div class="hero-callout hero-callout-1"><span>≈433&nbsp;accounts change per block</span><span class="leader"></span></div>
+        <div class="hero-callout hero-callout-2"><span class="leader"></span><span>patched in place · 5.6&nbsp;ms</span></div>
       </div>
     </div>
   </section>
@@ -100,12 +100,12 @@
     <div class="container">
       <div class="section-num">01 · Patched in place</div>
       <div class="section-head">
-        <h2>Ethereum changes every 12 seconds. RisePIR keeps up by patching, not rebuilding.</h2>
+        <h2>Ethereum changes every 12&nbsp;seconds. RisePIR keeps up by patching, not rebuilding.</h2>
         <p class="lede">Fast private lookups need a preprocessed hint of the whole database. In earlier keyword PIR, changing one account meant rebuilding it. RisePIR's Segmented Cuckoo Filter turns each change into a sparse, position-predictable patch — so a block's changes land in milliseconds.</p>
       </div>
 
       <div class="chart-card">
-        <div class="chart-title">One block's changes, two ways · measured <span class="nowrap">2026-09-03</span>, 16 threads</div>
+        <div class="chart-title">One block's changes, two ways · measured <span class="nowrap">2026-09-03</span>, 16&nbsp;threads</div>
 
         <div class="chart-blockline">
           <div class="spacer"></div>
@@ -114,15 +114,15 @@
             <span class="blocklabel pos-2">block N+1</span>
             <span class="blocklabel pos-3">block N+2</span>
             <i class="pos-0"></i><i class="pos-33"></i><i class="pos-66"></i><i class="pos-100"></i>
-            <span class="ticklabel pos-0">0 s</span>
-            <span class="ticklabel pos-33">12 s</span>
-            <span class="ticklabel pos-66">24 s</span>
-            <span class="ticklabel pos-100">36 s</span>
+            <span class="ticklabel pos-0">0&nbsp;s</span>
+            <span class="ticklabel pos-33">12&nbsp;s</span>
+            <span class="ticklabel pos-66">24&nbsp;s</span>
+            <span class="ticklabel pos-100">36&nbsp;s</span>
           </div>
         </div>
 
         <div class="chart-row">
-          <div class="row-label">Patch in place — 5.6 ms</div>
+          <div class="row-label">Patch in place — 5.6&nbsp;ms</div>
           <div class="chart-row-cell">
             <div class="chart-track">
               <div class="bar-patch"></div>
@@ -132,7 +132,7 @@
         </div>
 
         <div class="chart-row rebuild-row">
-          <div class="row-label">Full rebuild — 29.2 s</div>
+          <div class="row-label">Full rebuild — 29.2&nbsp;s</div>
           <div class="chart-row-cell">
             <div class="chart-track">
               <div class="bar-rebuild"></div>
@@ -144,7 +144,7 @@
         <div class="fact-cards">
           <div class="fact-card"><div class="fc-num num">5,200×</div><div class="fc-label">cheaper than a rebuild</div></div>
           <div class="fact-card"><div class="fc-num num">≈433</div><div class="fc-label">accounts changed per block</div></div>
-          <div class="fact-card"><div class="fc-num num">≈10.8 kB</div><div class="fc-label">public delta per block</div></div>
+          <div class="fact-card"><div class="fc-num num">≈10.8&nbsp;kB</div><div class="fc-label">public delta per block</div></div>
         </div>
       </div>
 
@@ -169,21 +169,21 @@
           <img class="step-icon" src="./assets/illustrations/icon-hint.svg" width="48" height="48" alt="">
           <div class="step-no">01</div>
           <h3>Download the hint, once</h3>
-          <p>Your browser fetches a 553.8 MB preprocessed hint. It is identical for every visitor, so holding it says nothing about you.</p>
+          <p>Your browser fetches a 553.8&nbsp;MB preprocessed hint. It is identical for every visitor, so holding it says nothing about you.</p>
         </div>
         <div class="step-card">
           <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
           <img class="step-icon" src="./assets/illustrations/icon-query.svg" width="48" height="48" alt="">
           <div class="step-no">02</div>
           <h3>Ask in ciphertext</h3>
-          <p>The address is encrypted in your browser into a ≈435 kB LWE query. The server computes over every one of its 204.7 million accounts, so it cannot tell which one you meant.</p>
+          <p>The address is encrypted in your browser into a ≈435&nbsp;kB LWE query. The server computes over every one of its 204.7&nbsp;million accounts, so it cannot tell which one you meant.</p>
         </div>
         <div class="step-card">
           <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
           <img class="step-icon" src="./assets/illustrations/icon-patch.svg" width="48" height="48" alt="">
           <div class="step-no">03</div>
           <h3>Stay current, block by block</h3>
-          <p>Each finalized block's changes arrive as a ≈10.8 kB public delta that every client downloads in full, so your answer is corrected to the latest finalized block without re-downloading the hint.</p>
+          <p>Each finalized block's changes arrive as a ≈10.8&nbsp;kB public delta that every client downloads in full, so your answer is corrected to the latest finalized block without re-downloading the hint.</p>
         </div>
       </div>
 
@@ -195,9 +195,9 @@
           <p>Builds the LWE query locally.</p>
         </div>
         <div class="diagram-arrows">
-          <div class="arrow-label">query · ≈435 kB ciphertext →</div>
+          <div class="arrow-label">query · ≈435&nbsp;kB ciphertext →</div>
           <div class="arrow-track both"><span class="head head-left"></span><span class="head head-right"></span></div>
-          <div class="arrow-label">← response · ≈434 kB ciphertext</div>
+          <div class="arrow-label">← response · ≈434&nbsp;kB ciphertext</div>
         </div>
         <div class="diagram-box">
           <img class="db-icon" src="./assets/illustrations/icon-server.svg" width="40" height="40" alt="">
@@ -211,7 +211,7 @@
         <div class="diagram-box">
           <img class="db-icon" src="./assets/illustrations/icon-chain.svg" width="40" height="40" alt="">
           <h4>Ethereum mainnet</h4>
-          <p>Followed at finalized, ≈13 min behind the head.</p>
+          <p>Followed at finalized, ≈13&nbsp;min behind the head.</p>
         </div>
       </div>
     </div>
@@ -253,7 +253,7 @@
           <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
           <img class="step-icon" src="./assets/illustrations/icon-clock.svg" width="48" height="48" alt="">
           <h3>Finalized, never reorged</h3>
-          <p>Answers are as of the latest finalized block, about 13 minutes behind the head, so an answer cannot be quietly invalidated.</p>
+          <p>Answers are as of the latest finalized block, about 13&nbsp;minutes behind the head, so an answer cannot be quietly invalidated.</p>
         </div>
 
         <div class="bento-tile">
@@ -282,20 +282,20 @@
       <div class="section-num">04 · Measured, not estimated</div>
       <div class="section-head">
         <h2>The live deployment, in numbers</h2>
-        <p class="lede">One binary, one host, one 3.1-hour window on <span class="nowrap">2026-09-03</span>: 300 private queries and 959 blocks.</p>
+        <p class="lede">One binary, one host, one 3.1-hour window on <span class="nowrap">2026-09-03</span>: 300 private queries and 959&nbsp;blocks.</p>
       </div>
 
       <div class="numbers-grid">
         <div class="numbers-tile"><span class="v num">204,714,034</span><span class="l">accounts served (complete nonzero-balance set)</span></div>
-        <div class="numbers-tile"><span class="v num">0.69 s</span><span class="l">private query, end to end (0.61 s is the server's product)</span></div>
-        <div class="numbers-tile"><span class="v num">5.6 ms</span><span class="l">per-block patch (5.573 ms mean · 4.783 ms p50)</span></div>
+        <div class="numbers-tile"><span class="v num">0.69 s</span><span class="l">private query, end to end (0.61&nbsp;s is the server's product)</span></div>
+        <div class="numbers-tile"><span class="v num">5.6 ms</span><span class="l">per-block patch (5.573&nbsp;ms mean · 4.783&nbsp;ms p50)</span></div>
         <div class="numbers-tile"><span class="v num">553.8 MB</span><span class="l">one-time hint</span></div>
-        <div class="numbers-tile"><span class="v num">435 kB</span><span class="l">query on the wire (response: 434 kB)</span></div>
+        <div class="numbers-tile"><span class="v num">435 kB</span><span class="l">query on the wire (response: 434&nbsp;kB)</span></div>
         <div class="numbers-tile"><span class="v num">23.62 GB</span><span class="l">server database</span></div>
         <div class="numbers-tile"><span class="v num">≈10.8 kB</span><span class="l">public delta per block</span></div>
         <div class="numbers-tile"><span class="v num">≈13 min</span><span class="l">freshness lag (latest finalized block, by design)</span></div>
       </div>
-      <p class="numbers-foot">Measured on <span class="nowrap">2026-09-03</span> on a GCP c3d-highmem-16 (AMD EPYC 9B14, Zen 4, 16 threads); client an AWS r7a.xlarge over the public internet. Source: docs/deployment-numbers.md in the repository.</p>
+      <p class="numbers-foot">Measured on <span class="nowrap">2026-09-03</span> on a GCP c3d-highmem-16 (AMD EPYC 9B14, Zen 4, 16&nbsp;threads); client an AWS r7a.xlarge over the public internet. Source: docs/deployment-numbers.md in the repository.</p>
     </div>
   </section>
 
@@ -376,7 +376,7 @@
           <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">
           <img class="tc-icon" src="./assets/illustrations/icon-clock.svg" width="48" height="48" alt="">
           <h3>Freshness</h3>
-          <p>Answers are as of the latest finalized block, about 13 minutes behind a block explorer — deliberately, because finalized blocks do not reorganise.</p>
+          <p>Answers are as of the latest finalized block, about 13&nbsp;minutes behind a block explorer — deliberately, because finalized blocks do not reorganise.</p>
         </div>
         <div class="trust-card">
           <img class="corner" src="./assets/brand/illustration-ori-paper.svg" width="40" height="40" alt="">

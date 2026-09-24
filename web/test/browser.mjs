@@ -439,7 +439,12 @@ if (expectMock) {
   );
   console.log(`        ${probe} -> ${lookup?.wei}`);
 }
-check("the answer is labelled with the block it is as of", /finalized block \d+/.test(lookup?.asof ?? ""));
+check(
+  "the answer is labelled with the block it is as of",
+  // The block number is digit-grouped for display, like every other block
+  // number on the page (app.js), so this matches "25,892,623" too.
+  /finalized block [\d,]+/.test(lookup?.asof ?? ""),
+);
 check(
   "the wire panel reports LWE ciphertext and no addresses",
   /LWE ciphertext/.test(lookup?.wire ?? "") && /none/i.test(lookup?.wire ?? ""),

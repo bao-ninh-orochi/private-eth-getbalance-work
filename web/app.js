@@ -653,8 +653,11 @@ async function lookup(event) {
 
       const asof = document.createElement("p");
       asof.className = "asof";
+      // Digit-grouped for display only, like every other block number on
+      // the page — web/test/browser.mjs matches this with /finalized
+      // block [\d,]+/, not a bare \d+.
       asof.textContent =
-        `As of finalized block ${result.atBlock}` +
+        `As of finalized block ${result.atBlock.toLocaleString("en-US")}` +
         (result.status === STATUS.ZERO
           ? " — this account is absent from the complete nonzero-balance set, which is exactly a zero balance."
           : ".");

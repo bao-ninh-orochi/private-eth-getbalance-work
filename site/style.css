@@ -119,6 +119,7 @@ code {
 }
 
 .num { font-variant-numeric: lining-nums tabular-nums; }
+.nowrap { white-space: nowrap; }
 
 /* safety: long mono numbers/addresses must never force horizontal overflow */
 .stat-cell .v, .numbers-tile .v, .am-balance, .am-asof, .chart-callout, .arrow-label {
@@ -365,7 +366,7 @@ summary::-webkit-details-marker { display: none; }
 }
 .chart-callout.warn { color: var(--brand-ink); margin-top: var(--s-3); }
 .callout-patch { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); }
-.chart-row-cell { display: flex; flex-direction: column; }
+.chart-row-cell { display: flex; flex-direction: column; min-width: 0; }
 
 .fact-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s-5); margin-top: var(--s-6); }
 .fact-card { background: #fff; border: 1px solid var(--line); padding: var(--s-5); text-align: center; }
@@ -612,7 +613,9 @@ summary::-webkit-details-marker { display: none; }
 .footer-bottom a { color: var(--brand-ink); text-decoration: underline; text-underline-offset: 0.15em; }
 
 /* ---------------------------------------------------------------- 404 page ---- */
-.error-main { min-height: 60vh; display: flex; align-items: center; }
+/* fill the viewport, footer at the bottom, so the page frame lines run edge to edge */
+.error-page .page { min-height: 100vh; display: flex; flex-direction: column; }
+.error-main { flex: 1 0 auto; display: flex; align-items: center; }
 .error-main .container { padding-top: var(--s-9); padding-bottom: var(--s-9); }
 .error-code { font: var(--t-stat); font-size: 72px; color: var(--brand-ink); }
 .error-main h1 { font: var(--t-h2); color: var(--ink); margin-top: var(--s-4); }
@@ -658,7 +661,8 @@ summary::-webkit-details-marker { display: none; }
   .chart-row .row-label { margin-bottom: var(--s-2); }
   .chart-blockline .spacer { display: none; }
   .fact-cards { grid-template-columns: 1fr; }
-  .callout-patch { position: static; margin-top: var(--s-2); }
+  .chart-callout { white-space: normal; }
+  .callout-patch { position: static; margin-top: var(--s-2); margin-left: 20px; }
   .chart-row.rebuild-row { margin-top: var(--s-2); }
 
   /* steps */
@@ -690,6 +694,8 @@ summary::-webkit-details-marker { display: none; }
 
   /* numbers */
   .numbers-grid { grid-template-columns: repeat(2, 1fr); }
+  .numbers-tile { padding: var(--s-5) var(--s-4); }
+  .numbers-tile .v { font: 500 20px/28px var(--font-mono); white-space: nowrap; }
 
   /* try */
   .try-grid { grid-template-columns: 1fr; gap: var(--s-6); }

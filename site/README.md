@@ -1,7 +1,7 @@
 # `site/` — the always-on apex page at <https://risepir.org>
 
 The static page a paper cites. It is deliberately **not** served by the demo
-VM: the VM costs money and is stopped most of the time, so a URL pointing
+VM: the VM costs $8.60/day and is stopped most of the time, so a URL pointing
 at it fails hard on most days. This page is on Cloudflare Pages, is always up,
 and carries the result — numbers, an architecture diagram, and an illustration
 of a lookup — so a reader gets the substance even when the server is off.
@@ -30,8 +30,10 @@ assets/         brand marks (RisePIR mark, Orochi Network symbol) and illustrati
 ```
 
 No build step, no dependencies, no external requests. Every asset — including
-every font and every illustration — is same-origin; the only outbound links
-are to `https://demo.risepir.org` and to `github.com/orochi-network/...`.
+every font and every illustration — is same-origin; outbound links only (the
+demo, GitHub, Orochi Network's site and X — `https://demo.risepir.org`,
+`https://github.com/orochi-network/...`, `https://orochi.network`,
+`https://x.com/OrochiNetwork`), no outbound requests.
 
 ## Deploying
 
@@ -62,9 +64,9 @@ CAA record Cloudflare injects into any zone it serves that has CAA at all
   `docs/deployment-numbers.md` (the 2026-09-03 measurement campaign) and the
   paper (§8, §9) — they were checked against those sources when the page was
   written. A figure that drifts silently is the failure mode this project
-  cares most about. The account count is the value the deployment was last
-  bootstrapped at, and the page says so — the live set grows above it as the
-  chain advances.
+  cares most about. The account count is the 2026-09-03 measurement-campaign
+  figure, and the page dates it — the live set grows above it as the chain
+  advances.
 
 ## Known wart
 

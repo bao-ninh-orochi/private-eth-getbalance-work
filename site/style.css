@@ -659,10 +659,16 @@ summary::-webkit-details-marker { display: none; }
   .stat-cell:nth-child(1), .stat-cell:nth-child(2) { border-bottom: 1px solid var(--line); }
 }
 
-/* CTA banner headline: measured clipping only between 721px and 840px (the
-   button + mark leave too little room for the nowrap headline in that
-   narrow band specifically — not a wider range). Let it wrap there. */
-@media (max-width: 840px) {
+/* CTA banner headline: the single-line nowrap headline is ~830px wide, plus
+   the 36px mark, gaps and a ~215px button, so between 721px (below is
+   already stacked/wrapped by the mobile block) and 1093px the headline
+   runs under the button rather than just clipping — an outright collision,
+   not just visual clipping by the section's overflow: hidden. Measured
+   with a Range over the headline's text and an intersection test against
+   the button's rect (getBoundingClientRect on the flex item alone isn't
+   enough, since the text can render narrower than its box). Let it wrap
+   there instead. */
+@media (max-width: 1093px) {
   .cta-banner h2 { white-space: normal; }
   .banner-break { display: inline; }
 }
@@ -680,12 +686,15 @@ summary::-webkit-details-marker { display: none; }
 
 /* Still two-column here (>= 1120px, above), but with the bleed clamped down
    the art is narrower than its full 544px width, so hero-callout-2's
-   left: 72.2% anchor (tuned for the full-width art at >= 1360px) reads
-   past the art's own right edge and overflows the viewport. Anchor it to
-   the art's right edge instead in this band only — 1440 and other widths
-   >= 1360px are untouched. */
+   left: 72.2% / top: 53.6% anchor (tuned for the full-width art at
+   >= 1360px) no longer lands in clear space: at this narrower width that
+   point sits over the ribbon's rising tiles, so the label paints across
+   tile strokes. The ribbon climbs bottom-left -> top-right, so its
+   lower-right is empty (dotted ground, no tiles) at every width — anchor
+   the label there instead, in this band only. 1440 and other widths
+   >= 1360px keep the original anchor, unchanged. */
 @media (min-width: 1120px) and (max-width: 1359px) {
-  .hero-callout-2 { left: auto; right: 0; }
+  .hero-callout-2 { left: auto; top: auto; right: 4%; bottom: 6%; transform: none; }
 }
 
 /* Architecture diagram: the two fixed-content "auto" arrow-label columns

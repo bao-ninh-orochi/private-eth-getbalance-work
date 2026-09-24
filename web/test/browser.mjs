@@ -245,13 +245,24 @@ await waitForDocument();
 // runs.
 await send("Network.enable");
 const setupGetLog = [];
+// Every request the page makes, for the whole run — the redesign's
+// same-origin check (below) needs the complete list, not just /setup.
+const allRequestUrls = [];
 ws.addEventListener("message", (event) => {
   const msg = JSON.parse(event.data);
   if (msg.method === "Network.requestWillBeSent") {
     const { url, method } = msg.params.request;
+    allRequestUrls.push(url);
     if (method === "GET" && new URL(url).pathname === "/setup") setupGetLog.push(url);
   }
 });
+
+// ── fonts (ADR-0049): self-hosted, same origin, right content-type ────
+for (const route of ["/fonts/raleway.woff2", "/fonts/raleway-italic.woff2", "/fonts/jetbrains-mono.woff2"]) {
+  const resp = await fetch(`${base}${route}`);
+  const ct = resp.headers.get("content-type");
+  check(`GET ${route} is 200 with content-type font/woff2`, resp.status === 200 && ct === "font/woff2", `status ${resp.status}, content-type ${ct}`);
+}
 
 // Which deployment is this? The page adapts to `GET /mode` and so must
 // the gate: in a complete set an absent address is exactly 0, in a partial
@@ -329,6 +340,36 @@ check(
   JSON.stringify(booted.state ?? "").slice(0, 120),
 );
 
+// ── 1.5 self-hosted webfonts actually loaded (ADR-0049) ────────────────
+//
+// `document.fonts.check(...)` returns `true` whenever no matching
+// @font-face needs loading at all — including a family that was never
+// declared — so it proves nothing about whether *our* fonts loaded. The
+// real check: after `document.fonts.ready`, the document's `FontFaceSet`
+// must contain a `loaded` FontFace for each family this redesign declares.
+const fonts = await evaluate(`
+  await document.fonts.ready;
+  return [...document.fonts].map((f) => ({
+    family: f.family.replace(/^["']|["']$/g, ""),
+    style: f.style,
+    status: f.status,
+  }));
+`);
+check(
+  "Raleway (normal) is a loaded FontFace",
+  Array.isArray(fonts) && fonts.some((f) => f.family === "Raleway" && f.style === "normal" && f.status === "loaded"),
+  JSON.stringify(fonts),
+);
+check(
+  "JetBrains Mono is a loaded FontFace",
+  Array.isArray(fonts) && fonts.some((f) => f.family === "JetBrains Mono" && f.status === "loaded"),
+  JSON.stringify(fonts),
+);
+
+// ── 1.6 the back-link the demo never had ───────────────────────────────
+const hasBackLink = await evaluate(`return !!document.querySelector('a[href="https://risepir.org"]');`);
+check("a back-link to https://risepir.org exists", hasBackLink === true);
+
 // ── 2. a real lookup through the real DOM ────────────────────────────
 //
 // The address is typed into the input and the form submitted, exactly as
@@ -398,7 +439,12 @@ if (expectMock) {
   );
   console.log(`        ${probe} -> ${lookup?.wei}`);
 }
-check("the answer is labelled with the block it is as of", /finalized block \d+/.test(lookup?.asof ?? ""));
+check(
+  "the answer is labelled with the block it is as of",
+  // The block number is digit-grouped for display, like every other block
+  // number on the page (app.js), so this matches "25,892,623" too.
+  /finalized block [\d,]+/.test(lookup?.asof ?? ""),
+);
 check(
   "the wire panel reports LWE ciphertext and no addresses",
   /LWE ciphertext/.test(lookup?.wire ?? "") && /none/i.test(lookup?.wire ?? ""),
@@ -406,6 +452,50 @@ check(
 check(
   "real entropy was drawn in the browser",
   /crypto\.getRandomValues/.test(lookup?.wire ?? "") && !/ 0 bytes of crypto/.test(lookup?.wire ?? ""),
+);
+
+// ── 2.5 the "Patched in place" block strip ──────────────────────────
+//
+// Built from session data alone (pinnedBlock, pendingHead, deltaBytes —
+// see app.js's renderBlockStrip). Its folded count must agree with the
+// difference the deployment-state panel already reports, read straight
+// back out of the DOM rather than re-derived here.
+const blockStrip = await evaluate(`
+  function blockNear(label) {
+    const lines = document.getElementById("state-rows").innerText.split("\\n").map((l) => l.trim()).filter(Boolean);
+    const idx = lines.findIndex((l) => l.includes(label));
+    if (idx === -1) return null;
+    for (let i = idx; i < Math.min(idx + 2, lines.length); i++) {
+      const m = lines[i].match(/([\\d,]+)/);
+      if (m) return m[1];
+    }
+    return null;
+  }
+  const strip = document.getElementById("block-strip");
+  // Scoped to the caption specifically, not the whole strip's textContent —
+  // the tile labels ("…009") sit right before it with no separator, so a
+  // whole-strip scan can glue a tile's trailing digits onto the caption's
+  // own number (e.g. "...009" + "9 finalized blocks" -> a bogus "0099").
+  const captionText = strip?.querySelector(".block-strip-caption")?.textContent ?? "";
+  const foldedMatch = captionText.match(/([\\d,]+) finalized block/);
+  return {
+    visible: !!strip && !strip.classList.contains("hidden"),
+    pinned: blockNear("Hint pinned at"),
+    caughtUp: blockNear("Client caught up to"),
+    folded: foldedMatch ? foldedMatch[1] : null,
+    noNewer: /no newer finalized block/.test(captionText),
+  };
+`);
+const stripPinned = blockStrip?.pinned != null ? Number(blockStrip.pinned.replace(/,/g, "")) : null;
+const stripCaughtUp = blockStrip?.caughtUp != null ? Number(blockStrip.caughtUp.replace(/,/g, "")) : null;
+const stripFolded = blockStrip?.folded != null ? Number(blockStrip.folded.replace(/,/g, "")) : null;
+const expectedFolded = stripPinned !== null && stripCaughtUp !== null ? stripCaughtUp - stripPinned : null;
+check("the block strip is visible after a completed lookup", blockStrip?.visible === true, JSON.stringify(blockStrip));
+check(
+  "its folded count matches (client caught up to) minus (hint pinned at)",
+  expectedFolded !== null &&
+    (expectedFolded === 0 ? blockStrip?.noNewer === true : stripFolded === expectedFolded),
+  JSON.stringify({ blockStrip, expectedFolded }),
 );
 
 // The same address queried twice must not produce the same ciphertext —
@@ -646,6 +736,24 @@ check(
   "no uncaught page errors",
   consoleErrors.length === 0,
   consoleErrors.slice(0, 3).join(" | "),
+);
+
+// Every request the page made this run — the self-hosted fonts are the
+// point (ADR-0049): a page that could reach anything else would defeat
+// the same purpose `connect-src 'self'` already serves for the protocol.
+const baseOrigin = new URL(base).origin;
+const offOrigin = allRequestUrls.filter((u) => {
+  if (u.startsWith("data:")) return false;
+  try {
+    return new URL(u).origin !== baseOrigin;
+  } catch {
+    return true;
+  }
+});
+check(
+  "every network request the page made is same-origin",
+  offOrigin.length === 0,
+  offOrigin.slice(0, 5).join(" | "),
 );
 
 console.log(`\n${failures === 0 ? "PASS" : "FAIL"}: ${failures} failing check${failures === 1 ? "" : "s"}\n`);

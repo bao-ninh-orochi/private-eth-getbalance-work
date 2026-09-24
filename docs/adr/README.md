@@ -3953,3 +3953,111 @@ same standard the budget-identity check and the
 report to.
 
 **Status:** decided 2026-09-02 for orochi-network/private-eth-getbalance#4; instrumentation in this PR, the campaign data and report in a follow-up.
+
+### ADR-0049 — Self-hosted webfonts on both origins; no font CDN **[NEW]**
+
+**Context.** The `demo.risepir.org`/`risepir.org` redesign (#12; landing
+#13, demo #14) adopts
+Raleway (prose) and JetBrains Mono (addresses, hex, byte counts, block
+numbers, balances) as its typefaces, in place of the system-font stacks
+every page used until now. Both origins need the same two families; the
+demo in particular has a real constraint the landing page does not: it is
+served under the CSP in `crate::web::CSP` (`crates/risepir-http/src/web.rs`),
+whose `font-src 'self'` already rules out fetching a font from anywhere but
+this same origin.
+
+**Decision.** Self-host subset `woff2` files on both origins rather than
+point either one at a font CDN. On the demo: three files under `web/fonts/`
+(`raleway.woff2`, `raleway-italic.woff2`, `jetbrains-mono.woff2`), served
+through three new fixed `MANIFEST` routes (`/fonts/raleway.woff2`,
+`/fonts/raleway-italic.woff2`, `/fonts/jetbrains-mono.woff2`), exactly like
+every other file `crate::web::WebAssets` serves — read once at startup, no
+path-to-filesystem translation, content type `font/woff2`. `site/fonts/` on
+Cloudflare Pages (#13) carries the landing page's copies, outside this
+crate's manifest entirely.
+
+**Why not Google Fonts or any CDN.**
+
+1. On the demo, `font-src 'self'` would have to be relaxed to `font-src
+   'self' fonts.gstatic.com` (or similar) to let the browser fetch from a
+   CDN at all. The CSP is load-bearing here — ADR-0019 states plainly that
+   the delivered page is *structurally* unable to reach a third party, and
+   `font-src` is one of the directives that makes that true. Loosening it
+   for a stylistic choice, when self-hosting costs nothing but a few
+   checked-in files, is not a trade worth making.
+2. A font CDN request is a third-party request: it hands the visitor's IP
+   address, request timing, and (depending on the CDN) a `Referer` header
+   naming this page to an operator who is not RisePIR and was not asked.
+   That is exactly the kind of request the landing page's own "no external
+   requests" rule (`site/README.md`) and the demo's CSP both exist to rule
+   out — a page whose entire point is caring who sees your requests should
+   not itself be the reason a new party sees one.
+3. Fonts served from another origin can change under a pinned page: a CDN
+   entry can be repointed, versioned differently, or simply go away, and
+   nothing here would notice. A checked-in, hashed, self-hosted file cannot
+   change without a commit to this repository.
+
+**Licensing.** SIL Open Font License 1.1. `web/fonts/OFL-Raleway.txt` and
+`web/fonts/OFL-JetBrainsMono.txt` are committed next to the font files they
+license — but are **not** served: they carry no `MANIFEST` route, so
+`GET /fonts/OFL-Raleway.txt` is a plain `404` like anything else not on the
+list. Nothing on the page ever needs to fetch a license text; it is
+provenance for this repository, not an asset the client loads.
+
+**Provenance.**
+
+- **Raleway** — `Raleway[wght].ttf`, `Raleway-Italic[wght].ttf`, and
+  `OFL.txt`, from `google/fonts` `ofl/raleway/` at commit
+  `0502fee975d3237bc9fa43b4b221c4e01bfdb054` (Version 4.026). Source
+  sha256: `8bbcc3eb8275c388f4bcd998832f8a4b943eadbaf6a595205312774b5951aefb`
+  (upright), `96629caf2202183fab46c70237055a7d67e6a5400b85413d45a77ed6f2a0770c`
+  (italic).
+- **JetBrains Mono** — `fonts/variable/JetBrainsMono[wght].ttf` and
+  `OFL.txt`, from the `JetBrains/JetBrainsMono` GitHub release **v2.304**
+  (the latest stable tag at the time this ADR was written), asset
+  `JetBrainsMono-2.304.zip`. Sha256:
+  `6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf` (zip),
+  `662a196d58f1183bf2d77428b6d5283fe3f45161ab021bea4036bc98e5cac016` (ttf).
+- **Subsetting** — `pyftsubset` (fonttools 4.66.0 + brotli 1.2.0, both from
+  PyPI) with `--unicodes=U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,
+  U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2190-2199,
+  U+2212,U+2215,U+2248,U+25B8,U+25CB,U+2713,U+FEFF,U+FFFD
+  --layout-features='*' --flavor=woff2`, keeping the variable `wght` axis
+  (a single file spans the weight range each `@font-face` in `web/style.css`
+  declares, rather than one file per weight).
+- **Outputs** (checked in at `web/fonts/`, sha256): `raleway.woff2`
+  62,112 B, `73543c3be3a1e52c9c84e73394bc22633e0f9de929f6dea29bc089377bb2e44b`;
+  `raleway-italic.woff2` 66,356 B,
+  `f28a28fc074aee8afe474bfddca51167fd0244819dbdcfbc71dd37a487abd9d2`;
+  `jetbrains-mono.woff2` 48,264 B,
+  `00a7d17cd3bd763413e1ccaeb3fcf0a0dd52231583ab495e306e759dec53a4ef`.
+
+**Cost.** ~177 KB total per origin (three files, once each) — negligible
+next to the 553.82 MB hint the same page downloads once per session
+(`CLAUDE.md`'s "The live GCP deployment"). Served with `Cache-Control:
+no-store`, like every other asset `asset_response` returns: this is a
+deliberate non-special-case, not an oversight — `crate::web`'s own docs
+already explain why nothing under `web/` is cached (the wasm client's
+integrity matters more than a few hundred KB of repeat-visit latency), and
+a font file gets no exception carved out for it. A returning visitor's
+browser re-fetches ~177 KB of font bytes on every load, which is the price
+of that policy applied uniformly rather than a new cost this ADR
+introduces.
+
+**Metrics.** `route_label` (`crates/risepir-http/src/node.rs`) gains the
+three font paths in its existing `"asset"` arm, so `risepir_requests_total`
+counts them alongside every other static file rather than letting them
+fall to `"unmatched"` — the same property `tests/web.rs`'s
+`every_front_end_route_is_counted_in_the_request_metrics` already pins for
+the other eight routes, extended to cover these three (asset count moves
+from five to eight of the manifest's now-eleven routes).
+
+**Consequence.** Adding any file to `web/` still needs a `MANIFEST` route
+and a `route_label` entry — this ADR does not change that rule
+(`crate::web`'s own module docs state it), it is simply the latest thing to
+follow it. A future new asset under `web/` (another font weight, a new
+icon file) budgets for the same two-line change plus a `tests/web.rs`
+assertion, exactly as these three did.
+
+**Status:** decided and shipped 2026-09-24 for
+orochi-network/private-eth-getbalance#14.

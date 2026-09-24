@@ -162,7 +162,7 @@ async function boot() {
       : "downloaded";
   $("ready-note").textContent =
     `Ready in ${secs} s — ${fmtMB(session.traffic.setupBytes)} MB of hint held locally (${source}), ` +
-    `pinned at finalized block ${session.pinnedBlock}.`;
+    `pinned at finalized block ${session.pinnedBlock.toLocaleString("en-US")}.`;
 
   // Populate before revealing: the deployment's mode, head, and freshness
   // are the context an answer has to be read in, so they must never be
@@ -174,6 +174,10 @@ async function boot() {
   $("boot").classList.add("hidden");
   $("query").classList.remove("hidden");
   $("state").classList.remove("hidden");
+  // Layout only: the setup/wire/state arrangement while booting gives way
+  // to the ready arrangement (query+state left, wire right) — a class
+  // toggle `style.css` reads, nothing about fetches or timing.
+  $("grid-main").classList.remove("is-boot");
   setInterval(refreshState, 12_000);
   $("address").focus();
 }
@@ -229,6 +233,13 @@ function coarsePointerSignal() {
 /// way. Never a dead end: "Download anyway" leads to the exact same
 /// boot() a capable device runs unconditionally.
 function renderCapacityGate(v) {
+  // Presentation only: which tint (warn amber vs err red) the panel wears.
+  // "Download anyway" stays present either way — this never becomes a
+  // harder lock-out than the text itself already is.
+  const panel = $("capacity-gate-panel");
+  panel.classList.remove("is-warn", "is-err");
+  panel.classList.add(v.verdict === CAPACITY_VERDICT.REFUSE ? "is-err" : "is-warn");
+
   $("capacity-gate-lede").textContent =
     v.verdict === CAPACITY_VERDICT.REFUSE
       ? "This deployment's hint is bigger than this device says it can comfortably hold in one " +
@@ -349,8 +360,8 @@ async function refreshState() {
   const stalled = reachable && stalledFor > 15 * 60;
 
   if (!reachable) setLivePill("err", "server unreachable");
-  else if (stalled) setLivePill("warn", `stalled at block ${head}`);
-  else setLivePill("ok", `following · block ${head}`);
+  else if (stalled) setLivePill("warn", `stalled at block ${head.toLocaleString("en-US")}`);
+  else setLivePill("ok", `following · block ${head.toLocaleString("en-US")}`);
 
   const rows = $("state-rows");
   rows.replaceChildren();
@@ -361,11 +372,15 @@ async function refreshState() {
         ? tagged(tag("complete", "tag-ok"), " — absence means exactly 0")
         : tagged(tag("partial", "tag-warn"), " — absence means unknown"),
     ),
-    row("Server head", head === null ? "unreachable" : `block ${head}`, reachable ? "" : "error"),
-    row("Hint pinned at", `block ${session.pinnedBlock}`),
+    row(
+      "Server head",
+      head === null ? "unreachable" : `block ${head.toLocaleString("en-US")}`,
+      reachable ? "" : "error",
+    ),
+    row("Hint pinned at", `block ${session.pinnedBlock.toLocaleString("en-US")}`),
     row(
       "Client caught up to",
-      `block ${session.pendingHead} (${session.deltaCells.toLocaleString()} pending delta cells)`,
+      `block ${session.pendingHead.toLocaleString("en-US")} (${session.deltaCells.toLocaleString()} pending delta cells)`,
     ),
     row("Block meaning", "latest finalized — about 13 minutes behind a block explorer"),
   );
@@ -373,12 +388,15 @@ async function refreshState() {
   if (!reachable) {
     rows.append(row("Status", "the PIR server is not responding; answers below may be stale", "error"));
   } else if (stalled) {
+    // Stalled is a caution, not a failure — the server may simply be
+    // behind, and the answers it gives are still labelled, not wrong.
+    // Amber (`warn`), never the same red as an actual unreachable server.
     rows.append(
       row(
         "Status",
         `the server has not advanced for ${Math.round(stalledFor / 60)} minutes — it may have stopped ` +
-          `following the chain. Answers are as of block ${head} and are labelled, not wrong.`,
-        "error",
+          `following the chain. Answers are as of block ${head.toLocaleString("en-US")} and are labelled, not wrong.`,
+        "warn",
       ),
     );
   }
@@ -429,13 +447,89 @@ function showResult(nodes) {
   box.classList.remove("hidden");
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/// The small three-scale brand mark on the answer card — a solid fill (no
+/// gradient) so it never needs an id, unlike the static marks in the nav
+/// and footer, which each carry their own uniquely-id'd gradient.
+function answerScalesMark() {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "answer-scales");
+  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("aria-hidden", "true");
+  const scales = [
+    { x: 1, y: 15, fill: "#FFD9C9" },
+    { x: 8, y: 8, fill: "#FFD9C9" },
+    { x: 15, y: 1, fill: "#FF4608" },
+  ];
+  for (const { x, y, fill } of scales) {
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", String(x));
+    rect.setAttribute("y", String(y));
+    rect.setAttribute("width", "14");
+    rect.setAttribute("height", "14");
+    rect.setAttribute("fill", fill);
+    rect.setAttribute("stroke", "#E03C06");
+    rect.setAttribute("stroke-width", "1.1");
+    rect.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(rect);
+  }
+  return svg;
+}
+
+function checkIcon() {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", "M3 8.5 6.2 12 13 4.5");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.8");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+/// A small "!" in a circle, built with presentation attributes only (no
+/// `style=`, per the CSP-driven rule every inline SVG on this page follows)
+/// — the same mark `states.html` uses for every error/warn tile.
+function alertIcon() {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const circle = document.createElementNS(SVG_NS, "circle");
+  circle.setAttribute("cx", "8");
+  circle.setAttribute("cy", "8");
+  circle.setAttribute("r", "6.5");
+  circle.setAttribute("stroke", "currentColor");
+  circle.setAttribute("stroke-width", "1.4");
+  const bar = document.createElementNS(SVG_NS, "path");
+  bar.setAttribute("d", "M8 5v3.6M8 11h.01");
+  bar.setAttribute("stroke", "currentColor");
+  bar.setAttribute("stroke-width", "1.4");
+  bar.setAttribute("stroke-linecap", "round");
+  svg.append(circle, bar);
+  return svg;
+}
+
+/// `.error` is the class the browser gate and the rest of this file key
+/// on (see the module docs); `state-panel is-err` is presentation only —
+/// the tinted-panel-with-icon look every error/warn state shares.
 function errorBlock(title, detail) {
-  const p = document.createElement("p");
-  p.className = "error";
+  const wrap = document.createElement("div");
+  wrap.className = "error state-panel is-err";
+  const head = document.createElement("div");
+  head.className = "state-panel-head";
   const strong = document.createElement("strong");
   strong.textContent = title;
-  p.append(strong, document.createTextNode(detail));
-  return p;
+  head.append(alertIcon(), strong);
+  const p = document.createElement("p");
+  p.textContent = detail;
+  wrap.append(head, p);
+  return wrap;
 }
 
 /// A timed-out lookup, with the one control that actually helps. The
@@ -455,7 +549,7 @@ function retryBlock() {
   );
   const retry = document.createElement("button");
   retry.type = "button";
-  retry.className = "chip";
+  retry.className = "btn-secondary";
   retry.textContent = "Retry the lookup";
   retry.addEventListener("click", () => $("form").requestSubmit());
   wrap.append(retry);
@@ -535,26 +629,45 @@ async function lookup(event) {
   switch (result.status) {
     case STATUS.FOUND:
     case STATUS.ZERO: {
+      const card = document.createElement("div");
+      card.className = "answer-card";
+      card.appendChild(answerScalesMark());
+
+      const label = document.createElement("p");
+      label.className = "answer-label";
+      label.textContent = "Balance";
+
       const balance = document.createElement("div");
-      balance.className = "balance";
-      balance.textContent = formatEth(result.balanceWei);
+      balance.className = "balance num";
+      const amount = document.createElement("span");
+      amount.className = "balance-num";
+      amount.textContent = formatEth(result.balanceWei);
       const unit = document.createElement("span");
       unit.className = "balance-unit";
       unit.textContent = "ETH";
-      balance.appendChild(unit);
+      balance.append(amount, unit);
 
-      const wei = document.createElement("div");
-      wei.className = "wei";
+      const wei = document.createElement("p");
+      wei.className = "wei num";
       wei.textContent = `${result.balanceWei.toString()} wei`;
 
       const asof = document.createElement("p");
       asof.className = "asof";
+      // Digit-grouped for display only, like every other block number on
+      // the page — web/test/browser.mjs matches this with /finalized
+      // block [\d,]+/, not a bare \d+.
       asof.textContent =
-        `As of finalized block ${result.atBlock}` +
+        `As of finalized block ${result.atBlock.toLocaleString("en-US")}` +
         (result.status === STATUS.ZERO
           ? " — this account is absent from the complete nonzero-balance set, which is exactly a zero balance."
           : ".");
-      nodes.push(balance, wei, asof);
+
+      const badge = document.createElement("span");
+      badge.className = "badge-ok";
+      badge.append(checkIcon(), document.createTextNode("Decoded in your browser"));
+
+      card.append(label, balance, wei, asof, badge);
+      nodes.push(card);
       break;
     }
     case STATUS.UNTRACKED:
@@ -582,12 +695,94 @@ async function lookup(event) {
 
   showResult(nodes);
   updateWirePanel(elapsed, result.atBlock);
+  renderBlockStrip();
   refreshState();
+}
+
+// ── "Patched in place": blocks folded in since the hint was pinned ────
+//
+// Built from exactly three session values — `pinnedBlock`, `pendingHead`,
+// `traffic.deltaBytes` — and nothing else: no per-block account counts or
+// timings, because the session does not have them, and this file never
+// fabricates a number it cannot back with something the client actually
+// measured.
+
+function blockTile(blockNum, isCurrent) {
+  const wrap = document.createElement("div");
+  wrap.className = `block-tile ${isCurrent ? "is-current" : "is-done"}`;
+
+  const scaleWrap = document.createElement("span");
+  scaleWrap.className = "bt-scale-wrap";
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "bt-scale");
+  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("aria-hidden", "true");
+  const poly = document.createElementNS(SVG_NS, "polygon");
+  poly.setAttribute("points", "9,3 29,3 23,29 3,29");
+  // A solid fill (never a shared gradient) — safe to build many of these
+  // in one document without an id ever colliding.
+  poly.setAttribute("fill", isCurrent ? "#FF4608" : "#FFD9C9");
+  poly.setAttribute("stroke", "#E03C06");
+  poly.setAttribute("stroke-width", "1.2");
+  svg.appendChild(poly);
+  scaleWrap.appendChild(svg);
+
+  const label = document.createElement("span");
+  label.className = "bt-num mono";
+  label.textContent = `…${(blockNum % 1000n).toString().padStart(3, "0")}`;
+  label.title = blockNum.toLocaleString("en-US");
+
+  wrap.append(scaleWrap, label);
+  return wrap;
+}
+
+function renderBlockStrip() {
+  if (!session) return;
+  const strip = $("block-strip");
+  const pinned = session.pinnedBlock;
+  const head = session.pendingHead;
+  const n = head - pinned;
+  if (n < 0n) return; // never happens in practice; never render a negative count
+
+  strip.replaceChildren();
+
+  const rangeLen = n + 1n;
+  const showCount = rangeLen < 8n ? Number(rangeLen) : 8;
+  const startBlock = head - BigInt(showCount - 1);
+
+  const tiles = document.createElement("div");
+  tiles.className = "block-strip";
+  for (let i = 0; i < showCount; i++) {
+    const blockNum = startBlock + BigInt(i);
+    tiles.appendChild(blockTile(blockNum, blockNum === head));
+  }
+
+  const caption = document.createElement("p");
+  caption.className = "block-strip-caption";
+  if (n === 0n) {
+    caption.textContent =
+      `Hint pinned at finalized block ${pinned.toLocaleString("en-US")} — no newer finalized block ` +
+      `to fold in yet.`;
+  } else {
+    const label = n === 1n ? "1 finalized block" : `${n.toLocaleString("en-US")} finalized blocks`;
+    const kb = (session.traffic.deltaBytes / 1000).toFixed(1);
+    // U+2011 (non-breaking hyphen): keeps "re‑download" from breaking
+    // across "re-" / "download" at narrow widths.
+    caption.textContent = `${label} folded in since your hint was pinned · ${kb} kB of public deltas · no re‑download`;
+  }
+
+  strip.append(tiles, caption);
+  strip.classList.remove("hidden");
 }
 
 // ── the "what the server saw" panel ─────────────────────────────────
 
 function updateWirePanel(elapsedMs, atBlock) {
+  // Presentation only: after the first completed lookup the panel stops
+  // describing what it *will* show and starts reporting what it *did*.
+  $("wire-heading").textContent = "What the server saw";
+  $("wire-sub").textContent = "The receipt for your last query — everything that crossed the wire.";
+
   const rows = $("wire-rows");
   rows.replaceChildren();
   const t = session.traffic;
@@ -599,7 +794,7 @@ function updateWirePanel(elapsedMs, atBlock) {
   rows.append(
     row("Sent", `POST /answer — ${t.queryBytes.toLocaleString()} bytes of LWE ciphertext`),
     row("Its last 32 bytes", tagged(tail, " — fresh every query")),
-    row("Received", `${t.responseBytes.toLocaleString()} bytes, answered at block ${atBlock}`),
+    row("Received", `${t.responseBytes.toLocaleString()} bytes, answered at block ${atBlock.toLocaleString("en-US")}`),
     row("Public delta pulled", `${t.deltaBytes.toLocaleString()} bytes (identical for every client)`),
     row(
       "Addresses transmitted",

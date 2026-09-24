@@ -183,6 +183,13 @@ valid against either deployment. Neither needs npm.
   on path can swap the client). Doing it properly means a hostname and a
   certificate — see §3.5/§3.6 for the VM, and ADR-0019 for why serving the page
   from a *different* party than the PIR server is the stronger arrangement.
+- **`web/fonts/` is served via fixed routes, not a directory.** The redesign's
+  self-hosted webfonts (ADR-0049) go through three more `MANIFEST` entries,
+  same as every other file under `web/`. Adding a new file to `web/` — a font,
+  an icon, anything — needs a `MANIFEST` route (`crates/risepir-http/src/web.rs`)
+  *and* a `route_label` entry (`crates/risepir-http/src/node.rs`) *and* a test
+  (`crates/risepir-http/tests/web.rs`); there is no directory-listing fallback
+  to ride a new file in on.
 
 ## 2. Complete mainnet — snapshot bootstrap
 

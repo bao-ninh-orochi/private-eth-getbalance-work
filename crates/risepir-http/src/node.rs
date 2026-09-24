@@ -1843,7 +1843,10 @@ fn route_label(path: &str) -> &'static str {
             || path == "/app.js"
             || path == "/pir.js"
             || path == "/style.css"
-            || path == "/client.wasm" =>
+            || path == "/client.wasm"
+            || path == "/fonts/raleway.woff2"
+            || path == "/fonts/raleway-italic.woff2"
+            || path == "/fonts/jetbrains-mono.woff2" =>
         {
             "asset"
         }

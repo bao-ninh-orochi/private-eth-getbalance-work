@@ -63,6 +63,15 @@ pub struct WebAssets {
 /// same [`CSP`] every asset here carries (`style-src`/`script-src 'self'`,
 /// no `'unsafe-inline'`) — exactly why `/status`'s JS must be its own file
 /// too, not an inline `<script>` block.
+///
+/// `/fonts/raleway.woff2`, `/fonts/raleway-italic.woff2` and
+/// `/fonts/jetbrains-mono.woff2` self-host the demo redesign's webfonts
+/// (ADR-0049): the `font-src 'self'` in [`CSP`] rules out a font CDN, so
+/// the only way to ship Raleway/JetBrains Mono here is to serve the bytes
+/// from this same fixed manifest, exactly like every other asset. They are
+/// subset `woff2` files checked in under `web/fonts/`; the accompanying
+/// `web/fonts/OFL-*.txt` license texts are committed but deliberately not
+/// routes here (nothing on the page ever fetches them).
 const MANIFEST: &[(&str, &str, &str)] = &[
     ("/", "index.html", "text/html; charset=utf-8"),
     ("/app.js", "app.js", "text/javascript; charset=utf-8"),
@@ -72,6 +81,17 @@ const MANIFEST: &[(&str, &str, &str)] = &[
     ("/status", "status.html", "text/html; charset=utf-8"),
     ("/status.css", "status.css", "text/css; charset=utf-8"),
     ("/status.js", "status.js", "text/javascript; charset=utf-8"),
+    ("/fonts/raleway.woff2", "fonts/raleway.woff2", "font/woff2"),
+    (
+        "/fonts/raleway-italic.woff2",
+        "fonts/raleway-italic.woff2",
+        "font/woff2",
+    ),
+    (
+        "/fonts/jetbrains-mono.woff2",
+        "fonts/jetbrains-mono.woff2",
+        "font/woff2",
+    ),
 ];
 
 /// The policy sent with every asset. `connect-src 'self'` is the

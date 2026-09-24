@@ -706,26 +706,49 @@ main {
   margin: 0 0 10px;
 }
 
+/* .balance has exactly two flex children — this wrapper and
+   .balance-unit — so the 12px gap above sits only before "ETH", never
+   between the integer and fraction .balance-num wraps (an earlier
+   version of this fix made .balance-int/.balance-frac/.balance-unit
+   three separate flex items directly, which put that same 12px gap
+   *inside* the number too). Flex blockifies this element (any
+   `display` on a flex item becomes block-level) — its own children
+   below are plain inline content, not flex items, so they lay out with
+   normal text-wrapping rules and sit flush together when they fit on
+   one line. */
+.balance-num {
+  display: block;
+}
+
 .balance-int,
 .balance-frac {
   font-family: var(--font-mono);
   font-weight: 500;
   line-height: 1.1;
   color: var(--ink);
-  /* Container-query sized (cqi = 1% of .answer-card's inline size), so it
-     fits the longest realistic balance at every column width this page
-     renders, not just at the mock's short ones. Each span is one
-     unbroken token (white-space: nowrap) — .balance's flex-wrap lets the
-     layout break only between the integer and fraction (and before the
-     unit), never inside either digit run. Sized against JetBrains
-     Mono's ~0.6em advance for the longest span a 96-bit balance can
-     produce: the fraction, "." + 18 digits = 19 characters, so
-     19 * 0.6 = 11.4em of container width per em of font-size; divided
-     by a measured-in-browser 11.8 (not 11.4) for headroom against the
-     card's own padding, which cqi does not subtract. display:
-     inline-block so a run of digits can't be split even though the
-     span itself sits inside a wrapping flex row. */
-  font-size: clamp(14px, 100cqi / 11.8, 48px);
+  /* Container-query sized (cqi = 1% of .answer-card's inline size — for
+     this container, measured in-browser to equal its content-box width
+     exactly), so it fits the longest realistic balance at every column
+     width this page renders, not just at the mock's short ones. Sized
+     against JetBrains Mono's measured 0.6em advance per character for a
+     *typical* balance's integer + fraction sharing one line — up to 20
+     characters ("1" + "." + 18 digits) — so 20 * 0.6 = 12em of container
+     width per em of font-size; divided by a measured-in-browser 12.5
+     (not 12) for headroom. A 96-bit worst case only has to fit one span
+     at a time (wrapping between the integer and fraction is allowed
+     there), and its longest single span — the 19-character fraction,
+     "." + 18 digits — needs less room than the typical case's combined
+     20, so this divisor covers it too.
+
+     white-space: nowrap is what stops a digit run itself from
+     splitting. display: inline-block makes each span an atomic
+     inline-level box with no whitespace text node between them in the
+     markup, so the two runs sit flush together (no gap) when they
+     share a line, while the browser still keeps a normal soft-wrap
+     opportunity at the boundary *between* the two boxes for when they
+     don't both fit — that boundary, not either box's own text, is the
+     only place this layout can break. */
+  font-size: clamp(14px, 100cqi / 12.5, 48px);
   white-space: nowrap;
   display: inline-block;
 }

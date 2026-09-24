@@ -639,31 +639,38 @@ async function lookup(event) {
 
       const balance = document.createElement("div");
       balance.className = "balance num";
-      // Split at the decimal point into two unbreakable spans (never
-      // formatEth's own output, which this file must not touch, and never
-      // .balance's own textContent, which the gates read as
-      // formatEth(...) + "ETH" — only how it's chunked into elements). A
-      // 96-bit balance's fraction is up to 19 characters ("." + 18
-      // digits); its integer part is at most 14 (that bit width caps the
-      // integer at 11 digits, grouped). CSS sizes each span to the
-      // card's real width and lets the layout break only between them
-      // (and before the unit) — never inside either digit run.
+      // .balance is a flex row with a 12px gap tuned for exactly two
+      // items — the number and the unit. Split formatEth()'s own output
+      // (never touched here) at the decimal point into two unbreakable
+      // spans, but keep them both *inside* one .balance-num wrapper, so
+      // .balance still only ever has two flex children and the 12px gap
+      // stays where it was tuned: before "ETH", not inside the number
+      // (a real defect in an earlier version of this fix — the flex gap
+      // landed between the integer and fraction too). A 96-bit balance's
+      // fraction is up to 19 characters ("." + 18 digits); its integer
+      // part is at most 14 (that bit width caps the integer at 11
+      // digits, grouped). .balance's own textContent is still exactly
+      // formatEth(...) + "ETH" — only how it's chunked into elements.
       const formatted = formatEth(result.balanceWei);
       const dot = formatted.indexOf(".");
       const intText = dot === -1 ? formatted : formatted.slice(0, dot);
       const fracText = dot === -1 ? "" : formatted.slice(dot);
 
+      const numWrap = document.createElement("span");
+      numWrap.className = "balance-num";
+
       const intSpan = document.createElement("span");
       intSpan.className = "balance-int";
       intSpan.textContent = intText;
-      balance.appendChild(intSpan);
+      numWrap.appendChild(intSpan);
 
       if (fracText) {
         const fracSpan = document.createElement("span");
         fracSpan.className = "balance-frac";
         fracSpan.textContent = fracText;
-        balance.appendChild(fracSpan);
+        numWrap.appendChild(fracSpan);
       }
+      balance.appendChild(numWrap);
 
       const unit = document.createElement("span");
       unit.className = "balance-unit";

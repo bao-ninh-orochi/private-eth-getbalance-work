@@ -437,8 +437,8 @@ paragraph, ADR-0034 §6).
 | deployment | accounts | RAM needed | how to run it |
 |---|---:|---:|---|
 | `--partial` demo | ≤4 M tracked | ~1 GB | any laptop |
-| complete mainnet, `(arity 2, bucket_size 4)` — current code (ADR-0034) | **204,714,034 nonzero** (2026-09-03; was 200.5 M at 2026-07-26 — `CLAUDE.md` has the fuller lineage) | server DB **23.62 GB** + hint 0.55 GB + A 0.55 GB ⇒ **~24.7 GB working set** | The deployment re-bootstrapped onto this geometry on 2026-07-27 (§5.4), first on `e2-highmem-8` (8 vCPU / 64 GB); since the 2026-09-02/09-03 migration round trip it runs on `c3d-highmem-16` (128 GB) in `us-central1-a` instead (§5.11/§5.12) |
-| complete mainnet, `(arity 3, bucket_size 4)` — what is live today | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h — what the public deployment ran on until the 2026-09-02 migration; now `c3d-highmem-16` (8 cores / 16 vCPU, 128 GB) in `us-central1-a`, ~$0.98/h ≈ $23.5/day (§5.11/§5.12) |
+| complete mainnet, `(arity 2, bucket_size 4)` — current code (ADR-0034) | **204,714,034 nonzero** (2026-09-03; was 200.5 M at 2026-07-26 — `CLAUDE.md` has the fuller lineage) | server DB **23.62 GB** + hint 0.55 GB + A 0.55 GB ⇒ **~24.7 GB working set** | The deployment re-bootstrapped onto this geometry on 2026-07-27 (§5.4), first on `e2-highmem-8` (8 vCPU / 64 GB); ran on `c3d-highmem-16` (128 GB) in `us-central1-a` for the 2026-09-02/09-03 migration round trip, then back on an `e2-highmem-8` (62 GiB usable) since 2026-09-24 (§5.11/§5.12/§5.13) |
+| complete mainnet, `(arity 3, bucket_size 4)` — what is live today | **200.5 M nonzero** (2026-07-26) | server DB **35.43 GB** + hints 0.83 GB + A 0.83 GB ⇒ **~38 GB working set: 48 GB floor, 64 GB comfortable** | GCP `e2-highmem-8` (8 vCPU / 64 GB), ~$0.36/h — what the public deployment ran on until the 2026-09-02 migration; `c3d-highmem-16` (8 cores / 16 vCPU, 128 GB) in `us-central1-a`, ~$0.98/h ≈ $23.5/day, from the 2026-09-02 migration until 2026-09-24; now an `e2-highmem-8` again (8 vCPU, 62 GiB usable), ~$0.3616/h ≈ $8.68/day (§5.11/§5.12/§5.13) |
 | RPC usage | — | — | dRPC + publicnode keyless tiers (the follow loop is ~5–10 requests/min steady-state) |
 
 Disk, not just RAM: a state file at the deployed `(2,4)` geometry computes to
@@ -766,7 +766,7 @@ one being sized:
 
 | option | complete-set cost | notes |
 |---|---|---|
-| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment ran on until the 2026-09-02 migration** (now `c3d-highmem-16` in `us-central1-a`, ≈$0.98/h; §5.11/§5.12); comfortable headroom at either geometry; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
+| GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment ran on until the 2026-09-02 migration, and again since 2026-09-24** (was `c3d-highmem-16` in `us-central1-a` in between, ≈$0.98/h; §5.11/§5.12/§5.13); comfortable headroom at either geometry; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
 | GCP `e2-highmem-8`, stopped when idle | ~$10/mo disk only | the honest way to run a demo box: start it for a session, `Ctrl-C` to save state, stop it |
 | AWS on-demand (`r7g.2xlarge`, 64 GB) | ≈ $0.43/h ≈ $310/mo | no free tier remotely near this RAM |
 | AWS spot (`r7g.2xlarge`) | ≈ $95–130/mo | interruptions are cheap here (state file + catch-up replay) |
@@ -782,18 +782,20 @@ The browser front end is reachable on the open internet at
 PIR transport, which is what ADR-0019's same-origin `connect-src 'self'` CSP
 requires. Every command below was executed as written.
 
-> **Note (added after the fact, 2026-09-02, updated 2026-09-03): the specific
-> IP, zone and instance name recorded in this section are pre-migration
-> evidence, left exactly as written.** The deployment moved off this VM
-> (`risepir`, `us-central1-a`, `136.115.93.177`) to `risepir-c3d`
-> (`c3d-highmem-16`, `us-east4-a`, `35.199.37.209`) for a measurement
-> campaign, then back to `risepir-c3d` in **`us-central1-a`, under the same
-> `136.115.93.177` this section names** — see §5.11/§5.12 and `CLAUDE.md`'s
-> "The live GCP deployment" section for the current host. The `demo.` DNS
-> record never needed repointing: it names `136.115.93.177`, which is once
-> again the address this VM holds. The mechanics below (the Cloudflare zone
-> setup, CAA, Caddy TLS, the same-origin requirement) are unaffected and
-> still describe how the public origin works.
+> **Note (added after the fact, 2026-09-02, updated 2026-09-03 and
+> 2026-09-24): the specific IP, zone and instance name recorded in this
+> section are pre-migration evidence, left exactly as written.** The
+> deployment moved off this VM (`risepir`, `us-central1-a`,
+> `136.115.93.177`) to `risepir-c3d` (`c3d-highmem-16`, `us-east4-a`,
+> `35.199.37.209`) for a measurement campaign, then back to `risepir-c3d` in
+> **`us-central1-a`, under the same `136.115.93.177` this section names**
+> — see §5.11/§5.12. On **2026-09-24** the same VM (name unchanged) was
+> switched in place to an `e2-highmem-8` — see §5.13 and `CLAUDE.md`'s "The
+> live GCP deployment" section for the current host. The `demo.` DNS
+> record never needed repointing across any of these: it names
+> `136.115.93.177`, which this VM has held throughout. The mechanics below
+> (the Cloudflare zone setup, CAA, Caddy TLS, the same-origin requirement)
+> are unaffected and still describe how the public origin works.
 
 **Both the page and the transport must stay on one hostname.** Splitting them
 (`app.` for the page, `pir.` for `/setup` and queries) would force the CSP
@@ -1237,15 +1239,17 @@ this applies: journald rotates on its own.
 
 ### Migration: the `xxh3_128` pin bump — REQUIRED, and NOT YET RUN
 
-> **Note (added after the fact, 2026-09-03): this migration WAS run, on
-> 2026-07-31 (§5.8) — the heading and the "planned, not executed" framing
-> below are pre-migration evidence, left exactly as recorded.** The `RPST3`
-> state it produced was itself superseded twice more: an undocumented
-> re-bootstrap on 2026-08-19, then the 2026-09-02 migration to
-> `c3d-highmem-16`, briefly in `us-east4-a` for a measurement campaign and
-> back in `us-central1-a` since 2026-09-03 (§5.11/§5.12). See `CLAUDE.md`'s
-> "The live GCP deployment" section for the current host and account count
-> (204,714,034 as of the 2026-09-03 campaign, with the fuller lineage).
+> **Note (added after the fact, 2026-09-03, updated 2026-09-24): this
+> migration WAS run, on 2026-07-31 (§5.8) — the heading and the "planned, not
+> executed" framing below are pre-migration evidence, left exactly as
+> recorded.** The `RPST3` state it produced was itself superseded three times
+> more: an undocumented re-bootstrap on 2026-08-19, the 2026-09-02 migration
+> to `c3d-highmem-16` (briefly in `us-east4-a` for a measurement campaign,
+> back in `us-central1-a` from 2026-09-03, §5.11/§5.12), and a re-bootstrap on
+> 2026-09-24 after the same VM switched to an `e2-highmem-8` (§5.13). See
+> `CLAUDE.md`'s "The live GCP deployment" section for the current host and
+> account count (207,747,454 as of the 2026-09-24 re-bootstrap, with the
+> fuller lineage).
 
 **Status: planned, not executed.** The VM has been `TERMINATED` since
 2026-07-29 (block 25,638,894) and was deliberately left alone while this
@@ -2599,6 +2603,11 @@ in a later revision of this repo's docs, not here.
 
 ### 5.12 The measurement campaign and the move back to us-central1 (2026-09-03)
 
+> **Note (added after the fact, 2026-09-24): the placement this section
+> verifies — `c3d-highmem-16` in `us-central1-a` — held until 2026-09-24, when
+> a renewed C3D stockout in the same zone moved the same VM (name unchanged)
+> to an `e2-highmem-8`, in place, with a fresh re-bootstrap. See §5.13.**
+
 Issue #4's measurement campaign — the client-side numbers now in
 `docs/deployment-numbers.md` — ran on the `risepir-c3d` host §5.11 migrated to
 `us-east4-a`, immediately after that migration's catch-up reached head. This
@@ -2828,6 +2837,81 @@ reverts to ~$0.010/h.
 The measured numbers from this window — A1–A6, B7–B10, C11–C13, correctness,
 and the full decision log (D1–D11, R1–R35) — are `docs/deployment-numbers.md`
 in full.
+
+### 5.13 Moved to an e2-highmem-8 (2026-09-24)
+
+**Why.** `c3d-highmem-16`/`-8` stocked out again in `us-central1-a` — every
+start refused 04:19–04:37 UTC — so rather than wait on a resource that keeps
+recurring, the VM was switched to a machine type GCP had capacity for. This
+is a capacity workaround, not a benchmark choice: unlike §5.11's move, there
+is no campaign hardware requirement in play here.
+
+**New machine: `risepir-c3d`, `e2-highmem-8`** (name unchanged) — 8 vCPU, 62
+GiB usable, the same 250 GB pd-balanced disk, `us-central1-a`, the same
+reserved address `risepir-ip` = `136.115.93.177`. The swap used `gcloud
+compute instances set-machine-type` on the *stopped* instance — no snapshot,
+no new disk, no new IP. GCP flipped the boot disk's interface from NVMe to
+SCSI as part of the swap; boot came up clean. The instance's SSH host key
+changed as a result (as it does on any boot-disk/machine-type change,
+§5.11) — run once:
+
+```bash
+ssh-keygen -R compute.<instance-id> -f ~/.ssh/google_compute_known_hosts
+```
+
+**Cost.** `$0.3616/h ≈ $8.68/day` while running (matches this repo's
+existing ~$8.60/day `e2-highmem-8` figure, §2.3/§3.6), plus ~$25/month for
+the 250 GB pd-balanced disk when stopped — both from the Cloud Billing
+catalog, checked 2026-09-24. Down from the `c3d-highmem-16`'s ~$0.9798/h ≈
+$23.5/day (§5.11).
+
+**Build rule: `target-cpu=x86-64-v3`, not `target-cpu=native`, from here
+on.** A C3D instance is a fixed microarchitecture for its lifetime; an E2
+instance is not — GCP can land it on Haswell, Broadwell, Skylake, Rome or
+Milan at each start, so a `native` build tuned for whichever generation the
+box happened to boot on can `SIGILL` the moment a restart lands on a
+different one. Build with:
+
+```bash
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release -p risepir-rpc
+```
+
+Verified against the resulting binary: 0 `zmm` (AVX-512) instructions and
+~36k `ymm` (AVX2) ones — `x86-64-v3` and nothing sharper. A binary built
+`native` on the `c3d-highmem-16` must never run on this host.
+
+**Re-bootstrap, same day.** The BigQuery `crypto_ethereum` tables became
+head-tracking VIEWs on 2026-09-01 (no longer the daily snapshot table
+§2.1's gate query assumed), so the export height was pinned explicitly
+rather than left to float, and the rewind that used to re-apply the last
+`--snapshot-rewind` blocks' relative credits was disabled — reapplying them
+against an already-head-exact export would double-credit recipients with no
+transaction in that window:
+
+```bash
+risepir-rpc mainnet --snapshot-block 26044934 --snapshot-rewind 0 ...
+```
+
+exact at block **26,044,934**: **207,747,454** nonzero accounts, load
+0.774, the same `(arity 2, bucket_size 4)` / 2^28-slot geometry as every
+round since §5.4. Timings: ingest **756 s**, PIR setup **843.6 s**, save
+**115.8 s**. Snapshot audit: **0/210** disagreed. The in-loop reconciler
+went green at block 26,045,070. **11/11** private lookups were byte-exact
+against an independent provider (Tenderly, `rpc.flashbots.net` having
+returned 504s that session). The prior state file is kept as
+`~/risepir-state.bin.pre-20260924` (block 25,895,111); snapshot shards sit
+in `~/snapshot-20260924/`; the GCS bucket and BigQuery dataset used for the
+export were deleted afterward.
+
+**Trap: `risepir-rpc` with no subcommand.** It silently starts a **mock**
+server on the real ports rather than printing usage — this has bitten
+before (`CLAUDE.md`, ops notes) and is worth repeating here since a fresh
+operator on this host is exactly who would try it "to see the banner." Use
+`--help`, never a bare invocation, to read the flags.
+
+The server runs as `risepir-rpc mainnet --prefetch 4 --state
+~/risepir-state.bin --web web` in tmux session `risepir`, as before — the
+machine type changed, nothing about how it is driven did.
 
 ## 6. Who does what, explicitly
 

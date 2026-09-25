@@ -812,6 +812,11 @@ function updateWirePanel(elapsedMs, atBlock) {
   // describing what it *will* show and starts reporting what it *did*.
   $("wire-heading").textContent = "What the server saw";
   $("wire-sub").textContent = "The receipt for your last query — everything that crossed the wire.";
+  $("wire-fine").textContent =
+    "The server computed over every account it holds and returned a response only this page " +
+    "can decrypt. It saw ciphertext, byte counts, and timing — and, like any web server, " +
+    "the IP address it spoke to (see 04 below). The address you typed is not in the list " +
+    "above, in any form.";
 
   const rows = $("wire-rows");
   rows.replaceChildren();

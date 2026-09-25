@@ -1064,6 +1064,106 @@ mod tests {
     }
 }
 
+/// Walks back from `finalized`, trying up to `max_lookback` additional
+/// blocks behind it, and returns the newest one whose transaction count
+/// (as reported by `tx_count`) is nonzero.
+///
+/// Exists so the live conformance gate below can never fail merely
+/// because `finalized` itself landed on a genuine zero-transaction block
+/// (issue #6: mainnet block 25,891,190 — `gasUsed 0x0`, 16 withdrawals,
+/// zero transactions — is real; dRPC and merkle.io both correctly
+/// returned `"result": []` for it). The walk is bounded so an unbroken
+/// run of empty blocks, or a bug in `tx_count`, fails loudly with
+/// [`FeedError::Rpc`] rather than looping forever or silently accepting
+/// an empty block once the bound is exhausted.
+///
+/// Test-only: only the live, `--ignored` gate calls this for real (with
+/// `tx_count` fetching `eth_getBlockByNumber(n, false).transactions.len()`
+/// over the network); `block_selection_tests` below pins its behaviour —
+/// skip-empty, pick-first-nonempty, bound-enforced — with no network at
+/// all.
+#[cfg(test)]
+async fn pick_nonempty_block<F, Fut>(
+    finalized: u64,
+    max_lookback: u64,
+    mut tx_count: F,
+) -> Result<u64, FeedError>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<usize, FeedError>>,
+{
+    for offset in 0..=max_lookback {
+        let Some(n) = finalized.checked_sub(offset) else {
+            break;
+        };
+        if tx_count(n).await? > 0 {
+            return Ok(n);
+        }
+    }
+    Err(FeedError::Rpc {
+        method: "eth_getBlockByNumber".to_string(),
+        detail: format!(
+            "no block with >=1 transaction found within {max_lookback} block(s) back from finalized {finalized}"
+        ),
+    })
+}
+
+/// No-network unit tests for [`pick_nonempty_block`] (ONR-008 regression
+/// coverage for issue #6). Each feeds it a synthetic, in-memory
+/// `tx_count` closure — no RPC, no `#[ignore]`, runs on every
+/// `cargo test`.
+#[cfg(test)]
+mod block_selection_tests {
+    use super::*;
+
+    /// An empty finalized block must be skipped, not accepted — the exact
+    /// defect issue #6 reports (finalized sat on a real zero-tx block).
+    #[tokio::test]
+    async fn skips_an_empty_finalized_block() {
+        let counts = [0usize, 3usize];
+        let n = pick_nonempty_block(100, 8, |block: u64| {
+            let c = counts[(100 - block) as usize];
+            async move { Ok(c) }
+        })
+        .await
+        .expect("a non-empty block within the walk");
+        assert_eq!(n, 99, "must walk back past the empty finalized block");
+    }
+
+    /// Among several candidates, the newest non-empty one is chosen — the
+    /// walk must stop at the first hit, not keep going further back.
+    #[tokio::test]
+    async fn chooses_the_first_nonempty_block() {
+        let counts = [0usize, 0usize, 5usize, 7usize];
+        let n = pick_nonempty_block(100, 8, |block: u64| {
+            let c = counts[(100 - block) as usize];
+            async move { Ok(c) }
+        })
+        .await
+        .expect("a non-empty block within the walk");
+        assert_eq!(n, 98, "must stop at the first (newest) non-empty block");
+    }
+
+    /// An unbroken run of empty blocks longer than `max_lookback` must
+    /// fail loudly rather than walk indefinitely or accept an empty block
+    /// once the bound is exhausted.
+    #[tokio::test]
+    async fn enforces_the_lookback_bound() {
+        let err = pick_nonempty_block(100, 4, |_block: u64| async move { Ok(0usize) })
+            .await
+            .expect_err("an unbroken run of empty blocks must exhaust the bound");
+        assert!(
+            matches!(err, FeedError::Rpc { .. }),
+            "expected FeedError::Rpc, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains('4') && msg.contains("100"),
+            "error should name the bound and the finalized block it started from: {msg}"
+        );
+    }
+}
+
 /// Live-network tests: run explicitly with
 /// `cargo test -p risepir-feed --release -- --ignored`. They talk to
 /// public keyless endpoints (dRPC for traces, publicnode for the
@@ -1086,7 +1186,43 @@ mod live_tests {
             .expect("connect + chain id 1");
         let confirm = RpcClient::new(CONFIRM_URL);
 
-        let n = feed.finalized().await.expect("finalized");
+        // Issue #6: `finalized` itself can land on a genuine
+        // zero-transaction block (observed live: 25,891,190, `gasUsed
+        // 0x0`, 16 withdrawals) -- walk back, bounded, to the newest
+        // block that actually has a transaction to check, rather than
+        // asserting a false universal ("no mainnet block is ever empty").
+        const MAX_EMPTY_BLOCK_LOOKBACK: u64 = 64;
+        let finalized = feed.finalized().await.expect("finalized");
+        let n = pick_nonempty_block(finalized, MAX_EMPTY_BLOCK_LOOKBACK, |candidate| {
+            let rpc = feed.rpc();
+            async move {
+                let block = rpc
+                    .call(
+                        "eth_getBlockByNumber",
+                        json!([format!("0x{candidate:x}"), false]),
+                    )
+                    .await?;
+                let txs = block
+                    .get("transactions")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        parse_err("eth_getBlockByNumber", "missing transactions array")
+                    })?;
+                Ok(txs.len())
+            }
+        })
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "no block with a transaction found within {MAX_EMPTY_BLOCK_LOOKBACK} blocks of finalized {finalized}: {e}"
+            )
+        });
+        if n != finalized {
+            println!(
+                "finalized block {finalized} has zero transactions; walked back to block {n} instead"
+            );
+        }
+
         let FetchedBlock {
             update,
             changed: raw_changes,
@@ -1095,7 +1231,9 @@ mod live_tests {
         assert_eq!(update.block, n);
         assert!(
             !update.changes.is_empty(),
-            "a mainnet block with zero balance changes does not exist (gas alone moves the fee recipient)"
+            "block {n} was chosen for having >=1 transaction, and a block with >=1 \
+             transaction always has >=1 balance change (every transaction's sender \
+             pays gas, even on revert)"
         );
 
         // The load-bearing check: our post-block balances, recomputed from

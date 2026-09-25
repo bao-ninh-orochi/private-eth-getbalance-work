@@ -25,9 +25,11 @@ fonts/          self-hosted Raleway + JetBrains Mono, subset to woff2, OFL-1.1 (
                 each family). No font CDN: a third-party font request would be exactly the kind of
                 request a page about caring who sees your requests should not make. Recorded as
                 ADR-0049, which lands with the demo redesign (#14, PR #20).
-assets/         brand marks (RisePIR mark, Orochi Network symbol) and illustrations (patched ribbon,
-                segment grid, icons). No screenshots of the demo yet — the old ones showed the
-                previous design and were removed; real captures of the new demo land in #15.
+assets/         brand marks (RisePIR mark, Orochi Network symbol), illustrations (patched ribbon,
+                segment grid, icons), and real captures of the redesigned demo.risepir.org (#15,
+                captured 2026-09-24): demo-result-1440.webp (a completed lookup), demo-boot-1440.webp
+                (first-visit hint download in progress), demo-result-390.webp (the same lookup at
+                mobile width). WebP, ~187 KB total — every browser this page targets renders it.
 ```
 
 No build step, no dependencies, no external requests. Every asset — including

@@ -122,7 +122,7 @@ code {
 .nowrap { white-space: nowrap; }
 
 /* safety: long mono numbers/addresses must never force horizontal overflow */
-.stat-cell .v, .numbers-tile .v, .am-balance, .am-asof, .chart-callout, .arrow-label {
+.stat-cell .v, .numbers-tile .v, .chart-callout, .arrow-label {
   overflow-wrap: anywhere;
 }
 /* safety: grid/flex children must be allowed to shrink below their content's min-content size */
@@ -520,51 +520,24 @@ summary::-webkit-details-marker { display: none; }
 .try-note { margin-top: var(--s-5); font: var(--t-small); color: var(--ink-50); }
 .try-actions { margin-top: var(--s-6); }
 
-.app-window {
+/* Real captures of demo.risepir.org (issue #15) — a bordered card per
+   image, dated caption underneath. No box-shadow/titlebar chrome: unlike
+   the mockup this replaced, these are actual screenshots, so nothing here
+   should read as a simulated browser window. */
+.capture-card {
   background: #fff;
   border: 1px solid var(--line);
-  box-shadow: var(--shadow-lift);
-  container-type: inline-size;
 }
-.app-titlebar {
-  display: flex; align-items: center; gap: 6px;
-  padding: var(--s-3) var(--s-4);
-  background: var(--paper);
-  border-bottom: 1px solid var(--line);
-}
-.app-titlebar .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-.app-titlebar .dot.red { background: #FF5F57; }
-.app-titlebar .dot.yellow { background: #FEBC2E; }
-.app-titlebar .dot.green { background: #28C840; }
-.app-titlebar .app-url { margin-left: var(--s-3); font: var(--t-mono); font-size: 12px; color: var(--ink-50); }
-.app-body { padding: var(--s-6); }
-
-.answer-mock { background: transparent; border: none; box-shadow: none; padding: 0; }
-.answer-mock .am-label { font: var(--t-small); color: var(--ink-50); }
-.answer-mock .am-balance {
-  font: var(--t-balance);
-  font-size: clamp(14px, 4.6cqi, 26px);
-  line-height: 1.2;
-  color: var(--ink); margin-top: var(--s-2);
-  white-space: nowrap;
-}
-.answer-mock .am-asof { font: var(--t-mono); font-size: 12px; color: var(--ink-70); margin-top: var(--s-3); }
-
-.receipt-row {
-  margin-top: var(--s-5);
-  display: flex; align-items: center; gap: var(--s-3);
-  background: var(--ok-bg); border: 1px solid var(--ok-line);
-  padding: var(--s-4);
-}
-.receipt-row .receipt-check { width: 20px; height: 20px; color: var(--ok); flex: none; }
-.receipt-row .receipt-text { font: 600 14px/22px var(--font-sans); color: var(--ok); }
-
-.mock-caption {
+.capture-card img { width: 100%; height: auto; display: block; }
+.capture-caption {
   margin-top: var(--s-3);
   font: var(--t-small);
   color: var(--ink-50);
-  text-align: center;
 }
+.try-captures { display: flex; flex-direction: column; gap: var(--s-5); min-width: 0; }
+.try-captures > * { min-width: 0; }
+.capture-secondary { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-5); }
+.capture-secondary > * { min-width: 0; }
 
 /* ---------------------------------------------------------------- 06 trust ---- */
 .trust-grid { margin-top: var(--s-7); display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--s-5); }
@@ -826,6 +799,7 @@ summary::-webkit-details-marker { display: none; }
 
   /* try */
   .try-grid { grid-template-columns: 1fr; gap: var(--s-6); }
+  .capture-secondary { grid-template-columns: 1fr; }
 
   /* trust */
   .trust-grid { grid-template-columns: 1fr; }

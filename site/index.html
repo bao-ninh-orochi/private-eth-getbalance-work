@@ -318,28 +318,25 @@
           <div class="try-actions"><a class="btn btn-primary" href="https://demo.risepir.org">Open demo.risepir.org →</a></div>
         </div>
 
-        <div>
-          <div class="app-window">
-            <div class="app-titlebar">
-              <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
-              <span class="app-url">demo.risepir.org</span>
-            </div>
-            <div class="app-body">
-              <div class="answer-mock">
-                <div class="am-label">Balance</div>
-                <div class="am-balance num">1.345804390675688562 ETH</div>
-                <div class="am-asof num">As of finalized block 25,650,921</div>
-              </div>
-              <div class="receipt-row">
-                <svg class="receipt-check" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
-                  <circle cx="10" cy="10" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/>
-                  <path d="M6 10.3l2.6 2.6L14.2 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span class="receipt-text">Addresses transmitted: <strong>none</strong></span>
-              </div>
-            </div>
+        <div class="try-captures">
+          <figure class="capture-card capture-primary">
+            <img src="./assets/demo-result-1440.webp" width="1400" height="1100" loading="lazy"
+              alt="Screenshot of demo.risepir.org: a completed private balance lookup for the Ethereum beacon deposit contract, showing the decoded balance and the receipt of everything that crossed the wire, including the highlighted &quot;Addresses transmitted: none&quot; row.">
+            <figcaption class="capture-caption">Captured from demo.risepir.org on 2026-09-24 (UTC): a private lookup of the beacon deposit contract, as of finalized block 26,049,113. The receipt shows no address was transmitted.</figcaption>
+          </figure>
+
+          <div class="capture-secondary">
+            <figure class="capture-card">
+              <img src="./assets/demo-boot-1440.webp" width="1400" height="769" loading="lazy"
+                alt="Screenshot of demo.risepir.org during the first-visit one-time setup: the hint download in progress, and the receipt panel before any lookup has run.">
+              <figcaption class="capture-caption">Captured from demo.risepir.org on 2026-09-24 (UTC), during the first-visit hint download.</figcaption>
+            </figure>
+            <figure class="capture-card">
+              <img src="./assets/demo-result-390.webp" width="640" height="1327" loading="lazy"
+                alt="Screenshot of demo.risepir.org at a mobile viewport width: the same beacon deposit contract lookup, and the receipt's &quot;Addresses transmitted: none&quot; row.">
+              <figcaption class="capture-caption">Captured from demo.risepir.org on 2026-09-24 (UTC): the same lookup at a mobile viewport width, as of finalized block 26,049,113.</figcaption>
+            </figure>
           </div>
-          <p class="mock-caption">Illustration of the demo's answer card — not a screenshot.</p>
         </div>
       </div>
     </div>

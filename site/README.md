@@ -50,6 +50,18 @@ export CLOUDFLARE_ACCOUNT_ID=86fb23a2e1be18581ea3ac9f205f4aad
 npx wrangler pages deploy site --project-name risepir-org --branch main
 ```
 
+**Before every deploy that changes `style.css` or `favicon.svg`, bump its
+`?v=` in both `index.html` and `404.html`.** The value is the first 10 hex
+characters of the file's own sha256
+(`shasum -a 256 site/style.css | cut -c1-10`). The zone serves static files
+with `cache-control: public, max-age=14400`, so a browser that fetched the
+old file in the last 4 hours keeps using it without asking again. HTML is
+`max-age=0`, so that visitor gets the new page with the old stylesheet.
+This happened on the redesign's first deploy (#28). A new query string is a
+new URL for both the browser cache and the edge cache key, so it cannot be
+masked. There is still no build step: the hash is a hand-maintained literal,
+checked against the file before each deploy.
+
 `risepir.org` and `www.risepir.org` are already attached as custom domains, so
 a deploy to `--branch main` goes live at both. The certificate is issued by
 Google Trust Services via Cloudflare Universal SSL, permitted by the `pki.goog`

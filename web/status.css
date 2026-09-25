@@ -326,34 +326,59 @@ a {
   color: var(--err);
 }
 
-table.kv {
-  width: 100%;
-  border-collapse: collapse;
+/* Key/value rows (dl.kv > .kv-row > dt + dd), one per panel field. A
+   plain two-column table forces the value into a fixed-width right
+   column, so at narrow widths a long value (a hash, a "N checkpoints /
+   M comparisons" phrase) wraps word-by-word into a ragged strip under
+   the label instead of moving as a unit. Flexing the whole row instead
+   lets the value drop to its own line, right-aligned, only when the
+   pair doesn't fit on one — the common case (most rows, most widths)
+   still renders as a single tidy line. */
+.kv {
+  margin: 0;
   font-size: 0.88rem;
 }
 
-table.kv th {
-  text-align: left;
+.kv-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  column-gap: 1rem;
+  padding: 0.4rem 0;
+}
+
+.kv-row:not(:last-child) {
+  border-bottom: 1px dotted var(--line-2);
+}
+
+.kv-row dt {
+  margin: 0;
   font-weight: 400;
   color: var(--ink-70);
-  padding: 0.4rem 0.8rem 0.4rem 0;
-  vertical-align: top;
-  white-space: nowrap;
 }
 
-table.kv td {
-  padding: 0.4rem 0;
+.kv-row dd {
+  margin: 0 0 0 auto;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  text-align: right;
-  width: 100%;
-  overflow-wrap: anywhere;
   color: var(--ink);
-}
-
-table.kv tr:not(:last-child) th,
-table.kv tr:not(:last-child) td {
-  border-bottom: 1px dotted var(--line-2);
+  text-align: right;
+  /* No white-space: nowrap here: Chromium (and per spec) never lets
+     overflow-wrap create a break inside a `nowrap` box, at any width,
+     so a nowrap value would just overflow instead of falling back —
+     confirmed empirically (scratchpad/r2/a16/debug.mjs) before landing
+     this. Plain wrapping already keeps a value on one line whenever it
+     fits — nothing forces an early break — and a flex item's default
+     `min-width: auto` would otherwise floor its width at its unwrapped
+     content size and defeat overflow-wrap the same way, hence
+     min-width: 0. The row (not the value) is what decides whether a
+     long value shares its line with the label or drops to its own:
+     .kv-row's flex-wrap wraps dd as a whole item once the pair no
+     longer fits, and only a value that still can't fit *alone* at the
+     card's width breaks internally, via overflow-wrap: anywhere. */
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .table-scroll {

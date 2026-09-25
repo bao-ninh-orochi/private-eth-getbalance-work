@@ -62,10 +62,11 @@
 //! beside.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use risepir_http::NodeState;
 use risepir_proto::{BlockDelta, ValueCodec};
+use tokio::time::Instant;
 
 use crate::journal::{self, JournalWriter};
 use crate::state::{self, StateError};
@@ -107,6 +108,14 @@ struct SaverInner {
     /// interval is measured from completion, so a save that takes minutes
     /// can never be scheduled back-to-back, and a failing save (disk
     /// full) retries once per interval instead of once per loop tick.
+    /// `tokio::time::Instant`, not `std::time::Instant`: outside a paused
+    /// runtime it *is* the real clock (identical production behavior —
+    /// `tokio::time::Instant::now()` is a plain `std::time::Instant::now()`
+    /// wrapper unless the `test-util` feature's paused clock is active),
+    /// but it lets `tests/autosave.rs` drive the interval with
+    /// `tokio::time::pause`/`advance` instead of real sleeps, so a save
+    /// that happens to run slowly (a loaded CI box) can never eat into the
+    /// interval a test measures against.
     last_finished: Instant,
     /// The current journal appender, if journaling is currently active.
     /// `None` means "not writing right now" — either nothing has rotated

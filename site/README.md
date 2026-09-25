@@ -26,10 +26,12 @@ fonts/          self-hosted Raleway + JetBrains Mono, subset to woff2, OFL-1.1 (
                 request a page about caring who sees your requests should not make. Recorded as
                 ADR-0049, which lands with the demo redesign (#14, PR #20).
 assets/         brand marks (RisePIR mark, Orochi Network symbol), illustrations (patched ribbon,
-                segment grid, icons), and real captures of the redesigned demo.risepir.org (#15,
+                segment grid, icons), real captures of the redesigned demo.risepir.org (#15,
                 captured 2026-09-24): demo-result-1440.webp (a completed lookup), demo-boot-1440.webp
                 (first-visit hint download in progress), demo-result-390.webp (the same lookup at
-                mobile width). WebP, ~187 KB total — every browser this page targets renders it.
+                mobile width) — WebP, ~187 KB total, every browser this page targets renders it —
+                and social-card.png, the og:image/twitter:card link-preview image (#21; see "Social
+                card" below).
 ```
 
 No build step, no dependencies, no external requests. Every asset — including
@@ -82,6 +84,27 @@ CAA record Cloudflare injects into any zone it serves that has CAA at all
   cares most about. The account count is the 2026-09-03 measurement-campaign
   figure, and the page dates it — the live set grows above it as the chain
   advances.
+
+## Social card
+
+`assets/social-card.png` is the `og:image`/`twitter:card` (`summary_large_image`)
+shown in link previews (Slack, X, LinkedIn, iMessage, …) — 1200×630, under
+200 KB, built from the same tokens and fonts as the page: the RisePIR
+lockup, the "Private eth_getBalance · RisePIR" eyebrow, the hero headline
+("The chain is public. Only your RPC query needs hiding."), `risepir.org`,
+and a crop of `assets/illustrations/hero-patched-ribbon.svg` bleeding off
+the right edge. It states no measured figures, so it never drifts out of
+sync with `docs/deployment-numbers.md` the way a numbers-bearing image
+could.
+
+**Regenerate it if the hero headline changes.** It is a static PNG, not
+generated at deploy time — there is no build step for this page (above).
+The generator is an HTML page rendered with Playwright at exactly
+1200×630, `deviceScaleFactor: 1`, referencing this repo's own
+`fonts/*.woff2` and `assets/*.svg` by `file://` path; its source is kept in
+the PR that introduced the card (#21) rather than shipped in `site/`, since
+nothing here executes it. Re-render, re-save as `assets/social-card.png`,
+and confirm it is still under 200 KB before committing.
 
 ## Known wart
 

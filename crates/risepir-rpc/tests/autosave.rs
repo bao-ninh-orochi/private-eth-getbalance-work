@@ -311,14 +311,23 @@ async fn concurrent_saves_reload_consistently() {
 /// GB) rewrite when nothing changed, fire again once something did, obey
 /// the interval, and stay inert when disabled — while `save_now` (the
 /// shutdown path) always writes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+///
+/// Runs under `tokio::time::pause` (issue #11): every interval boundary is
+/// crossed with `tokio::time::advance`, never a real `sleep`, and
+/// `StateSaver` tracks its own clock with `tokio::time::Instant` (see that
+/// field's docs in `src/autosave.rs`) — so however long the real save
+/// underneath takes (a loaded CI box measured 0.5 s for a 0 B file), the
+/// *virtual* clock this test's `NotDue`/`Unchanged` assertions read does
+/// not move a nanosecond during it. `start_paused` requires the
+/// `current_thread` flavor (`tokio::time::pause` docs), which is fine
+/// here: nothing in this test needs a second worker thread — the save
+/// runs inline rather than via `block_in_place` either way, and real
+/// concurrent-writer scheduling is `concurrent_saves_reload_consistently`
+/// and `concurrent_save_now_calls_serialize`'s job, not this test's.
+#[tokio::test(start_paused = true)]
 async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     let path = tmp("skip.bin");
     let node = NodeState::new(small_server(), DeltaRing::new(16), true);
-    // Wide enough that one save — including its post-rename parent-dir
-    // fsync, which on macOS alone can cost tens of ms — always finishes
-    // well inside it; the NotDue assertion below is about the *clock*,
-    // and a save that outlives the interval would make it racy.
     let interval = Duration::from_millis(250);
     let saver = StateSaver::new(
         path.clone(),
@@ -331,17 +340,19 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
     );
 
     node.apply_block(&update_for(1)).await.unwrap();
-    tokio::time::sleep(interval * 2).await;
+    tokio::time::advance(interval * 2).await;
     assert!(matches!(
         saver.maybe_save(&node).await.unwrap(),
         SaveOutcome::Saved { block: 1, .. }
     ));
 
-    // Immediately after a save the interval has not elapsed.
+    // Immediately after a save the interval has not elapsed — true by
+    // construction under paused time, no matter how long the save that
+    // just ran took in real wall-clock terms.
     assert_eq!(saver.maybe_save(&node).await.unwrap(), SaveOutcome::NotDue);
 
     // Interval elapsed but nothing applied: no rewrite.
-    tokio::time::sleep(interval * 2).await;
+    tokio::time::advance(interval * 2).await;
     assert_eq!(
         saver.maybe_save(&node).await.unwrap(),
         SaveOutcome::Unchanged { block: 1 }
@@ -349,7 +360,7 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
 
     // A new block makes the next due save fire again.
     node.apply_block(&update_for(2)).await.unwrap();
-    tokio::time::sleep(interval * 2).await;
+    tokio::time::advance(interval * 2).await;
     assert!(matches!(
         saver.maybe_save(&node).await.unwrap(),
         SaveOutcome::Saved { block: 2, .. }
@@ -371,7 +382,7 @@ async fn autosave_skips_unchanged_obeys_interval_and_disable() {
         plaintext_bits(),
         None,
     );
-    tokio::time::sleep(interval).await;
+    tokio::time::advance(interval).await;
     assert_eq!(
         disabled.maybe_save(&node).await.unwrap(),
         SaveOutcome::NotDue

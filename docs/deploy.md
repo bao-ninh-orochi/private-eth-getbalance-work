@@ -49,6 +49,17 @@ cargo build --release -p risepir-rpc
 ./target/release/risepir-rpc mainnet --partial
 ```
 
+`.cargo/config.toml` builds this `target-cpu=native` by default, which is
+correct for a fixed-microarchitecture machine (a laptop, a C3D). **On a GCP
+E2 instance** — the live deployment's `e2-highmem-8` since 2026-09-24, §5.13
+— build with `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C
+target-cpu=x86-64-v3" cargo build --release -p risepir-rpc` instead: E2 can
+land on a different CPU generation at every restart, and a `native` build
+can `SIGILL` the moment it does. Use the target-scoped variable, not plain
+`RUSTFLAGS` — the latter also overrides the `wasm32` target's own
+rustflags and breaks the wasm build if you later run `cargo run -p xtask
+--release -- web` the same way (§5.13).
+
 Wait for the first finalization burst (up to ~7 min; bursts of ~32 blocks arrive
 every ~6.4 min), then:
 
@@ -274,6 +285,25 @@ SELECT
   is never safe; when unsure, prefer a lower value and let reconciliation
   and the post-bootstrap audit (§2.2) prove the join.
 
+> **Note (added after the fact, 2026-09-25): the source verified above has
+> since changed type, and the guidance above no longer applies as
+> written.** `crypto_ethereum.balances` — and every other table in
+> `bigquery-public-data.crypto_ethereum` — became a head-tracking **VIEW**
+> on 2026-09-01: atomic at ~the head block *at query time*, not a daily
+> rebuild. The "materialized table, not a view" finding above, and the
+> "getting `snapshot_block` slightly too low is… the documented default
+> behavior" guidance that follows from it, both describe the *pre-2026-09-01*
+> source. Against a view, `--snapshot-rewind` at its default does not add
+> safety margin — it re-applies relative withdrawal credits an
+> already-head-exact export already contains, which double-credits any
+> recipient with no transaction in the rewound window. **Check the source's
+> current type first** (`bq show bigquery-public-data:crypto_ethereum.balances`);
+> if it is now a VIEW, pin the export height, verify it against an
+> independent provider at that block, and bootstrap with `--snapshot-block
+> <pinned> --snapshot-rewind 0` instead of the gate-query-plus-default-rewind
+> procedure above. See §5.13 (the 2026-09-24 re-bootstrap that did this) and
+> ADR-0050.
+
 **Export** (console or CLI; needs a dataset you own for the intermediate table and
 a GCS bucket):
 
@@ -336,6 +366,11 @@ not optional extras:**
   declared block. Narrows the *densest* part of the measured error; does not
   close it (see below), and does not fix relative withdrawal credits inside
   the window — `--hard-refresh` does.
+  > **Note (added after the fact, 2026-09-25):** this default-2000 framing
+  > assumes a daily-rebuild table source (§2.1). Since 2026-09-01 the source
+  > is a head-tracking view; against that source, pin and verify the export
+  > height first and pass **`--snapshot-rewind 0`** instead — see §2.1's note
+  > above and §5.13/ADR-0050.
 - **`--snapshot-audit-samples <N>`** (default **512**, on by default; `0`
   disables). Reservoir-samples that many addresses during the ingest above
   and verifies them against `--refresh-url`'s quorum once setup finishes,
@@ -650,7 +685,13 @@ gcloud compute firewall-rules create risepir-pir \
 sudo apt-get install -y build-essential git curl pkg-config tmux`, install
 rustup, clone over HTTPS (no GitHub credentials needed — both this repo and
 the pinned IKPIR dep are public), `cargo build --release -p risepir-rpc`, run
-in `tmux` with `--state`. The instance-create warning
+in `tmux` with `--state`. **On a GCP E2 instance, build with
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3"
+cargo build --release -p risepir-rpc` instead of plain `RUSTFLAGS`** — E2
+can land on a different CPU generation at every restart, and a plain
+`native` build can `SIGILL` the moment it does; the target-scoped form
+also avoids breaking a later wasm build (§5.13; the live deployment has
+been an `e2-highmem-8` since 2026-09-24). The instance-create warning
 about disk size vs 10 GB image size is expected and harmless — Debian grows
 the root partition on first boot (`df -h /` shows the full disk). Pull the snapshot shards straight
 from the export bucket: `gcloud storage cp 'gs://<your-bucket>/balances-*.csv.gz' .`
@@ -742,12 +783,15 @@ hands every visitor's queried address to the network (ADR-0012's warning,
 one layer up).
 
 **Cost hygiene:** this matters far more since the box became an `e2-highmem-8`
-for the complete set — it burns **~$8.60/day** running, against ~$10/mo for the
-250 GB disk when stopped. `gcloud compute instances stop risepir` when idle
-(always `Ctrl-C` the server first and wait for `state saved; exiting`, so the
-restart is a file load rather than a re-bootstrap — and since ADR-0025 the
-server also rewrites the file every `--save-interval` anyway, so even a missed
-Ctrl-C only costs the last ≤30 min of blocks as replay); `…delete` to zero it;
+for the complete set — it burns **~$8.60/day** running, against ~$25/mo for the
+250 GB pd-balanced disk when stopped. `gcloud compute instances stop
+risepir-c3d` when idle (always `Ctrl-C` the server first and wait for
+`state saved; exiting`, so the restart is a file load rather than a
+re-bootstrap). A missed Ctrl-C is cheaper than it once was: with
+`--journal-restore` on by default (ADR-0037), a restart replays only the
+journal's tail — well under a second per block — rather than the whole
+`--save-interval`, which itself now defaults to 21600 s (6 h) with restore
+on, not the 1800 s (30 min) ADR-0025 originally set; `…delete` to zero it;
 `gcloud billing projects describe <your-project-id>` / the console's Billing page shows
 credit burn-down. After the credit: switch the same VM to Spot (~$95–130/mo at
 64 GB) — Oracle's free tier is no longer an option at this size.
@@ -767,7 +811,7 @@ one being sized:
 | option | complete-set cost | notes |
 |---|---|---|
 | GCP `e2-highmem-8` (8 vCPU/64 GB) + $300 credit | ≈ $0.36/h ≈ **$260/mo**, so ~5 weeks on the credit | **what this deployment ran on until the 2026-09-02 migration, and again since 2026-09-24** (was `c3d-highmem-16` in `us-central1-a` in between, ≈$0.98/h; §5.11/§5.12/§5.13); comfortable headroom at either geometry; you need GCP for the BigQuery export anyway, and same-region GCS→VM snapshot copy is free |
-| GCP `e2-highmem-8`, stopped when idle | ~$10/mo disk only | the honest way to run a demo box: start it for a session, `Ctrl-C` to save state, stop it |
+| GCP `e2-highmem-8`, stopped when idle | ~$25/mo disk only | the honest way to run a demo box: start it for a session, `Ctrl-C` to save state, stop it |
 | AWS on-demand (`r7g.2xlarge`, 64 GB) | ≈ $0.43/h ≈ $310/mo | no free tier remotely near this RAM |
 | AWS spot (`r7g.2xlarge`) | ≈ $95–130/mo | interruptions are cheap here (state file + catch-up replay) |
 | Oracle Cloud Always Free (4 OCPU/**24 GB**) | $0 | **still not sufficient, but now only just** — the `(2,4)` working set is ~24.7 GB, ~0.7 GB over a 24 GB ceiling (was ~14 GB over, at the old `(3,4)` set's ~38 GB) — no headroom left for the OS or a save-time `.tmp` copy, so still a real no, just no longer a 1.6× one |
@@ -2852,8 +2896,7 @@ reserved address `risepir-ip` = `136.115.93.177`. The swap used `gcloud
 compute instances set-machine-type` on the *stopped* instance — no snapshot,
 no new disk, no new IP. GCP flipped the boot disk's interface from NVMe to
 SCSI as part of the swap; boot came up clean. The instance's SSH host key
-changed as a result (as it does on any boot-disk/machine-type change,
-§5.11) — run once:
+changed as a result of this swap — run once:
 
 ```bash
 ssh-keygen -R compute.<instance-id> -f ~/.ssh/google_compute_known_hosts
@@ -2870,18 +2913,50 @@ on.** A C3D instance is a fixed microarchitecture for its lifetime; an E2
 instance is not — GCP can land it on Haswell, Broadwell, Skylake, Rome or
 Milan at each start, so a `native` build tuned for whichever generation the
 box happened to boot on can `SIGILL` the moment a restart lands on a
-different one. Build with:
+different one. Use the **target-scoped** override, not plain `RUSTFLAGS`,
+for both builds this host needs — it is the one form that is safe either
+way:
 
 ```bash
-RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release -p risepir-rpc
+# server (no wasm involved — plain RUSTFLAGS also works here, see below):
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3" \
+  cargo build --release -p risepir-rpc
+# web/client.wasm + the host-side xtask binary — plain RUSTFLAGS breaks this one:
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3" \
+  cargo run -p xtask --release -- web
 ```
 
-Verified against the resulting binary: 0 `zmm` (AVX-512) instructions and
-~36k `ymm` (AVX2) ones — `x86-64-v3` and nothing sharper. A binary built
-`native` on the `c3d-highmem-16` must never run on this host.
+**Why not plain `RUSTFLAGS`.** Env `RUSTFLAGS` overrides *every* rustflags
+source, not just `.cargo/config.toml`'s `[build] rustflags` — including
+`[target.wasm32-unknown-unknown] rustflags`, which carries the mandatory
+`--cfg getrandom_backend="custom"`. Verified on the VM: plain
+`RUSTFLAGS="-C target-cpu=x86-64-v3" cargo run -p xtask --release -- web`
+fails — rustc warns `'x86-64-v3' is not a recognized processor for this
+target` and the run ends with `xtask web: the wasm build failed`. The
+target-scoped `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS` beats
+`[build] rustflags` for the `x86_64-unknown-linux-gnu` host target only,
+leaving `wasm32-unknown-unknown`'s own rustflags untouched, so it is safe
+for both commands above — also verified: it exits 0, rebuilds
+`web/client.wasm` byte-identical to the one already deployed (sha256
+prefix `03104271bbbb`), and the host-side `xtask` binary it also builds has
+0 `zmm` instructions.
 
-**Re-bootstrap, same day.** The BigQuery `crypto_ethereum` tables became
-head-tracking VIEWs on 2026-09-01 (no longer the daily snapshot table
+The **server build** doesn't touch wasm, so plain `RUSTFLAGS` works for it
+too — verified against the resulting binary: 0 `zmm` (AVX-512)
+instructions and 36,023 `ymm` (AVX2) ones. `~/vm-build-e2.sh` uses exactly
+that form (`cargo clean`, then `RUSTFLAGS="-C target-cpu=x86-64-v3" cargo
+build --release -p risepir-rpc`, from `~/build-4`), which is fine for a
+server-only build; the target-scoped form above is the one to reach for
+whenever wasm might also be in play, including `xtask web`.
+`~/bootstrap-complete-20260924.sh` does not build anything — it only runs
+the already-built binary. A binary built `native` on the `c3d-highmem-16`
+must never run on this host, and a cached `native` `xtask` (built by a
+plain-`RUSTFLAGS` or flag-free `xtask web` run) risks the same `SIGILL` as
+the server if a later invocation lands on a different CPU generation — the
+2026-09-24/25 `xtask web` runs on this host used neither override.
+
+**Re-bootstrap, same day (ADR-0050).** The BigQuery `crypto_ethereum` tables
+became head-tracking VIEWs on 2026-09-01 (no longer the daily snapshot table
 §2.1's gate query assumed), so the export height was pinned explicitly
 rather than left to float, and the rewind that used to re-apply the last
 `--snapshot-rewind` blocks' relative credits was disabled — reapplying them
@@ -2903,11 +2978,13 @@ returned 504s that session). The prior state file is kept as
 in `~/snapshot-20260924/`; the GCS bucket and BigQuery dataset used for the
 export were deleted afterward.
 
-**Trap: `risepir-rpc` with no subcommand.** It silently starts a **mock**
-server on the real ports rather than printing usage — this has bitten
-before (`CLAUDE.md`, ops notes) and is worth repeating here since a fresh
-operator on this host is exactly who would try it "to see the banner." Use
-`--help`, never a bare invocation, to read the flags.
+**Trap: `risepir-rpc` with no subcommand.** It is not silent — it prints
+`risepir-rpc: note: no subcommand given; assuming \`mock\` (see --help)` to
+stderr (`crates/risepir-rpc/src/main.rs:60`/`:69`) — but the trap is real:
+it *proceeds* to start the mock server on the real ports instead of exiting
+non-zero with usage, so a fresh operator running it "to see the banner"
+gets a live process bound to the production ports, not a warning that stops
+them. Use `--help`, never a bare invocation, to read the flags.
 
 The server runs as `risepir-rpc mainnet --prefetch 4 --state
 ~/risepir-state.bin --web web` in tmux session `risepir`, as before — the

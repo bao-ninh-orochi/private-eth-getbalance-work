@@ -67,7 +67,8 @@ was wrong by more than 2× regardless;
 the deployment ran on a 64 GB `e2-highmem-8` at the time (migrated
 2026-09-02 to a 128 GB `c3d-highmem-16`, briefly in `us-east4-a` for a
 measurement campaign and back in `us-central1-a` since 2026-09-03 —
-deploy.md §5.11/§5.12).
+deploy.md §5.11/§5.12; and since 2026-09-24 it is an `e2-highmem-8` again,
+in place, for capacity rather than a campaign — deploy.md §5.13).
 ADR-0034 has since retuned the
 deployed geometry to `(arity 2, bucket_size 4)` at a higher target load, and the
 live box **was re-bootstrapped onto it on 2026-07-27**: 23.62 GB server DB, a

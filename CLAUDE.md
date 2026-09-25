@@ -56,7 +56,22 @@ today** and there is a **live GCP deployment** (below).
   dependency — its `ikpir-common` declares no `[features]` section at all
   (no `parallel` feature) and has neither `backend/gemm.rs` nor
   `backend/prg.rs`. `.cargo/config.toml` sets `git-fetch-with-cli` +
-  `target-cpu=native`. The local checkout at `../CANS2026/RisePIR` drifts —
+  `target-cpu=native` — load-bearing for the benches, and correct for a
+  fixed-microarchitecture host (a C3D, a laptop). **On the live
+  `e2-highmem-8` (since 2026-09-24, "The live GCP deployment" below) build
+  with `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C
+  target-cpu=x86-64-v3"` instead of plain `RUSTFLAGS`** — because GCP can
+  land an E2 instance on a different microarchitecture generation at every
+  restart, and a plain `native` build can `SIGILL` the moment it does
+  (deploy.md §5.13). The target-scoped variable beats
+  `.cargo/config.toml`'s `[build] rustflags` for the x86_64 host target
+  only, without editing that file or touching any other target's own
+  rustflags — unlike plain `RUSTFLAGS`, which overrides *every* rustflags
+  source, including the `wasm32` target's, and breaks `cargo run -p xtask
+  --release -- web`'s wasm build if that step is ever run this way (deploy.md
+  §5.13 has the verified failure and the verified fix). This does not
+  change `.cargo/config.toml`'s default, which stays `native` for every
+  other host. The local checkout at `../CANS2026/RisePIR` drifts —
   read it for API signatures, **never** path-dep it. The pin has since moved
   again, to `tag = "v0.2.0-perf"` (commit
   `d91c75fb807d25807104c29b1931f846f007379a`, two commits past `adecd9c`):
@@ -251,12 +266,15 @@ switched with `gcloud compute instances set-machine-type` on the stopped
 instance rather than replaced — same disk, same reserved IP, name
 unchanged. GCP flipped the boot disk NVMe→SCSI; it booted fine, but the SSH
 host key changed (`ssh-keygen -R compute.<instance-id> -f
-~/.ssh/google_compute_known_hosts`, once). Builds here on use
-`RUSTFLAGS="-C target-cpu=x86-64-v3"`, not `target-cpu=native`: an E2
-instance can land on Haswell, Broadwell, Skylake, Rome or Milan at each
-start, and a native build can `SIGILL` after a restart on a different
-generation (verified: 0 `zmm`, ~36k `ymm` instructions in the binary). A
-binary built natively on the `c3d-highmem-16` must never run here. The box
+~/.ssh/google_compute_known_hosts`, once). Builds from here on target
+`x86-64-v3`, not `native`: an E2 instance can land on Haswell, Broadwell,
+Skylake, Rome or Milan at each start, and a native build can `SIGILL` after
+a restart on a different generation (verified: 0 `zmm`, ~36k `ymm`
+instructions in the binary). Use the target-scoped
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS`, not plain `RUSTFLAGS`,
+whenever `xtask web` (and its wasm build) might be in play — "Build & test"
+above and deploy.md §5.13 have the full rule and the verified failure mode.
+A binary built natively on the `c3d-highmem-16` must never run here. The box
 was re-bootstrapped the same day from the BigQuery balances view — now a
 head-tracking VIEW rather than a daily table, so the export height was
 pinned and `--snapshot-rewind 0` used instead of replaying relative
@@ -496,5 +514,5 @@ while running (**$0.3616/h**, Cloud Billing catalog, 2026-09-24; deploy.md
 §5.13) — was **~$23.5/day** at `c3d-highmem-16` (2026-09-02–09-24) and
 **~$8.60/day** at the earlier `e2-highmem-8`, itself up from ~$0.80/day as
 an `e2-medium` (both verified against the Cloud Billing catalog, deploy.md
-§5.11), ~$25/mo stopped (250 GB pd-balanced disk only — was quoted here as
-~$10/mo on the old host).
+§5.11), ~$25/mo stopped (250 GB pd-balanced disk only — the ~$10/mo once
+quoted here was simply wrong, not a property of either host).

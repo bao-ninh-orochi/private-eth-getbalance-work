@@ -1,46 +1,146 @@
 /* GET /status (ADR-0039) — deliberately its own small stylesheet rather
-   than reusing web/style.css: that one is single-theme by design (see its
-   own header comment), and this operator page is asked to read well in
-   both light and dark. Dependency-free, same as style.css — this origin's
-   CSP (`style-src 'self'`, no `'unsafe-inline'`) rules out an inline
-   <style> block the same way it rules out an inline <script>, which is
-   why this is a separate file rather than embedded in status.html. */
+   than reusing web/style.css: that one is single-theme by design (its own
+   header comment says so — `color-scheme: light` only), and this operator
+   page is asked to read well in both light and dark. Dependency-free, same
+   as style.css — this origin's CSP (`style-src 'self'`, no
+   `'unsafe-inline'`) rules out an inline <style> block the same way it
+   rules out an inline <script>, which is why this is a separate file
+   rather than embedded in status.html.
+
+   Tokens below are the redesign's own (`artifacts/risepir-redesign/
+   tokens.css`): brand orange, warm near-black ink, hairline lines, the
+   ok/warn/err triad, Raleway + JetBrains Mono. Brand orange is for
+   emphasis only — never for errors; err always renders as a red distinct
+   from the orange in both themes, paired with a tag/word, never color
+   alone.
+
+   ---- Dark palette (design decision; the token file has no dark variant
+   today, so this is derived deliberately rather than inverted or guessed):
+   - Canvas near-black (#0B0C0E) rather than a lifted gray, so it reads as
+     dark chrome, not a dimmed light page.
+   - Cards get their own raised panel color (--card: #1C2024) instead of
+     matching the canvas the way they do in light mode (where --card ==
+     --bg and only the hairline border separates a card from the page) —
+     dark surfaces need a lightness step for the eye to find the edge,
+     light surfaces don't.
+   - Ink inverts to a warm off-white (#F2F0EE, not pure #FFFFFF, echoing
+     the light theme's warm #0B0A09 rather than a cold gray-black); --ink-70
+     and --ink-50 keep the same use (secondary text, placeholders/large
+     captions) at higher absolute lightness so they still clear AA on a
+     dark ground; --ink-30 stays reserved for large-text/decorative UI only
+     (3:1 tier — see the table below), never for body copy.
+   - Brand orange is lifted (#FF8659, not the light theme's #FF4608) rather
+     than reused as-is: the saturated light-mode orange still clears AA on
+     near-black (5.7:1) but reads harsh at that saturation against a dark
+     ground, and a single lifted value serves every brand-emphasis use
+     (headers, focus ring, links) so nothing is invented ad hoc per
+     element.
+   - ok/warn/err each get one dark-mode swap (a brighter foreground, a very
+     dark desaturated tint for the soft background, a mid-tone border) —
+     never the light-mode err/warn/ok values by themselves, which fall
+     below AA on a near-black ground.
+
+   Contrast (WCAG AA: 4.5:1 body text / 3:1 large text & UI), computed
+   against the surface each token actually sits on:
+
+     token         light            dark             dark contrast
+     ---------------------------------------------------------------------
+     --ink         #0B0A09 on #FFF  #F2F0EE on #0B0C0E  17.2:1  (body)
+     --ink-70      rgba(...,.72)    #B7BCC4 on #0B0C0E  10.3:1  (body)
+     --ink-50      rgba(...,.52)    #8A8F98 on #0B0C0E   6.0:1  (large)
+     --ink-30      rgba(...,.30)    #6B7078 on #0B0C0E   3.9:1  (UI/large)
+     --brand-ink   #B83205 on #FFF  #FF8659 on #0B0C0E   8.2:1  (body)
+     --brand-ink   (panel)          #FF8659 on #1C2024   6.9:1  (body)
+     --ok          #17693F on #FFF  #4ADE80 on #0B0C0E  11.2:1  (body)
+     --ok on -bg   #17693F on ok-bg #4ADE80 on #10241A   9.4:1  (body)
+     --warn        #8A5300 on #FFF  #FBBF24 on #0B0C0E  11.7:1  (body)
+     --warn on -bg #8A5300 on warn-bg #FBBF24 on #2A1F08 9.7:1  (body)
+     --err         #B42318 on #FFF  #FB7185 on #0B0C0E   7.3:1  (body)
+     --err on -bg  #B42318 on err-bg #FB7185 on #2A1113  6.6:1  (body)
+
+   Full workings: scratchpad/r2/a16/contrast2.py (WCAG relative-luminance
+   formula, not eyeballed). */
+
+@font-face {
+  font-family: "Raleway";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/raleway.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Raleway";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/raleway-italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono.woff2") format("woff2");
+}
 
 :root {
-  --bg: #fbfbfa;
-  --panel: #ffffff;
-  --ink: #17181b;
-  --muted: #5c6067;
-  --line: #e3e2dd;
-  --line-strong: #c4c2ba;
-  --accent: #0c7285;
+  color-scheme: light dark;
 
-  --ok: #187a41;
-  --ok-soft: rgba(24, 122, 65, 0.09);
-  --warn: #8a5c04;
-  --warn-soft: rgba(138, 92, 4, 0.1);
-  --err: #b53329;
-  --err-soft: rgba(181, 51, 41, 0.08);
+  --brand: #ff4608;
+  --brand-ink: #b83205;
+  --brand-deep: #d23906;
 
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --ink: #0b0a09;
+  --ink-70: rgba(11, 10, 9, 0.72);
+  --ink-50: rgba(11, 10, 9, 0.52);
+  --ink-30: rgba(11, 10, 9, 0.3);
+  --line: rgba(11, 10, 9, 0.1);
+  --line-2: rgba(11, 10, 9, 0.22);
+
+  --bg: #ffffff;
+  --card: #ffffff;
+
+  --ok: #17693f;
+  --ok-bg: #e8f5ee;
+  --ok-line: #b9e0cb;
+  --warn: #8a5300;
+  --warn-bg: #fff4db;
+  --warn-line: #f2d59a;
+  --err: #b42318;
+  --err-bg: #fdecea;
+  --err-line: #f4c1bc;
+
+  --font-sans: "Raleway", -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14161a;
-    --panel: #1b1e24;
-    --ink: #eceef1;
-    --muted: #98a0ab;
-    --line: #2b2f36;
-    --line-strong: #3a3f48;
-    --accent: #5fd3e8;
+    --brand: #ff8659;
+    --brand-ink: #ff8659;
+    --brand-deep: #ffa072;
 
-    --ok: #63d391;
-    --ok-soft: rgba(99, 211, 145, 0.12);
-    --warn: #e0b34c;
-    --warn-soft: rgba(224, 179, 76, 0.12);
-    --err: #f0776d;
-    --err-soft: rgba(240, 119, 109, 0.12);
+    --ink: #f2f0ee;
+    --ink-70: #b7bcc4;
+    --ink-50: #8a8f98;
+    --ink-30: #6b7078;
+    --line: rgba(255, 255, 255, 0.12);
+    --line-2: rgba(255, 255, 255, 0.22);
+
+    --bg: #0b0c0e;
+    --card: #1c2024;
+
+    --ok: #4ade80;
+    --ok-bg: #10241a;
+    --ok-line: #1f4630;
+    --warn: #fbbf24;
+    --warn-bg: #2a1f08;
+    --warn-line: #4a3a12;
+    --err: #fb7185;
+    --err-bg: #2a1113;
+    --err-line: #4a2228;
   }
 }
 
@@ -53,21 +153,31 @@ body {
   padding: 0 1rem 3rem;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 400 15px/1.6 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 .page {
-  max-width: 56rem;
+  max-width: 60rem;
   margin: 0 auto;
 }
 
 code {
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   font-size: 0.92em;
 }
 
 .hidden {
   display: none !important;
+}
+
+a {
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand-deep);
+  outline-offset: 2px;
 }
 
 .masthead {
@@ -76,66 +186,82 @@ code {
   justify-content: space-between;
   gap: 0.75rem;
   flex-wrap: wrap;
-  padding: 0.95rem 0;
+  padding: 1.1rem 0;
   border-bottom: 1px solid var(--line);
 }
 
 .brand {
   display: inline-flex;
-  align-items: baseline;
-  gap: 0.55rem;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.brand-mark {
+  width: 26px;
+  height: 26px;
+  flex: none;
 }
 
 .brand-name {
-  font-family: var(--mono);
-  font-weight: 700;
-  font-size: 0.95rem;
+  font: 700 19px/24px var(--font-sans);
+  color: var(--ink);
 }
 
 .brand-sub {
-  font-family: var(--mono);
-  color: var(--muted);
-  font-size: 0.78rem;
+  font: 500 12px/16px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-50);
 }
 
 .masthead-right {
   display: inline-flex;
   align-items: center;
-  gap: 1rem;
+  gap: 1.1rem;
+  flex-wrap: wrap;
 }
 
 .poll-state {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  color: var(--muted);
+  font: 500 12px/16px var(--font-mono);
+  letter-spacing: 0.03em;
+  color: var(--ink-50);
 }
 
 .poll-state.is-err {
   color: var(--err);
 }
 
-.back-link {
-  font-size: 0.82rem;
-  color: var(--accent);
+.nav-link {
+  font: 600 13px/1 var(--font-sans);
+  color: var(--ink-70);
   text-decoration: none;
 }
 
-.back-link:hover {
+.nav-link:hover {
+  color: var(--ink);
+}
+
+.nav-link-ext {
+  font: 600 13px/1 var(--font-sans);
+  color: var(--brand-ink);
+  text-decoration: none;
+}
+
+.nav-link-ext:hover {
   text-decoration: underline;
 }
 
 .note {
-  color: var(--muted);
+  color: var(--ink-70);
   font-size: 0.85rem;
   max-width: 46rem;
-  margin: 1.1rem 0;
+  margin: 1.2rem 0;
 }
 
 .alert {
-  border: 1px solid var(--err);
-  background: var(--err-soft);
-  border-radius: 4px;
+  border: 1px solid var(--err-line);
+  background: var(--err-bg);
+  border-radius: 2px;
   padding: 0.7rem 0.9rem;
   color: var(--err);
   font-size: 0.85rem;
@@ -143,22 +269,26 @@ code {
 }
 
 .panel {
-  background: var(--panel);
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 1.1rem 1.3rem 1.3rem;
+  border-radius: 0;
+  padding: 1.15rem 1.3rem 1.35rem;
   margin-bottom: 1.1rem;
 }
 
 .panel h2 {
-  font-size: 0.78rem;
-  font-weight: 700;
+  font: 600 12px/16px var(--font-mono);
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--brand-ink);
   margin: 0 0 0.9rem;
-  padding-bottom: 0.6rem;
+  padding-bottom: 0.65rem;
   border-bottom: 1px solid var(--line);
+}
+
+.panel h2 code {
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .grid {
@@ -175,16 +305,17 @@ code {
 
 .tile-label {
   font-size: 0.72rem;
-  color: var(--muted);
+  color: var(--ink-50);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
 .tile-value {
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   font-size: 1.35rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  color: var(--ink);
 }
 
 #lag-tile.is-warn .tile-value {
@@ -204,7 +335,7 @@ table.kv {
 table.kv th {
   text-align: left;
   font-weight: 400;
-  color: var(--muted);
+  color: var(--ink-70);
   padding: 0.4rem 0.8rem 0.4rem 0;
   vertical-align: top;
   white-space: nowrap;
@@ -212,16 +343,17 @@ table.kv th {
 
 table.kv td {
   padding: 0.4rem 0;
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   text-align: right;
   width: 100%;
   overflow-wrap: anywhere;
+  color: var(--ink);
 }
 
 table.kv tr:not(:last-child) th,
 table.kv tr:not(:last-child) td {
-  border-bottom: 1px dotted var(--line);
+  border-bottom: 1px dotted var(--line-2);
 }
 
 .table-scroll {
@@ -232,7 +364,7 @@ table.data {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.85rem;
-  font-family: var(--mono);
+  font-family: var(--font-mono);
 }
 
 table.data th,
@@ -241,11 +373,17 @@ table.data td {
   padding: 0.45rem 0.7rem;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
+  color: var(--ink);
+}
+
+table.data th {
+  color: var(--ink-70);
+  font-weight: 600;
 }
 
 table.data td.errclasses {
   white-space: normal;
-  color: var(--muted);
+  color: var(--ink-70);
 }
 
 table.data tbody tr:last-child th,
@@ -254,43 +392,60 @@ table.data tbody tr:last-child td {
 }
 
 .tag {
-  display: inline-block;
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  font-weight: 600;
-  padding: 0.05rem 0.45rem;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: 600 12px/1 var(--font-mono);
+  padding: 4px 8px;
+  border-radius: 8px;
+  vertical-align: baseline;
+  white-space: nowrap;
 }
 
 .tag-ok {
   color: var(--ok);
-  background: var(--ok-soft);
+  background: var(--ok-bg);
+  border: 1px solid var(--ok-line);
 }
 
 .tag-warn {
   color: var(--warn);
-  background: var(--warn-soft);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
 }
 
 .tag-err {
   color: var(--err);
-  background: var(--err-soft);
+  background: var(--err-bg);
+  border: 1px solid var(--err-line);
 }
 
 .fine {
   font-size: 0.78rem;
-  color: var(--muted);
+  color: var(--ink-50);
   margin: 0.7rem 0 0;
 }
 
 footer {
   margin-top: 1.5rem;
   border-top: 1px solid var(--line);
-  padding-top: 0.8rem;
+  padding-top: 0.9rem;
 }
 
 .mono {
-  font-family: var(--mono);
+  font-family: var(--font-mono);
+}
+
+@media (max-width: 640px) {
+  .masthead {
+    padding: 0.9rem 0;
+  }
+  .masthead-right {
+    gap: 0.8rem;
+  }
+  .panel {
+    padding: 1rem 1rem 1.2rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

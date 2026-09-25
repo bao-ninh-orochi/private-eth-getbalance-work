@@ -11,19 +11,31 @@
     <link rel="stylesheet" href="status.css" />
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><rect width='28' height='28' rx='6' fill='%23ffffff' stroke='%23c4c2ba'/><circle cx='9' cy='9' r='2' fill='%230c7285'/><circle cx='14' cy='9' r='2' fill='%230c7285'/><circle cx='19' cy='9' r='2' fill='%230c7285'/><circle cx='9' cy='14' r='2' fill='%230c7285'/><circle cx='14' cy='14' r='2' fill='%230c7285'/><circle cx='19' cy='14' r='2' fill='%230c7285'/><circle cx='9' cy='19' r='2' fill='%230c7285'/><circle cx='14' cy='19' r='2' fill='%230c7285'/><circle cx='20.2' cy='20.3' r='2' fill='%230c7285'/></svg>"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><rect width='28' height='28' rx='6' fill='%23ffffff' stroke='%23c4c2ba'/><circle cx='9' cy='9' r='2' fill='%23ff4608'/><circle cx='14' cy='9' r='2' fill='%23ff4608'/><circle cx='19' cy='9' r='2' fill='%23ff4608'/><circle cx='9' cy='14' r='2' fill='%23ff4608'/><circle cx='14' cy='14' r='2' fill='%23ff4608'/><circle cx='19' cy='14' r='2' fill='%23ff4608'/><circle cx='9' cy='19' r='2' fill='%23ff4608'/><circle cx='14' cy='19' r='2' fill='%23ff4608'/><circle cx='20.2' cy='20.3' r='2' fill='%23ff4608'/></svg>"
     />
   </head>
   <body>
     <div class="page">
       <header class="masthead">
         <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="brand-mark-status" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#FFBAA4" />
+                <stop offset="1" stop-color="#FFFFFF" />
+              </linearGradient>
+            </defs>
+            <rect x="1" y="15" width="14" height="14" fill="url(#brand-mark-status)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round" />
+            <rect x="8" y="8" width="14" height="14" fill="url(#brand-mark-status)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round" />
+            <rect x="15" y="1" width="14" height="14" fill="#FF4608" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round" />
+          </svg>
           <span class="brand-name">RisePIR</span>
           <span class="brand-sub">status</span>
         </div>
         <div class="masthead-right">
           <span id="poll-state" class="poll-state">connecting…</span>
-          <a class="back-link" href="./">← balance lookup</a>
+          <a class="nav-link" href="./">← Balance lookup</a>
+          <a class="nav-link-ext" href="https://risepir.org">About RisePIR <span class="mono" aria-hidden="true">↗</span></a>
         </div>
       </header>
 

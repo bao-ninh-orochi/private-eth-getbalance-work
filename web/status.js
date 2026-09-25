@@ -100,15 +100,18 @@ function fmtUptime(s) {
   const m = Math.floor((s % 3600) / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m ${Math.floor(s % 60)}s`;
 }
+// Decimal SI units (1000-based), matching how the demo and the landing
+// page quote hint/state sizes elsewhere (e.g. "553.8 MB", not "528.16 MB"
+// MiB mislabelled as MB). 553,819,345 B -> "553.82 MB".
 function fmtBytes(b) {
-  if (b < 1024) return `${b} B`;
-  const units = ["KB", "MB", "GB", "TB"];
+  if (b < 1000) return `${b} B`;
+  const units = ["kB", "MB", "GB", "TB"];
   let v = b;
   let i = -1;
   do {
-    v /= 1024;
+    v /= 1000;
     i++;
-  } while (v >= 1024 && i < units.length - 1);
+  } while (v >= 1000 && i < units.length - 1);
   return `${v.toFixed(2)} ${units[i]}`;
 }
 const tag = (text, cls) => `<span class="tag tag-${cls}">${text}</span>`;

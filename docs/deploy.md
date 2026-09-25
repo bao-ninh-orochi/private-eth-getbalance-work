@@ -2859,11 +2859,11 @@ changed as a result (as it does on any boot-disk/machine-type change,
 ssh-keygen -R compute.<instance-id> -f ~/.ssh/google_compute_known_hosts
 ```
 
-**Cost.** `$0.3616/h ≈ $8.68/day` while running (matches this repo's
-existing ~$8.60/day `e2-highmem-8` figure, §2.3/§3.6), plus ~$25/month for
-the 250 GB pd-balanced disk when stopped — both from the Cloud Billing
-catalog, checked 2026-09-24. Down from the `c3d-highmem-16`'s ~$0.9798/h ≈
-$23.5/day (§5.11).
+**Cost.** `$0.3616/h ≈ $8.68/day` while running (close to the ~$8.60/day
+this repo recorded for an `e2-highmem-8` in July, §2.3/§3.6), plus
+~$25/month for the 250 GB pd-balanced disk when stopped — both from the
+Cloud Billing catalog, checked 2026-09-24. Down from the `c3d-highmem-16`'s
+~$0.9798/h ≈ $23.5/day (§5.11).
 
 **Build rule: `target-cpu=x86-64-v3`, not `target-cpu=native`, from here
 on.** A C3D instance is a fixed microarchitecture for its lifetime; an E2

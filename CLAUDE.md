@@ -220,7 +220,8 @@ operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
 Project **`<your-project-id>`**, VM **`risepir-c3d`** — since **2026-09-24**
 an **`e2-highmem-8`: 8 vCPU, 62 GiB usable, 250 GB pd-balanced disk**
 `risepir-c3d-central`, Debian 12, **`us-central1-a`** (was `c3d-highmem-16`
-until then; deploy.md §5.13); repo at `~/build-4` (the campaign commit),
+until then; deploy.md §5.13); repo at `~/build-4` (detached at the upstream
+`main` commit last deployed — `git -C ~/build-4 log -1` shows which),
 server runs in tmux session `risepir` with `--state ~/risepir-state.bin`,
 logs at `~/server-complete.log`. The Mac's `gcloud` + `gh` are
 authenticated; the VM is drivable non-interactively.

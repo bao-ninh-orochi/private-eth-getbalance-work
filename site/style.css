@@ -520,24 +520,19 @@ summary::-webkit-details-marker { display: none; }
 .try-note { margin-top: var(--s-5); font: var(--t-small); color: var(--ink-50); }
 .try-actions { margin-top: var(--s-6); }
 
-/* Real captures of demo.risepir.org (issue #15) — a bordered card per
-   image, dated caption underneath. No box-shadow/titlebar chrome: unlike
-   the mockup this replaced, these are actual screenshots, so nothing here
-   should read as a simulated browser window. */
-.capture-card {
-  background: #fff;
-  border: 1px solid var(--line);
-}
-.capture-card img { width: 100%; height: auto; display: block; }
-.capture-caption {
-  margin-top: var(--s-3);
-  font: var(--t-small);
-  color: var(--ink-50);
-}
-.try-captures { display: flex; flex-direction: column; gap: var(--s-5); min-width: 0; }
-.try-captures > * { min-width: 0; }
-.capture-secondary { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-5); }
-.capture-secondary > * { min-width: 0; }
+/* Real captures of demo.risepir.org (issue #15). The border sits on the
+   image, not the figure, so the dated caption reads as a caption, not as
+   part of the screenshot. No titlebar chrome: these are actual screenshots,
+   so nothing here should read as a simulated browser window.
+   The mobile capture is shown at its native 320px CSS width (a 2x image),
+   where its text stays crisp and legible. The desktop captures span the
+   content width below the grid, which keeps them near 1:1 and readable,
+   rather than shrinking them to a third of their size in the column. */
+.capture { margin: 0; min-width: 0; }
+.capture img { display: block; width: 100%; height: auto; border: 1px solid var(--line); background: #fff; }
+.capture figcaption { margin-top: var(--s-3); font: var(--t-small); color: var(--ink-50); }
+.capture-mobile { max-width: 320px; width: 100%; justify-self: center; }
+.capture-desktop { margin-top: var(--s-9); display: grid; gap: var(--s-7); }
 
 /* ---------------------------------------------------------------- 06 trust ---- */
 .trust-grid { margin-top: var(--s-7); display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--s-5); }
@@ -799,7 +794,7 @@ summary::-webkit-details-marker { display: none; }
 
   /* try */
   .try-grid { grid-template-columns: 1fr; gap: var(--s-6); }
-  .capture-secondary { grid-template-columns: 1fr; }
+  .capture-desktop { margin-top: var(--s-7); gap: var(--s-6); }
 
   /* trust */
   .trust-grid { grid-template-columns: 1fr; }

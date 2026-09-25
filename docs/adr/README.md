@@ -2598,7 +2598,7 @@ live mock deployment both still pass unmodified (0 failing checks each) —
 gates exercise. A real `curl /metrics` against a running `mock --web web`
 deployment is pasted in this change's PR description/commit message.
 
-### ADR-0040 — The snapshot export is not exact, at any distance from its boundary; three mechanisms, none of which close the population-wide gap alone **[NEW — supersedes deploy.md §2.1's "refreshes on UTC-day boundaries ⇒ canonical exact-at point" claim]**
+### ADR-0040 — The snapshot export is not exact, at any distance from its boundary; three mechanisms, none of which close the population-wide gap alone **[NEW — supersedes deploy.md §2.1's "refreshes on UTC-day boundaries ⇒ canonical exact-at point" claim]** **[AMENDED IN PART by ADR-0050 — the source became a head-tracking view on 2026-09-01; against that source, pin the export height and use `--snapshot-rewind 0` instead of the default 2000. The table-source analysis, the three mechanisms, and the code defaults below are otherwise unchanged]**
 
 **The measurement, in full — this is what changed the picture.** §5.4's
 narrower finding ("6 of 27 accounts active immediately before the boundary
@@ -4061,3 +4061,90 @@ assertion, exactly as these three did.
 
 **Status:** decided and shipped 2026-09-24 for
 orochi-network/private-eth-getbalance#14.
+
+---
+
+### ADR-0050 — Bootstrap against a head-tracking view: pin the export height, disable `--snapshot-rewind` **[NEW — amends ADR-0040 for a head-tracking-view source; ADR-0040's daily-table analysis, mechanisms and defaults are otherwise unchanged]**
+
+**Context.** ADR-0040 measured and disclosed the snapshot export's
+inexactness against `bigquery-public-data.crypto_ethereum.balances` as it
+existed through 2026-07-31: a materialized **table** (`bq show`), rebuilt
+once daily, with no per-row versioning and no block-number column to check
+any row against. Against that source, `--snapshot-rewind`'s default of
+**2000** (on by default, `0` disables —
+`crates/risepir-rpc/src/main.rs:696`) is a deliberate safety margin:
+getting `snapshot_block` slightly too low is "not merely safe but the
+*documented default behavior*" (deploy.md §2.1), because the ordinary
+forward replay re-derives the rewound window from the chain's own absolute
+post-state.
+
+On **2026-09-01**, every table in `bigquery-public-data.crypto_ethereum` —
+including `balances` — became a head-tracking **VIEW**: it reads up to the
+live chain head, atomic at ~the head block *at query time*, rather than at
+a fixed daily-rebuild instant. This changes which of ADR-0040's two error
+shapes applies. ADR-0040 modeled every CSV-vs-chain disagreement as either
+"export ahead of B" (heals unconditionally via forward replay) or "export
+behind B" (what `--snapshot-rewind` targets, by re-deriving that window
+from the chain). A view queried at a known, pinned height is neither — it
+is already exact at that height by construction, not an approximation the
+rewind window needs to correct. Re-applying `--snapshot-rewind`'s relative
+withdrawal credits (EIP-4895, `risepir_proto::BlockUpdate::credits`,
+resolved against the store's prior at apply time) against an already-exact
+base double-credits any recipient with no transaction in the rewound
+window: the credit is real, but it lands on top of a balance that already
+includes it.
+
+**Decision.** Against a head-tracking view source: materialize a frozen
+copy at one pinned height, verify that height independently, and bootstrap
+with `--snapshot-block <pinned> --snapshot-rewind 0` — disabling the
+rewind rather than leaving it at its default. `--snapshot-rewind 0` is a
+real, already-supported value (`crates/risepir-rpc/src/main.rs:696`); this
+ADR changes the *operating procedure* for a view-sourced bootstrap, not
+the code.
+
+**Pinning, as done on 2026-09-24 (deploy.md §5.13).**
+
+1. Materialize a frozen copy of the view (a table snapshot taken once, not
+   a live query re-run against a moving target).
+2. Pin its height by matching busy addresses against an independent
+   archive source at one explicit block: seven busy addresses (3 builders,
+   WETH, the deposit contract, and others) matched dRPC archive balances at
+   exactly one block, **26,044,934**.
+3. Confirm that block finalized, with the same hash, on two further
+   independent sources: publicnode and dRPC.
+4. Bootstrap with `--snapshot-block 26044934 --snapshot-rewind 0`. The
+   frozen copy held **207,747,454** nonzero rows.
+
+**Evidence the result is correct.** Post-bootstrap audit: **0/210
+disagreed** (Wilson 95% CI [0%, 1.80%]; the remaining samples in that batch
+were `blastapi` 429s, excluded rather than counted as agreements). **11/11**
+private lookups were byte-exact against an independent provider (Tenderly).
+End to end, pinning and bootstrapping this way took **~30 minutes** on the
+`e2-highmem-8`, against an estimated **~10.5–11.5 hours** to instead replay
+the 149,789 blocks a stale state file would otherwise have needed to catch
+up from scratch.
+
+**What this does not change.** `parse_mainnet`'s default for
+`--snapshot-rewind` is still **2000** (`crates/risepir-rpc/src/main.rs`) —
+this ADR does not touch the code, only the operating procedure for a
+view-sourced bootstrap; an operator who does not pass `--snapshot-rewind 0`
+explicitly still gets ADR-0040's table-era default, which is still correct
+for an actual daily-table source. Making the tool itself detect a view
+source (e.g. via `bq show`'s `type` field) and choose the right value
+automatically would be a separate change, not made here.
+
+**Rejected:**
+- **Leaving `--snapshot-rewind` at its default 2000 against a pinned view
+  export.** ADR-0040's own model shows why this is wrong here, not merely
+  unnecessary: the view is already exact at the pinned height, so there is
+  no "export behind B" population left for the rewind to correct, and the
+  credits it re-applies are real double-credits, not a conservative safety
+  margin.
+- **Changing the code's default value.** The default is correct for the
+  (still supported, still real) daily-table case ADR-0040 was written
+  against; the fix belongs in the operating procedure and in detecting
+  which case applies, not in silently changing behavior for every caller
+  regardless of source type.
+
+**Status:** the decision was executed live on 2026-09-24 (deploy.md
+§5.13); this ADR records it, for orochi-network/private-eth-getbalance#22.

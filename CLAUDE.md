@@ -56,7 +56,22 @@ today** and there is a **live GCP deployment** (below).
   dependency — its `ikpir-common` declares no `[features]` section at all
   (no `parallel` feature) and has neither `backend/gemm.rs` nor
   `backend/prg.rs`. `.cargo/config.toml` sets `git-fetch-with-cli` +
-  `target-cpu=native`. The local checkout at `../CANS2026/RisePIR` drifts —
+  `target-cpu=native` — load-bearing for the benches, and correct for a
+  fixed-microarchitecture host (a C3D, a laptop). **On the live
+  `e2-highmem-8` (since 2026-09-24, "The live GCP deployment" below) build
+  with `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C
+  target-cpu=x86-64-v3"` instead of plain `RUSTFLAGS`** — because GCP can
+  land an E2 instance on a different microarchitecture generation at every
+  restart, and a plain `native` build can `SIGILL` the moment it does
+  (deploy.md §5.13). The target-scoped variable beats
+  `.cargo/config.toml`'s `[build] rustflags` for the x86_64 host target
+  only, without editing that file or touching any other target's own
+  rustflags — unlike plain `RUSTFLAGS`, which overrides *every* rustflags
+  source, including the `wasm32` target's, and breaks `cargo run -p xtask
+  --release -- web`'s wasm build if that step is ever run this way (deploy.md
+  §5.13 has the verified failure and the verified fix). This does not
+  change `.cargo/config.toml`'s default, which stays `native` for every
+  other host. The local checkout at `../CANS2026/RisePIR` drifts —
   read it for API signatures, **never** path-dep it. The pin has since moved
   again, to `tag = "v0.2.0-perf"` (commit
   `d91c75fb807d25807104c29b1931f846f007379a`, two commits past `adecd9c`):
@@ -217,12 +232,14 @@ operator). `"latest"` = **finalized**, ~13 min behind the public head, by design
 
 ## The live GCP deployment
 
-Project **`<your-project-id>`**, VM **`risepir-c3d`** (**`c3d-highmem-16`: AMD
-EPYC 9B14 (Zen 4), 8 cores / 16 vCPU, 128 GB, 250 GB pd-balanced disk**
-`risepir-c3d-central`, Debian 12, **`us-central1-a`**); repo at `~/build-4`
-(the campaign commit), server runs in tmux session `risepir` with `--state
-~/risepir-state.bin`, logs at `~/server-complete.log`. The Mac's `gcloud` +
-`gh` are authenticated; the VM is drivable non-interactively.
+Project **`<your-project-id>`**, VM **`risepir-c3d`** — since **2026-09-24**
+an **`e2-highmem-8`: 8 vCPU, 62 GiB usable, 250 GB pd-balanced disk**
+`risepir-c3d-central`, Debian 12, **`us-central1-a`** (was `c3d-highmem-16`
+until then; deploy.md §5.13); repo at `~/build-4` (detached at the upstream
+`main` commit last deployed — `git -C ~/build-4 log -1` shows which),
+server runs in tmux session `risepir` with `--state ~/risepir-state.bin`,
+logs at `~/server-complete.log`. The Mac's `gcloud` + `gh` are
+authenticated; the VM is drivable non-interactively.
 
 **Migrated twice in three days, and back where it started.** On **2026-09-02**
 a `c3d-highmem-16` (still named `risepir-c3d`) replaced the original
@@ -241,6 +258,30 @@ no longer exists: instance and disk deleted, its own regional address
 (`risepir-ip-east4` = `35.199.37.209`) released. The original `e2-highmem-8`
 VM was deleted with its disk on 2026-09-02, after the `c3d-highmem-16`
 replacement was verified end to end (deploy.md §5.11).
+
+**A third move, 2026-09-24: back to an `e2-highmem-8`, this time for
+capacity, not a campaign.** `c3d-highmem-16`/`-8` stocked out again in
+`us-central1-a` (every start refused 04:19–04:37 UTC), so the VM was
+switched with `gcloud compute instances set-machine-type` on the stopped
+instance rather than replaced — same disk, same reserved IP, name
+unchanged. GCP flipped the boot disk NVMe→SCSI; it booted fine, but the SSH
+host key changed (`ssh-keygen -R compute.<instance-id> -f
+~/.ssh/google_compute_known_hosts`, once). Builds from here on target
+`x86-64-v3`, not `native`: an E2 instance can land on Haswell, Broadwell,
+Skylake, Rome or Milan at each start, and a native build can `SIGILL` after
+a restart on a different generation (verified: 0 `zmm`, ~36k `ymm`
+instructions in the binary). Use the target-scoped
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS`, not plain `RUSTFLAGS`,
+whenever `xtask web` (and its wasm build) might be in play — "Build & test"
+above and deploy.md §5.13 have the full rule and the verified failure mode.
+A binary built natively on the `c3d-highmem-16` must never run here. The box
+was re-bootstrapped the same day from the BigQuery balances view — now a
+head-tracking VIEW rather than a daily table, so the export height was
+pinned and `--snapshot-rewind 0` used instead of replaying relative
+credits onto an already-head-exact export: **207,747,454** accounts at
+block **26,044,934**, load 0.774, the same `(2, 4)` / 2^28-slot geometry;
+audit 0/210 disagreed, 11/11 private lookups byte-exact against an
+independent provider. See deploy.md §5.13.
 
 Since **2026-07-26 it serves the COMPLETE mainnet set** — `GET /mode` = 1, not
 the partial demo. That is what the 64 GB machine is for. On **2026-07-27 it was
@@ -272,10 +313,11 @@ at head and reconcile-green after the move back to `us-central1-a`, at
 rates.)** Measured 2026-07-31, start to caught-up: **~1 h 55 min** — 451 s
 snapshot ingest, 12 min 46 s to the first saved state file, then 10,816
 blocks of replay at **1.72 blocks/s** (not the ~1 s/block the runbook long
-assumed). It costs
-**~$23.5/day running** on the `c3d-highmem-16` (was **~$8.60/day** on the
-`e2-highmem-8`; both verified against the Cloud Billing catalog, deploy.md
-§5.11), so stop it when idle.
+assumed). It cost **~$23.5/day running** on the `c3d-highmem-16`
+(2026-09-02–09-24; was **~$8.60/day** on the earlier `e2-highmem-8`; both
+verified against the Cloud Billing catalog, deploy.md §5.11). Since
+**2026-09-24** it runs on an `e2-highmem-8` again, **~$8.68/day**
+(`$0.3616/h`, Cloud Billing catalog; deploy.md §5.13), so stop it when idle.
 
 A large catch-up (this migration's own was ~52,000 blocks) is faster with
 **`--prefetch <k>`** (ADR-0047, deploy.md §5.11): depth 4 sustained
@@ -467,8 +509,10 @@ mode, but **now genuinely expensive** — a complete-set re-bootstrap is ~33 min
 of CPU plus the catch-up replay). When checking from `gcloud … --command`,
 bracket the pattern (`pgrep -f "risepir-rp[c]"`) or the probe matches its own
 ssh wrapper. VM SSH key and the GitHub account key `risepir-gcp-vm` are already
-set up; at `c3d-highmem-16` the VM burns **~$23.5/day** while running (was
-**~$8.60/day** at `e2-highmem-8`, itself up from ~$0.80/day as an
-`e2-medium`; both current figures verified against the Cloud Billing catalog,
-deploy.md §5.11), ~$25/mo stopped (250 GB pd-balanced disk only — was quoted
-here as ~$10/mo on the old host).
+set up; at `e2-highmem-8` (since 2026-09-24) the VM burns **~$8.68/day**
+while running (**$0.3616/h**, Cloud Billing catalog, 2026-09-24; deploy.md
+§5.13) — was **~$23.5/day** at `c3d-highmem-16` (2026-09-02–09-24) and
+**~$8.60/day** at the earlier `e2-highmem-8`, itself up from ~$0.80/day as
+an `e2-medium` (both verified against the Cloud Billing catalog, deploy.md
+§5.11), ~$25/mo stopped (250 GB pd-balanced disk only — the ~$10/mo once
+quoted here was simply wrong, not a property of either host).

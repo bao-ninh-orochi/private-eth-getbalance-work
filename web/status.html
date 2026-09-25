@@ -11,19 +11,31 @@
     <link rel="stylesheet" href="status.css" />
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'><rect width='28' height='28' rx='6' fill='%23ffffff' stroke='%23c4c2ba'/><circle cx='9' cy='9' r='2' fill='%230c7285'/><circle cx='14' cy='9' r='2' fill='%230c7285'/><circle cx='19' cy='9' r='2' fill='%230c7285'/><circle cx='9' cy='14' r='2' fill='%230c7285'/><circle cx='14' cy='14' r='2' fill='%230c7285'/><circle cx='19' cy='14' r='2' fill='%230c7285'/><circle cx='9' cy='19' r='2' fill='%230c7285'/><circle cx='14' cy='19' r='2' fill='%230c7285'/><circle cx='20.2' cy='20.3' r='2' fill='%230c7285'/></svg>"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='fi' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23FFBAA4'/%3E%3Cstop offset='1' stop-color='%23FFFFFF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='1' y='15' width='14' height='14' fill='url(%23fi)' stroke='%23E03C06' stroke-width='1.2' stroke-linejoin='round'/%3E%3Crect x='8' y='8' width='14' height='14' fill='url(%23fi)' stroke='%23E03C06' stroke-width='1.2' stroke-linejoin='round'/%3E%3Crect x='15' y='1' width='14' height='14' fill='%23FF4608' stroke='%23E03C06' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
   </head>
   <body>
     <div class="page">
       <header class="masthead">
         <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="brand-mark-status" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#FFBAA4" />
+                <stop offset="1" stop-color="#FFFFFF" />
+              </linearGradient>
+            </defs>
+            <rect x="1" y="15" width="14" height="14" fill="url(#brand-mark-status)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round" />
+            <rect x="8" y="8" width="14" height="14" fill="url(#brand-mark-status)" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round" />
+            <rect x="15" y="1" width="14" height="14" fill="#FF4608" stroke="#E03C06" stroke-width="1.2" stroke-linejoin="round" />
+          </svg>
           <span class="brand-name">RisePIR</span>
           <span class="brand-sub">status</span>
         </div>
         <div class="masthead-right">
           <span id="poll-state" class="poll-state">connecting…</span>
-          <a class="back-link" href="./">← balance lookup</a>
+          <a class="nav-link" href="./">← Balance lookup</a>
+          <a class="nav-link-ext" href="https://risepir.org">About RisePIR <span class="mono" aria-hidden="true">↗</span></a>
         </div>
       </header>
 
@@ -61,74 +73,68 @@
 
       <section class="panel" aria-labelledby="h-build">
         <h2 id="h-build">Deployment</h2>
-        <table class="kv">
-          <tbody>
-            <tr>
-              <th>Mode</th>
-              <td id="mode">—</td>
-            </tr>
-            <tr>
-              <th>Version</th>
-              <td id="version">—</td>
-            </tr>
-            <tr>
-              <th>Hint-lineage epoch</th>
-              <td id="epoch" class="mono">—</td>
-            </tr>
-          </tbody>
-        </table>
+        <dl class="kv">
+          <div class="kv-row">
+            <dt>Mode</dt>
+            <dd id="mode">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Version</dt>
+            <dd id="version">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Hint-lineage epoch</dt>
+            <dd id="epoch" class="mono">—</dd>
+          </div>
+        </dl>
       </section>
 
       <section class="panel" aria-labelledby="h-store">
         <h2 id="h-store">Store occupancy</h2>
-        <table class="kv">
-          <tbody>
-            <tr>
-              <th>Items</th>
-              <td id="store-items">—</td>
-            </tr>
-            <tr>
-              <th>Capacity</th>
-              <td id="store-capacity">—</td>
-            </tr>
-            <tr>
-              <th>Load factor</th>
-              <td id="store-load">—</td>
-            </tr>
-            <tr>
-              <th>Cached <code>/setup</code> size</th>
-              <td id="setup-bytes">—</td>
-            </tr>
-            <tr>
-              <th><code>/setup</code> regenerations</th>
-              <td id="setup-regens">—</td>
-            </tr>
-          </tbody>
-        </table>
+        <dl class="kv">
+          <div class="kv-row">
+            <dt>Items</dt>
+            <dd id="store-items">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Capacity</dt>
+            <dd id="store-capacity">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Load factor</dt>
+            <dd id="store-load">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Cached <code>/setup</code> size</dt>
+            <dd id="setup-bytes">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt><code>/setup</code> regenerations</dt>
+            <dd id="setup-regens">—</dd>
+          </div>
+        </dl>
       </section>
 
       <section class="panel" aria-labelledby="h-latency">
         <h2 id="h-latency">Answer latency (<code>RisePirServer::answer</code> only)</h2>
-        <table class="kv">
-          <tbody>
-            <tr>
-              <th>Requests observed</th>
-              <td id="lat-count">—</td>
-            </tr>
-            <tr>
-              <th>p50</th>
-              <td id="lat-p50">—</td>
-            </tr>
-            <tr>
-              <th>p90</th>
-              <td id="lat-p90">—</td>
-            </tr>
-            <tr>
-              <th>p99</th>
-              <td id="lat-p99">—</td>
-            </tr>
-          </tbody>
-        </table>
+        <dl class="kv">
+          <div class="kv-row">
+            <dt>Requests observed</dt>
+            <dd id="lat-count">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>p50</dt>
+            <dd id="lat-p50">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>p90</dt>
+            <dd id="lat-p90">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>p99</dt>
+            <dd id="lat-p99">—</dd>
+          </div>
+        </dl>
         <p class="fine">
           Quantiles are estimated from the histogram's bucket boundaries (linear interpolation
           within the bucket that contains the target rank), the standard Prometheus-side
@@ -155,70 +161,66 @@
 
       <section class="panel" aria-labelledby="h-reconcile">
         <h2 id="h-reconcile">Reconcile (cross-provider integrity check)</h2>
-        <table class="kv">
-          <tbody>
-            <tr>
-              <th>Configured</th>
-              <td id="rec-configured">—</td>
-            </tr>
-            <tr>
-              <th>Halted</th>
-              <td id="rec-halted">—</td>
-            </tr>
-            <tr>
-              <th>Consecutive dark checkpoints</th>
-              <td id="rec-dark">—</td>
-            </tr>
-            <tr>
-              <th>Checkpoints / comparisons total</th>
-              <td id="rec-totals">—</td>
-            </tr>
-            <tr>
-              <th>Last checkpoint</th>
-              <td id="rec-last-checkpoint">—</td>
-            </tr>
-            <tr>
-              <th>Last success</th>
-              <td id="rec-last-success">—</td>
-            </tr>
-          </tbody>
-        </table>
+        <dl class="kv">
+          <div class="kv-row">
+            <dt>Configured</dt>
+            <dd id="rec-configured">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Halted</dt>
+            <dd id="rec-halted">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Consecutive dark checkpoints</dt>
+            <dd id="rec-dark">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Checkpoints / comparisons total</dt>
+            <dd id="rec-totals">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Last checkpoint</dt>
+            <dd id="rec-last-checkpoint">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Last success</dt>
+            <dd id="rec-last-success">—</dd>
+          </div>
+        </dl>
       </section>
 
       <section class="panel" aria-labelledby="h-save">
         <h2 id="h-save">State save &amp; journal</h2>
-        <table class="kv">
-          <tbody>
-            <tr>
-              <th>Configured</th>
-              <td id="save-configured">—</td>
-            </tr>
-            <tr>
-              <th>Last save</th>
-              <td id="save-last">—</td>
-            </tr>
-            <tr>
-              <th>Last save duration</th>
-              <td id="save-duration">—</td>
-            </tr>
-            <tr>
-              <th>Last save size</th>
-              <td id="save-bytes">—</td>
-            </tr>
-            <tr>
-              <th>Save failures</th>
-              <td id="save-failures">—</td>
-            </tr>
-            <tr>
-              <th>Journal records since save</th>
-              <td id="journal-records">—</td>
-            </tr>
-            <tr>
-              <th>Journal broken</th>
-              <td id="journal-broken">—</td>
-            </tr>
-          </tbody>
-        </table>
+        <dl class="kv">
+          <div class="kv-row">
+            <dt>Configured</dt>
+            <dd id="save-configured">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Last save</dt>
+            <dd id="save-last">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Last save duration</dt>
+            <dd id="save-duration">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Last save size</dt>
+            <dd id="save-bytes">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Save failures</dt>
+            <dd id="save-failures">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Journal records since save</dt>
+            <dd id="journal-records">—</dd>
+          </div>
+          <div class="kv-row">
+            <dt>Journal broken</dt>
+            <dd id="journal-broken">—</dd>
+          </div>
+        </dl>
       </section>
 
       <footer>

@@ -102,7 +102,7 @@ generated at deploy time — there is no build step for this page (above).
 The generator is an HTML page rendered with Playwright at exactly
 1200×630, `deviceScaleFactor: 1`, referencing this repo's own
 `fonts/*.woff2` and `assets/*.svg` by `file://` path; its source is kept in
-the PR that introduced the card (#21) rather than shipped in `site/`, since
+the PR that introduced the card (#39, for issue #21) rather than shipped in `site/`, since
 nothing here executes it. Re-render, re-save as `assets/social-card.png`,
 and confirm it is still under 200 KB before committing.
 

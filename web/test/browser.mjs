@@ -370,6 +370,17 @@ check(
 const hasBackLink = await evaluate(`return !!document.querySelector('a[href="https://risepir.org"]');`);
 check("a back-link to https://risepir.org exists", hasBackLink === true);
 
+// ── 1.7 the wire panel's fine print speaks in future tense before the ──
+// first lookup, since no computation has happened, no response has been
+// returned, and no address has been typed yet (issue #27).
+const fineBefore = await evaluate(`return document.getElementById("wire-fine").textContent.replace(/\\s+/g, " ").trim();`);
+check(
+  "before the first lookup, the wire panel's fine print is future/conditional tense",
+  /When you look up an address, the server computes/.test(fineBefore ?? "") &&
+    /The address you type never appears in this list/.test(fineBefore ?? ""),
+  JSON.stringify(fineBefore),
+);
+
 // ── 2. a real lookup through the real DOM ────────────────────────────
 //
 // The address is typed into the input and the form submitted, exactly as
@@ -410,7 +421,8 @@ const lookup = await evaluate(`
     const err = box.querySelector(".error");
     if (wei) return { ok: true, wei: wei.textContent, eth: box.querySelector(".balance").textContent,
                       asof: box.querySelector(".asof").textContent,
-                      wire: document.getElementById("wire-rows").innerText };
+                      wire: document.getElementById("wire-rows").innerText,
+                      fine: document.getElementById("wire-fine").textContent.replace(/\\s+/g, " ").trim() };
     if (err) return { ok: false, error: err.textContent };
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -452,6 +464,12 @@ check(
 check(
   "real entropy was drawn in the browser",
   /crypto\.getRandomValues/.test(lookup?.wire ?? "") && !/ 0 bytes of crypto/.test(lookup?.wire ?? ""),
+);
+check(
+  "after a completed lookup, the wire panel's fine print switches to past tense",
+  /The server computed over every account it holds and returned a response/.test(lookup?.fine ?? "") &&
+    /The address you typed is not in the list/.test(lookup?.fine ?? ""),
+  JSON.stringify(lookup?.fine),
 );
 
 // ── 2.35 the number renders as one continuous run, not two detached chunks ──

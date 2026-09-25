@@ -274,6 +274,11 @@ summary::-webkit-details-marker { display: none; }
 }
 .hero-copy h1 { font: 600 56px/64px var(--font-sans); color: var(--ink); margin-top: var(--s-4); letter-spacing: -0.01em; max-width: 600px; }
 .hero-copy .lead { font: var(--t-lead); color: var(--ink-70); margin-top: var(--s-5); max-width: 520px; }
+/* the project's name, set inline in the hero lead: semibold ink (not the
+   brand orange, which is reserved for CTAs), the command-ish part in the
+   site's mono face, no pill and no underline so it never reads as a link */
+.project-name { font-weight: 600; color: var(--ink); white-space: nowrap; }
+.project-name .proj-mono { font-family: var(--font-mono); }
 .hero-actions { display: flex; align-items: center; gap: var(--s-4); margin-top: var(--s-7); }
 .hero-fine { margin-top: var(--s-5); font: var(--t-small); color: var(--ink-50); }
 

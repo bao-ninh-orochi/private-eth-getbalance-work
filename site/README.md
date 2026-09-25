@@ -97,6 +97,6 @@ it is switched off, drop that clause from `index.html` and redeploy.
 
 ## Still to fill in
 
-The paper's DOI and a link to the PDF, once CANS 2026 publishes. The citation
-itself is on the page; only those two are pending, marked with a `TODO`
-comment in `index.html`.
+The proceedings DOI, once CANS 2026 publishes. The full version is already
+linked from the Paper card (IACR ePrint 2026/2082); only the DOI is pending,
+marked with a `TODO` comment in `index.html`.

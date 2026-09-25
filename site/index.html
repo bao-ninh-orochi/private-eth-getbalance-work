@@ -7,13 +7,13 @@
 <meta name="description" content="A keyword-PIR server that answers Ethereum eth_getBalance queries against the complete 204,714,034-account mainnet set without learning which account was asked.">
 
 <meta property="og:title" content="RisePIR — Private eth_getBalance for Ethereum mainnet">
-<meta property="og:description" content="LWE keyword-PIR over a Segmented Cuckoo Filter. The server computes over the entire mainnet balance set to answer one query, and never learns which account was asked.">
+<meta property="og:description" content="LWE keyword-PIR over a d-ary Segmented Cuckoo Filter. The server computes over the entire mainnet balance set to answer one query, and never learns which account was asked.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://risepir.org/">
 
 <link rel="canonical" href="https://risepir.org/">
 <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=40e13f9a90">
-<link rel="stylesheet" href="./style.css?v=af685b37b1">
+<link rel="stylesheet" href="./style.css?v=cd5018d4c0">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -68,8 +68,8 @@
     <div class="container">
       <div class="hero-copy">
         <div class="eyebrow">Private eth_getBalance · Ethereum mainnet · CANS 2026</div>
-        <h1>The chain is public. Only your question needs hiding.</h1>
-        <p class="lead">RisePIR looks up any Ethereum balance without the server learning which address you asked about — across all 204,714,034 funded accounts, kept current block by block.</p>
+        <h1>The chain is public. Only your RPC query needs hiding.</h1>
+        <p class="lead"><strong class="project-name">Private <span class="proj-mono">eth_getBalance</span></strong> looks up any Ethereum balance without the server learning which address you asked about. Built on RisePIR, a new incremental keyword PIR scheme. It serves over 200 million mainnet accounts, answers in under a second, and meets NIST Category 1 security.</p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="#demo">Try the live demo →</a>
           <a class="btn btn-secondary" href="#paper">Read the paper</a>
@@ -101,7 +101,7 @@
       <div class="section-num">01 · Patched in place</div>
       <div class="section-head">
         <h2>Ethereum changes every 12&nbsp;seconds. RisePIR keeps up by patching, not rebuilding.</h2>
-        <p class="lede">Fast private lookups need a preprocessed hint of the whole database. In earlier keyword PIR, changing one account meant rebuilding it. RisePIR's Segmented Cuckoo Filter turns each change into a sparse, position-predictable patch — so a block's changes land in milliseconds.</p>
+        <p class="lede">Fast private lookups need a preprocessed hint of the whole database. In earlier keyword PIR, changing one account meant rebuilding it. RisePIR's d-ary Segmented Cuckoo Filter turns each change into a sparse, position-predictable patch — so a block's changes land in milliseconds.</p>
       </div>
 
       <div class="chart-card">
@@ -144,7 +144,7 @@
         <div class="fact-cards">
           <div class="fact-card"><div class="fc-num num">5,200×</div><div class="fc-label">cheaper than a rebuild</div></div>
           <div class="fact-card"><div class="fc-num num">≈433</div><div class="fc-label">accounts changed per block</div></div>
-          <div class="fact-card"><div class="fc-num num">≈10.8&nbsp;kB</div><div class="fc-label">public delta per block</div></div>
+          <div class="fact-card"><div class="fc-num num">≈10.8&nbsp;kB</div><div class="fc-label">communication per block</div></div>
         </div>
       </div>
 
@@ -183,7 +183,7 @@
           <img class="step-icon" src="./assets/illustrations/icon-patch.svg" width="48" height="48" alt="">
           <div class="step-no">03</div>
           <h3>Stay current, block by block</h3>
-          <p>Each finalized block's changes arrive as a ≈10.8&nbsp;kB public delta that every client downloads in full, so your answer is corrected to the latest finalized block without re-downloading the hint.</p>
+          <p>Each finalized block's changes arrive as ≈10.8&nbsp;kB of public data that every client downloads in full, so your answer is corrected to the latest finalized block without re-downloading the hint.</p>
         </div>
       </div>
 
@@ -292,7 +292,7 @@
         <div class="numbers-tile"><span class="v num">553.8 MB</span><span class="l">one-time hint</span></div>
         <div class="numbers-tile"><span class="v num">435 kB</span><span class="l">query on the wire (response: 434&nbsp;kB)</span></div>
         <div class="numbers-tile"><span class="v num">23.62 GB</span><span class="l">server database</span></div>
-        <div class="numbers-tile"><span class="v num">≈10.8 kB</span><span class="l">public delta per block</span></div>
+        <div class="numbers-tile"><span class="v num">≈10.8 kB</span><span class="l">communication per block</span></div>
         <div class="numbers-tile"><span class="v num">≈13 min</span><span class="l">freshness lag (latest finalized block, by design)</span></div>
       </div>
       <p class="numbers-foot">Measured on <span class="nowrap">2026-09-03</span> on a GCP c3d-highmem-16 (AMD EPYC 9B14, Zen 4, 16&nbsp;threads); client an AWS r7a.xlarge over the public internet. Source: docs/deployment-numbers.md in the repository.</p>
@@ -398,8 +398,9 @@
           <h3>Incremental Keyword Private Information Retrieval from d-ary Segmented Cuckoo Filters</h3>
           <div class="pc-meta">Bao Ninh · CANS 2026 — International Conference on Cryptology and Network Security</div>
           <blockquote>“…the first preprocessing keyword private information retrieval (PIR) scheme that absorbs insert, update, and delete on its key-value store at a cost proportional to the number of mutations alone.”</blockquote>
-          <!-- TODO: add DOI and PDF link once the proceedings are published -->
-          <p class="pc-note">Accepted for publication; DOI and PDF on release.</p>
+          <!-- TODO: add the proceedings DOI once CANS 2026 publishes -->
+          <p class="pc-note">Accepted at CANS 2026. Full version on IACR ePrint 2026/2082.</p>
+          <div class="pc-cta"><a class="btn btn-secondary" href="https://eprint.iacr.org/2026/2082">Read on ePrint →</a></div>
         </div>
         <div class="paper-card">
           <div class="pc-label eyebrow">Code</div>

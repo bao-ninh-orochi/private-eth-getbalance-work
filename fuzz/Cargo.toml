@@ -5,7 +5,8 @@
 #
 #   cargo +nightly fuzz run wire_setup -- -max_total_time=300
 #
-# CI runs every target briefly each night (.github/workflows/nightly.yml).
+# CI runs every target briefly each night (.github/workflows/nightly.yml),
+# on the maintainer's fork rather than upstream (ADR-0051).
 
 [package]
 name    = "risepir-fuzz"

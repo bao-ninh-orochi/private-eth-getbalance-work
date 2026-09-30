@@ -8,6 +8,15 @@
 #   fuzz smoke     — coverage-guided fuzzing of every attacker-facing decoder
 #                    (fuzz/), a few minutes per target. Long exploratory runs
 #                    stay local; this catches regressions.
+#
+# Where the schedule fires (ADR-0051): on the maintainer's fork
+# (`bao-ninh-orochi/private-eth-getbalance-work`), never on the org repo. Each
+# job's `if:` skips a `schedule` event when the repository owner is
+# `orochi-network`, so upstream's nightly shows both jobs skipped, and the
+# fork, running this same file from its own `main`, runs them. A
+# `workflow_dispatch` is not gated, so an on-demand run still works on either
+# repo. This is the owner's choice, not a billing fix: upstream is public on
+# standard runners, and GitHub does not meter those minutes.
 
 name: nightly
 
@@ -41,6 +50,8 @@ env:
 jobs:
   live-feed-gate:
     name: live feed gate (real mainnet, independent provider)
+    # Scheduled runs happen on the fork only (header, ADR-0051).
+    if: github.event_name != 'schedule' || github.repository_owner != 'orochi-network'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,6 +60,8 @@ jobs:
 
   fuzz-smoke:
     name: fuzz smoke (attacker-facing decoders)
+    # Scheduled runs happen on the fork only (header, ADR-0051).
+    if: github.event_name != 'schedule' || github.repository_owner != 'orochi-network'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

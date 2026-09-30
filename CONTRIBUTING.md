@@ -23,7 +23,7 @@ needs no PAT — the old `IKPIR_TOKEN`/`insteadOf` wiring is gone (ADR-0045).
 cargo clippy --workspace --all-targets -- -D warnings   # always; CI-enforced
 cargo test --workspace                                  # always; CI-enforced
 cargo run -p xtask --release -- conformance             # CI on PRs; byte-exact vs ground truth
-cargo test -p risepir-feed --release -- --ignored       # live feed gate; CI nightly
+cargo test -p risepir-feed --release -- --ignored       # live feed gate; CI nightly (on the fork, ADR-0051)
 ```
 
 Run the live gate and a `mainnet --partial` smoke run (deploy.md §1) after

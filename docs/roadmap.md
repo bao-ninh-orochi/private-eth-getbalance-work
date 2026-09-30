@@ -15,7 +15,7 @@ priors, not orders — better paths get taken and recorded (new ADRs in
 | | state |
 |---|---|
 | Tests | 513 across 8 crates (as of 2026-09-03); `xtask conformance` (byte-exact, network-free); live feed gate; web e2e + headless-browser gates |
-| CI | `.github/workflows/` — clippy `-D warnings`, tests, rustdoc `-D warnings`, wasm32 check on every push; conformance on PRs; live gate + fuzz nightly; `cargo-deny` |
+| CI | `.github/workflows/` — clippy `-D warnings`, tests, rustdoc `-D warnings`, wasm32 check on every push; conformance on PRs; live gate + fuzz nightly (scheduled on the fork, ADR-0051); `cargo-deny` |
 | Fuzzing | 5 coverage-guided targets: every wire decoder, `BlockDelta`, the state-file loader |
 | License | dual MIT/Apache-2.0, inherited by every crate |
 | Threat model | `docs/threat-model.md` (ADR-0020) — per-adversary guarantees and stated non-guarantees |

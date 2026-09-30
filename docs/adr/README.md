@@ -503,7 +503,7 @@ check is operator-side only (client-side per-query use reveals the address), and
 plaintext HTTP widens "the operator" to "anyone on-path", making TLS a
 prerequisite for naming a trusted party at all.
 
-### ADR-0021 — CI: GitHub Actions with a read-only deploy key for the private primitive **[NEW]** **[SUPERSEDED IN PART by ADR-0045 — the IKPIR dependency is no longer private, so the `IKPIR_TOKEN` PAT and its `insteadOf` wiring are gone; every other gate it chose still stands]**
+### ADR-0021 — CI: GitHub Actions with a read-only deploy key for the private primitive **[NEW]** **[SUPERSEDED IN PART by ADR-0045 — the IKPIR dependency is no longer private, so the `IKPIR_TOKEN` PAT and its `insteadOf` wiring are gone; every other gate it chose still stands]** **[AMENDED by ADR-0051 — the nightly's `schedule` fires on the maintainer's fork only; what the nightly runs is unchanged]**
 
 **Chosen:** GitHub Actions (`.github/workflows/`): clippy `-D warnings` + full
 workspace tests on every push/PR; the network-free `xtask conformance` gate on
@@ -4148,3 +4148,53 @@ automatically would be a separate change, not made here.
 
 **Status:** the decision was executed live on 2026-09-24 (deploy.md
 §5.13); this ADR records it, for orochi-network/private-eth-getbalance#22.
+
+### ADR-0051 — The scheduled nightly runs on the maintainer's fork, not on `orochi-network` **[NEW — amends ADR-0021's placement of the nightly; the jobs themselves are unchanged]**
+
+**Chosen:** each `nightly.yml` job carries
+`if: github.event_name != 'schedule' || github.repository_owner != 'orochi-network'`.
+On `orochi-network/private-eth-getbalance`, the 03:17 UTC schedule still
+fires, but both jobs (live feed gate, fuzz smoke) are skipped. The fork
+`bao-ninh-orochi/private-eth-getbalance-work` runs the same file from its own
+`main` and runs both jobs. `workflow_dispatch` is not gated, so a deliberate
+on-demand run still works on either repo.
+
+**Why:** the owner decided that scheduled work stays off the org repo and
+runs on the maintainer's fork. The record should be clear about what this is
+*not*: it is not a billing fix. Upstream is public and every job runs on
+`ubuntu-latest`, a standard GitHub-hosted runner. GitHub's Actions billing
+docs say usage is free "for public repositories that use standard
+GitHub-hosted runners", so the ~14 min/night (fuzz smoke ~14.0 min, live gate
+~0.5 min; 43 upstream runs measured 2026-08-19 → 2026-09-30) counted against
+no quota. Nobody should re-gate or re-home the nightly later on cost grounds
+from either side.
+
+**Consequences:**
+- The nightly's signal now lands on the fork, and so do its failure
+  notifications. That covers live-gate drift at a provider (dRPC truncation,
+  publicnode's archive-token refusal) and fuzz crashes. Upstream's Actions tab
+  shows nightly runs with both jobs skipped, which is the gate working, not a
+  broken workflow.
+- A `nightly.yml` change reaches the schedule only after the fork's `main`
+  is synced from upstream, because a scheduled workflow runs from the
+  repo's default branch.
+- GitHub disables a public repo's scheduled workflows after 60 days without
+  repo activity. A quiet fork loses its nightly without any error, and
+  `gh workflow enable nightly -R bao-ninh-orochi/private-eth-getbalance-work`
+  brings it back.
+
+**Rejected:**
+- **Deleting the `schedule:` trigger.** The fork runs this same file, so
+  that would stop the nightly everywhere, the opposite of the decision.
+- **Disabling the workflow in upstream's Actions settings.** That needs write
+  access the author does not have (`triage` only). It would also leave an
+  active-looking workflow file that silently never runs, with nothing in the
+  tree to say why, and it would take `workflow_dispatch` down with it.
+- **Gating on `github.repository_owner == 'bao-ninh-orochi'`.** That
+  hard-codes a personal account into the org's CI. The negative gate names the
+  one owner whose schedule is suppressed, and it leaves any other fork free to
+  enable schedules and run it.
+- **Gating `workflow_dispatch` too.** A manual run is always deliberate, and
+  keeping it lets a maintainer re-run the live gate on upstream on demand.
+
+**Status:** implemented for orochi-network/private-eth-getbalance#41.

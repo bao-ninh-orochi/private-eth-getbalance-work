@@ -101,13 +101,30 @@ today** and there is a **live GCP deployment** (below).
 - CI (`.github/workflows/`, ADR-0021) enforces `cargo clippy --workspace
   --all-targets -- -D warnings` + the tests on every push, conformance and the
   browser gate (mock mode, real headless Chromium) on PRs, and runs the live
-  gate plus the `fuzz/` targets nightly. `bao-ninh-orochi/IKPIR` is public
+  gate plus the `fuzz/` targets nightly (on the fork, not on upstream; see the
+  next bullet). `bao-ninh-orochi/IKPIR` is public
   now, so CI fetches it with no credential — the old `IKPIR_TOKEN` secret and
   its `insteadOf` URL rewrite are gone. **`cargo fmt --all -- --check` is a
   gate** as of 2026-07-31, running first in the `clippy + tests` job — the
   one-off mechanical reformat it was waiting on has landed, and that commit is
   in `.git-blame-ignore-revs` (run `git config blame.ignoreRevsFile
   .git-blame-ignore-revs` once per clone; GitHub honours it automatically).
+- **The scheduled nightly runs on the fork, not on `orochi-network`**
+  (2026-09-30, issue #41, ADR-0051). Each `nightly.yml` job skips a
+  `schedule` event when the repo owner is `orochi-network`. Upstream's 03:17
+  UTC run therefore shows both jobs *skipped*, and that is correct, not a
+  broken gate. The fork `bao-ninh-orochi/private-eth-getbalance-work` runs
+  the same file from its own `main`, so a change to `nightly.yml` reaches the
+  schedule only once the fork's `main` is synced from upstream. Read results
+  there: `gh run list -R bao-ninh-orochi/private-eth-getbalance-work -w
+  nightly`. `workflow_dispatch` is not gated and works on either repo. This
+  was the owner's choice, **not a billing fix**: upstream is public on
+  `ubuntu-latest`, and GitHub does not meter standard runners on public repos,
+  so neither placement costs minutes. One trap: GitHub disables a public
+  repo's scheduled workflows after 60 days without repo activity. A quiet fork
+  therefore loses its nightly without any error; check with `gh workflow list
+  -R bao-ninh-orochi/private-eth-getbalance-work` and re-enable with `gh
+  workflow enable nightly -R bao-ninh-orochi/private-eth-getbalance-work`.
 
 ## Git conventions
 

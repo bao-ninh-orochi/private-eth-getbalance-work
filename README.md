@@ -71,7 +71,8 @@ categories) and the live test `cargo test -p risepir-feed --release --
 --ignored` (trace-derived balances vs an independent provider on a real
 finalized block). CI enforces clippy + tests on every push, conformance on
 PRs, and runs the live gate plus coverage-guided fuzzing of every
-attacker-facing decoder ([`fuzz/`](fuzz/)) nightly.
+attacker-facing decoder ([`fuzz/`](fuzz/)) nightly, scheduled on the
+maintainer's fork rather than on this repo (ADR-0051).
 
 | crate | role |
 |---|---|

@@ -11,7 +11,8 @@
 #                                      violation)
 #   cargo-deny                       — advisories / licenses / sources
 # The live feed gate and fuzzing are nightly (nightly.yml): they need the
-# network / long wall-clock and must never flake a merge.
+# network / long wall-clock and must never flake a merge. That schedule fires
+# on the maintainer's fork, not on this repo (ADR-0051).
 #
 # `cargo fmt --check` runs in the `clippy + tests` job, first, since 2026-07-31.
 # It was deliberately absent until then (ADR-0021: the tree predated

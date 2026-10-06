@@ -1142,7 +1142,9 @@ plus DNSSEC and CAA that a free subdomain could not carry. See threat model
     headers to `POST /answer` — both data-independent by construction
     (ADR-0039's timing-side-channel analysis: the matvec folds over the
     whole segment regardless of query content), so exposing them adds no
-    new side channel.
+    new side channel. The browser page shows `x-risepir-answer-compute-ns`
+    as "Server compute" in its wire panel when present, and the public demo
+    has run with the flag since 2026-10-06 (ADR-0039 §2 amendment).
   - `risepir-rpc time-setup --state <file> [--out <json-path>]`: loads a
     state file exactly like `mainnet --state` does, times a full PIR setup
     recompute over it (`setup_seconds`, the C13 number), and — the

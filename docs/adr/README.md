@@ -3789,6 +3789,12 @@ server timing a standing public default; a flag defaulting off keeps the
 public deployment's normal response shape unchanged and turns the headers
 on only for a campaign's duration.
 
+**Amended 2026-10-06.** The owner turned the flag on permanently for the
+public demo, so the page can show the server's compute time next to the
+browser's round trip. The argument above is unchanged: compute time is
+content-independent, and the client already observes the whole round
+trip. The flag still defaults off in the binary.
+
 **Rejected:** a separate timing ping alongside each `/answer` call to ask
 the server how long the real call took — it would travel its own path
 (its own TCP round trip, or, even with keep-alive, its own framing with

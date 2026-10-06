@@ -325,7 +325,7 @@ summary::-webkit-details-marker { display: none; }
 .stat-cell:first-child { border-left: none; }
 .stat-cell .v { font: 500 36px/44px var(--font-mono); color: var(--ink); display: block; white-space: nowrap; }
 .stat-cell .l { font: var(--t-small); color: var(--ink-70); margin-top: var(--s-2); display: block; }
-.stat-caption { padding: var(--s-4) 0 0 var(--s-5); font: var(--t-small); color: var(--ink-50); white-space: nowrap; }
+.stat-caption { grid-column: 1 / -1; max-width: 72ch; padding: var(--s-4) 0 0 var(--s-5); font: var(--t-small); color: var(--ink-50); }
 
 /* ---------------------------------------------------------------- section numbering ---- */
 .section-num {

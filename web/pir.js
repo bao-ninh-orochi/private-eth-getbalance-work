@@ -517,10 +517,10 @@ export class PirSession {
     return new Uint8Array(await resp.arrayBuffer());
   }
 
-  async #post(path, body) {
+  async #post(path, body, { onResponse } = {}) {
     const watch = stallWatchdog(this.stallTimeoutMs);
     try {
-      return await this.#postWatched(path, body, watch);
+      return await this.#postWatched(path, body, watch, { onResponse });
     } catch (e) {
       throw watch.fired ? new TimeoutError(`POST ${path}: no response for ${this.stallTimeoutMs / 1000}s`) : e;
     } finally {
@@ -528,7 +528,7 @@ export class PirSession {
     }
   }
 
-  async #postWatched(path, body, watch) {
+  async #postWatched(path, body, watch, { onResponse } = {}) {
     const resp = await this.#fetch(`${this.#base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
@@ -547,6 +547,9 @@ export class PirSession {
     if (!resp.ok) {
       throw new PirError(`POST ${path}: ${resp.status} ${await resp.text()}`);
     }
+    // Same contract as `#getWatched`: only after the status checks, so a
+    // header is read only from a response whose meaning is defined.
+    if (onResponse) onResponse(resp);
     return new Uint8Array(await resp.arrayBuffer());
   }
 
@@ -991,10 +994,16 @@ export class PirSession {
 
   /// One private balance lookup.
   ///
-  /// Returns `{ status, balanceWei, atBlock }`. The caller must branch on
-  /// `status`: UNTRACKED and DECODE_FAILED are *errors*, not zero — the
-  /// module returns them as distinct codes precisely so a UI cannot
-  /// collapse them into "0 ETH" by accident.
+  /// Returns `{ status, balanceWei, atBlock, serverComputeNs }`. The caller
+  /// must branch on `status`: UNTRACKED and DECODE_FAILED are *errors*, not
+  /// zero — the module returns them as distinct codes precisely so a UI
+  /// cannot collapse them into "0 ETH" by accident.
+  ///
+  /// `serverComputeNs` is the server's own PIR answer time in nanoseconds,
+  /// from `/answer`'s `x-risepir-answer-compute-ns` header (ADR-0039 §2).
+  /// It is `null` when the server does not send the header
+  /// (`--answer-timing-header` is off by default) or sends anything but
+  /// 1–15 decimal digits; it is display-only and never feeds the protocol.
   async getBalance(address) {
     const addr = parseAddress(address);
     const e = this.exports;
@@ -1009,7 +1018,13 @@ export class PirSession {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    const response = await this.#post(`/answer?epoch=${this.epoch}`, query);
+    let serverComputeNs = null;
+    const response = await this.#post(`/answer?epoch=${this.epoch}`, query, {
+      onResponse: (resp) => {
+        const h = resp.headers.get("x-risepir-answer-compute-ns");
+        if (h !== null && /^\d{1,15}$/.test(h)) serverComputeNs = Number(h);
+      },
+    });
     this.traffic.responseBytes = response.length;
     const atBlock = e.risepir_answer(this.#writeIn(response));
     if (atBlock < 0n) throw new PirError(this.#lastError());
@@ -1037,7 +1052,7 @@ export class PirSession {
     } else if (status === STATUS.ZERO) {
       balanceWei = 0n;
     }
-    return { status, balanceWei, atBlock };
+    return { status, balanceWei, atBlock, serverComputeNs };
   }
 }
 

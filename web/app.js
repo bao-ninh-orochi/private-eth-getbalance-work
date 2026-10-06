@@ -724,7 +724,7 @@ async function lookup(event) {
   }
 
   showResult(nodes);
-  updateWirePanel(elapsed, result.atBlock);
+  updateWirePanel(elapsed, result.atBlock, result.serverComputeNs);
   renderBlockStrip();
   refreshState();
 }
@@ -807,7 +807,7 @@ function renderBlockStrip() {
 
 // ── the "what the server saw" panel ─────────────────────────────────
 
-function updateWirePanel(elapsedMs, atBlock) {
+function updateWirePanel(elapsedMs, atBlock, serverComputeNs = null) {
   // Presentation only: after the first completed lookup the panel stops
   // describing what it *will* show and starts reporting what it *did*.
   $("wire-heading").textContent = "What the server saw";
@@ -843,6 +843,16 @@ function updateWirePanel(elapsedMs, atBlock) {
     ),
     row("Round trip", `${elapsedMs.toFixed(0)} ms`),
   );
+  // Only when the server sent `x-risepir-answer-compute-ns` (ADR-0039 §2);
+  // otherwise the panel is exactly what it was, with no placeholder.
+  if (serverComputeNs !== null) {
+    rows.append(
+      row(
+        "Server compute",
+        `${(serverComputeNs / 1e6).toFixed(0)} ms — the rest of the round trip is the network and this browser`,
+      ),
+    );
+  }
   $("wire").classList.remove("hidden");
 }
 

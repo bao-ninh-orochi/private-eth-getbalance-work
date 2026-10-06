@@ -7,6 +7,12 @@
 //     ./target/release/risepir-rpc mock --web web &
 //     node web/test/e2e.mjs http://127.0.0.1:8645
 //
+// Add `--answer-timing-header` to the server and set EXPECT_TIMING_HEADER=1
+// to require that /answer's `x-risepir-answer-compute-ns` reaches the client
+// as `serverComputeNs`; EXPECT_TIMING_HEADER=0 (server without the flag)
+// requires it to be null. Unset, either is accepted (the header is off by
+// default).
+//
 // The Rust-side tests in crates/risepir-wasm/tests/abi.rs already pin the
 // protocol invariants natively. What only this can check is the part that
 // is specific to actually being in a wasm host:
@@ -292,6 +298,31 @@ check(
   session.traffic.queryBytes > 1000,
   `${session.traffic.queryBytes} bytes of LWE ciphertext`,
 );
+// ADR-0039 §2: /answer's compute-time header, surfaced for the page's wire
+// panel. It is untrusted input, so it is either null or a positive safe
+// integer — never NaN, a string, or a negative. Opt-in strictness: against
+// a server started with --answer-timing-header it must be present.
+check(
+  "serverComputeNs is null or a positive safe integer",
+  result.serverComputeNs === null ||
+    (Number.isSafeInteger(result.serverComputeNs) && result.serverComputeNs > 0),
+  `serverComputeNs=${result.serverComputeNs}`,
+);
+if (process.env.EXPECT_TIMING_HEADER === "1") {
+  check(
+    "EXPECT_TIMING_HEADER=1: the server sent the header, so serverComputeNs is a positive safe integer",
+    Number.isSafeInteger(result.serverComputeNs) && result.serverComputeNs > 0,
+    `serverComputeNs=${result.serverComputeNs}`,
+  );
+} else if (process.env.EXPECT_TIMING_HEADER === "0") {
+  check(
+    "EXPECT_TIMING_HEADER=0: no header was sent, so serverComputeNs is null",
+    result.serverComputeNs === null,
+    `serverComputeNs=${result.serverComputeNs}`,
+  );
+} else {
+  console.log(`        serverComputeNs=${result.serverComputeNs}`);
+}
 console.log(
   `        ${target} = ${result.balanceWei} wei (${formatEth(result.balanceWei ?? 0n)} ETH) ` +
     `at block ${result.atBlock}`,
